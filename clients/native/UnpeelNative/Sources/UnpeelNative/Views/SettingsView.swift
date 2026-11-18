@@ -178,7 +178,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 struct SettingsSidebarPanel: View {
     @ObservedObject var store: UnpeelStore
 
-    private static let feedbackURL = URL(string: "https://github.com/orgs/unpeel-com/discussions")!
 
     var body: some View {
         VStack(spacing: 0) {
@@ -243,29 +242,6 @@ struct SettingsSidebarPanel: View {
             .scrollIndicators(.hidden)
             .mask(SidebarListFadeMask())
 
-            // Pinned at the bottom: opens GitHub Discussions (same as the
-            // website footer's "Bugs & Feedback" link and the iOS sidebar).
-            // Borderless like the main sidebar footer — the list's bottom
-            // fade provides the separation.
-            Link(destination: Self.feedbackURL) {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.bubble")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Feedback & bugs")
-                        .font(.system(size: 12.5, weight: .medium))
-                    Spacer(minLength: 4)
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .opacity(0.6)
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(EdgeInsets(top: 0, leading: 8, bottom: 12, trailing: 8))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .top) {
@@ -593,11 +569,8 @@ private struct HostAdvancedSettingsPanel: View {
                     } header: {
                         SettingsSectionHeader(
                             title: "Cleanup",
-                            description: "Idle sessions on \(scopeName) get the "
-                                + "same treatment as Stop: the row stays, ready "
-                                + "to Resume. Each project keeps its newest "
-                                + "stopped sessions up to the limit; older ones "
-                                + "are removed (pinned and unread ones are kept)."
+                            description: "Idle sessions on \(scopeName) stop like Stop does and can be resumed. "
+                                + "Each project keeps only its newest stopped sessions (pinned and unread always stay)."
                         )
                     }
                 } else {
@@ -4476,50 +4449,34 @@ struct AdvancedSettingsPanel: View {
 
     private var cleanupSection: some View {
         Section {
-            LabeledContent {
-                Picker(
-                    "Auto-stop inactive terminals",
-                    selection: Binding(
-                        get: { store.autoStopMinutes },
-                        set: { store.setAutoStopMinutes($0) }
-                    )
-                ) {
-                    ForEach(UnpeelStore.autoStopMinuteOptions, id: \.self) { minutes in
-                        Text(UnpeelStore.autoStopLabel(for: minutes)).tag(minutes)
-                    }
+            Picker(
+                "Auto-stop inactive terminals",
+                selection: Binding(
+                    get: { store.autoStopMinutes },
+                    set: { store.setAutoStopMinutes($0) }
+                )
+            ) {
+                ForEach(UnpeelStore.autoStopMinuteOptions, id: \.self) { minutes in
+                    Text(UnpeelStore.autoStopLabel(for: minutes)).tag(minutes)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 150)
-            } label: {
-                Text("Auto-stop inactive terminals")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.foreground)
             }
-            LabeledContent {
-                Picker(
-                    "Stopped sessions to keep",
-                    selection: Binding(
-                        get: { store.sidebarVisibleSessionLimit },
-                        set: { store.setSidebarStoppedLimit($0) }
-                    )
-                ) {
-                    ForEach(UnpeelStore.sidebarStoppedLimitOptions, id: \.self) { limit in
-                        Text(UnpeelStore.sidebarStoppedLimitLabel(for: limit)).tag(limit)
-                    }
+            .pickerStyle(.menu)
+            Picker(
+                "Stopped sessions to keep",
+                selection: Binding(
+                    get: { store.sidebarVisibleSessionLimit },
+                    set: { store.setSidebarStoppedLimit($0) }
+                )
+            ) {
+                ForEach(UnpeelStore.sidebarStoppedLimitOptions, id: \.self) { limit in
+                    Text(UnpeelStore.sidebarStoppedLimitLabel(for: limit)).tag(limit)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 150)
-            } label: {
-                Text("Stopped sessions to keep")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.foreground)
             }
+            .pickerStyle(.menu)
         } header: {
             SettingsSectionHeader(
                 title: "Cleanup",
-                description: "Sessions that have stayed idle for the selected time are stopped — the same as clicking \"Stop\": the terminal stops and the row stays in the sidebar, where Resume continues the conversation. Sessions that keep working (including loops — any activity resets the clock), or that are pinned, selected, unread, or waiting for input, are left alone; plain shell terminals are never touched. Each project keeps its newest stopped sessions up to the limit; older ones are removed automatically, except pinned and unread ones. The agent's own history (for example claude --resume) still has those conversations."
+                description: "Idle sessions stop like Stop does and can be resumed. Each project keeps only its newest stopped sessions (pinned and unread always stay)."
             )
         }
     }
