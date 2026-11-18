@@ -123,6 +123,8 @@ struct FileTreePaneView: View {
     let projectID: String
     /// nil = the project's primary folder.
     let folderPath: String?
+    /// Bumped by the pane header's More ▸ Refresh.
+    var refreshCount = 0
     let onChooseFolder: (String?) -> Void
 
     @State private var expanded: Set<String> = []
@@ -166,6 +168,7 @@ struct FileTreePaneView: View {
             resolveBranches()
         }
         .onChange(of: folders.map(\.path)) { _ in resolveBranches() }
+        .onChange(of: refreshCount) { _ in reload() }
         .onChange(of: rootPath) { newRoot in
             expanded = []
             childrenByPath = [:]
@@ -206,23 +209,6 @@ struct FileTreePaneView: View {
                 folderLabel(showsChevron: false)
             }
             Spacer(minLength: 4)
-            Menu {
-                Button {
-                    reload()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.mutedForeground)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("More")
         }
         .padding(.horizontal, 8)
         .frame(height: 30)

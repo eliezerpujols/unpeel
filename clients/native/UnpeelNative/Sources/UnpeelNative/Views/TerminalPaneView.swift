@@ -717,6 +717,8 @@ struct TerminalPaneContainer: View {
     /// active pane and the hovered pane, so a multi-pane split isn't cluttered
     /// with a split affordance on every card.
     @State private var hoveredPaneID: String?
+    /// Files pane id → refresh count; the header's More ▸ Refresh bumps it.
+    @State private var filesRefreshCounts: [String: Int] = [:]
 
     /// Gap between pane cards — the frame-material backdrop shows through,
     /// so every pane reads as its own floating surface. The divider strip IS
@@ -1370,6 +1372,7 @@ struct TerminalPaneContainer: View {
                     store: store,
                     projectID: projectID,
                     folderPath: folderPath,
+                    refreshCount: filesRefreshCounts[pane.paneID] ?? 0,
                     onChooseFolder: { path in
                         store.setFilesPaneFolder(paneID: pane.paneID, folderPath: path)
                     }
@@ -1915,6 +1918,12 @@ struct TerminalPaneContainer: View {
             }
             menu.addItem(controller.item("Manage Plugins…") {
                 store.openSettings(tab: .plugins)
+            })
+        }
+
+        if case .files = pane.content {
+            menu.addItem(controller.item("Refresh") {
+                filesRefreshCounts[pane.paneID, default: 0] += 1
             })
         }
 
