@@ -16,7 +16,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -206,8 +206,9 @@ pub struct OpenSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub in_this_project: bool,
+    /// Last activity (newest of the output journal and manifest writes).
     #[serde(skip)]
-    pub created_at: u64,
+    pub last_active: SystemTime,
 }
 
 fn title_for(manifest: &HostedSessionManifest) -> String {
@@ -269,13 +270,23 @@ fn open_sessions_at(
             home: workspace.home.to_string_lossy().into_owned(),
             agent: crate::session_host::active_runtime_id(&manifest).map(str::to_owned),
             in_this_project,
-            created_at: manifest.session.created_at,
+            last_active: last_active(&entry.path()),
         });
     }
     sessions
 }
 
-/// Every open Session across all local workspaces, newest first.
+/// When a Session last did something: output appends to `output.bin`;
+/// state changes rewrite `manifest.json`.
+fn last_active(dir: &Path) -> SystemTime {
+    ["output.bin", "manifest.json"]
+        .iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// Every open Session across all local workspaces, most recently active first.
 pub fn open_sessions(browser_home: Option<&Path>, browser_project: Option<&str>) -> Vec<OpenSession> {
     let mut all = Vec::new();
     for workspace in workspace_homes() {
@@ -283,11 +294,11 @@ pub fn open_sessions(browser_home: Option<&Path>, browser_project: Option<&str>)
         let root = if is_browser_home { browser_project } else { None };
         all.extend(open_sessions_at(&workspace, root));
     }
-    all.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    all.sort_by_key(|s| std::cmp::Reverse(s.last_active));
     all
 }
 
-/// Paste `text` into a running Session in `home` (no Enter).
+/// Paste `text` into a running Session in `home` and submit it.
 pub fn paste(home: &Path, session_id: &str, text: &str) -> Result<(), String> {
     if !valid_session_id(session_id) {
         return Err("invalid session".into());

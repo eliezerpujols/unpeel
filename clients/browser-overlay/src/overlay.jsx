@@ -108,10 +108,16 @@ function ensureStyle() {
   (document.head || document.documentElement).appendChild(style);
 }
 
+/** Agentation renders its toolbar inside <agentation-toolbar>'s shadow root. */
+function toolbarRoot() {
+  return document.querySelector("agentation-toolbar")?.shadowRoot || document;
+}
+
 /** Agentation's toolbar pill, to anchor the panel on. */
 function toolbarRect() {
-  const bar = document.querySelector('[data-feedback-toolbar] [class*="toolbarContainer"]')
-    || document.querySelector("[data-feedback-toolbar]");
+  const root = toolbarRoot();
+  const bar = root.querySelector('[class*="toolbarContainer"]')
+    || root.querySelector("[data-feedback-toolbar]");
   return bar ? { rect: bar.getBoundingClientRect(), bar } : null;
 }
 
@@ -122,6 +128,14 @@ function isLightToolbar(bar) {
 
 let openPanel = null;
 
+/** Agentation's own Settings toggle (not anything inside our panel). */
+function settingsButton() {
+  return [...toolbarRoot().querySelectorAll("button")].find(
+    (b) => !b.closest("[data-unpeel-send]")
+      && (b.getAttribute("aria-label") === "Settings" || b.title === "Settings")
+  ) || null;
+}
+
 /** Resolves with the chosen session, or rejects when dismissed. */
 function pickSession(sessions) {
   openPanel?.cancel();
@@ -131,7 +145,7 @@ function pickSession(sessions) {
     panel.setAttribute("data-unpeel-send", "");
     panel.setAttribute("data-feedback-toolbar", "");
     const head = el("div", "us-head");
-    head.append(el("span", "us-title", "Send to session"), el("span", "us-hint", "Sends right away"));
+    head.append(el("span", "us-title", "Send to session"));
     const searchBox = el("label", "us-search");
     const searchIcon = el("span");
     searchIcon.innerHTML = SEARCH_ICON;
@@ -161,8 +175,11 @@ function pickSession(sessions) {
 
     let visible = [];
     let active = 0;
-    const onOutside = (event) => { if (!panel.contains(event.target)) cancel(); };
+    // Clicks on the toolbar itself (e.g. Settings) also count as outside.
+    const onOutside = (event) => { if (!event.composedPath().includes(panel)) cancel(); };
+    let stopWatching = () => {};
     const close = () => {
+      stopWatching();
       panel.remove();
       document.removeEventListener("mousedown", onOutside, true);
       openPanel = null;
@@ -170,6 +187,16 @@ function pickSession(sessions) {
     const choose = (session) => { close(); resolve(session); };
     const cancel = () => { close(); reject(new Error("cancelled")); };
     openPanel = { cancel };
+
+    // One panel at a time: close Agentation's Settings now, and close this
+    // panel whenever Settings opens.
+    const settings = settingsButton();
+    if (settings?.getAttribute("aria-expanded") === "true") settings.click();
+    const watcher = settings && new MutationObserver(() => {
+      if (settings.getAttribute("aria-expanded") === "true") cancel();
+    });
+    watcher?.observe(settings, { attributes: true, attributeFilter: ["aria-expanded"] });
+    stopWatching = () => watcher?.disconnect();
 
     function row(session, index) {
       const node = el("div", "us-row" + (index === active ? " active" : ""));
@@ -233,23 +260,63 @@ function pickSession(sessions) {
   });
 }
 
-async function sendToSession(output) {
+// MARK: - Agentation sync
+//
+// When the Agentation MCP server runs on this Mac, the toolbar syncs its
+// comments there; an agent that resolves one (agentation_resolve) makes it
+// disappear from the page, the same as Agentation's own MCP flow.
+
+const AGENTATION_ENDPOINT = "http://localhost:4747";
+let agentationSessionId = null;
+
+async function agentationServerUp() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 800);
+  try {
+    const response = await nativeFetch(`${AGENTATION_ENDPOINT}/health`, { signal: controller.signal });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolveInstructions(annotations, synced) {
+  if (!synced) return "";
+  const ids = (annotations || []).map((a) => a.id).filter(Boolean);
+  const sessionId = annotations?.find((a) => a.sessionId)?.sessionId || agentationSessionId;
+  if (!ids.length) return "";
+  return "\n\n---\nThese comments are synced to Agentation"
+    + (sessionId ? ` (session ${sessionId})` : "")
+    + ". As you finish each one, mark it done with the Agentation MCP tool "
+    + "`agentation_resolve` so it disappears from the page. Annotation ids: "
+    + ids.join(", ") + ".";
+}
+
+async function sendToSession(output, annotations, synced) {
   if (!bridge) throw new Error("Unpeel bridge unavailable");
   const { sessions = [] } = await bridgeCall("/sessions", { projectId: bridge.projectId });
   const session = await pickSession(sessions);
-  await bridgeCall("/send", { sessionId: session.id, home: session.home, text: output });
+  const text = output + resolveInstructions(annotations, synced);
+  await bridgeCall("/send", { sessionId: session.id, home: session.home, text });
 }
 
 // MARK: - Mount (top-level documents only, once)
 
-function mount() {
+async function mount() {
   if (window.top !== window || window.__unpeelAgentationMounted) return;
   window.__unpeelAgentationMounted = true;
+  const synced = await agentationServerUp();
   const container = document.createElement("div");
   container.setAttribute("data-unpeel-agentation", "");
   document.documentElement.appendChild(container);
   createRoot(container).render(
-    <Agentation onSubmit={(output) => sendToSession(output)} />
+    <Agentation
+      endpoint={synced ? AGENTATION_ENDPOINT : undefined}
+      onSessionCreated={(id) => { agentationSessionId = id; }}
+      onSubmit={(output, annotations) => sendToSession(output, annotations, synced)}
+    />
   );
 }
 
