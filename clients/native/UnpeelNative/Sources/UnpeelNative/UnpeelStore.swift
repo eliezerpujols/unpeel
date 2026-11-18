@@ -14948,7 +14948,9 @@ final class UnpeelStore: ObservableObject {
     private static let titlebarBranchCacheTTL: TimeInterval = 5
 
     func refreshTitlebarBranch() {
-        guard let project = titlebarProject else {
+        // A multi-folder project has no single branch: each folder's branch
+        // shows beside its name in the Files pane instead.
+        guard let project = titlebarProject, !project.hasMultipleFolders else {
             titlebarBranchPath = nil
             titlebarBranchState.update(name: nil, isWorktree: false)
             return

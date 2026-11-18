@@ -130,6 +130,9 @@ struct FileTreePaneView: View {
     @State private var unreadable: Set<String> = []
     @State private var selectedPath: String?
     @State private var hoveredPath: String?
+    /// Folder path → current git branch (multi-folder projects only; nil
+    /// entry = resolved, not a git checkout / detached).
+    @State private var branchesByFolder: [String: String?] = [:]
 
     private var folders: [ProjectFolder] {
         store.effectiveProjectFolders(projectID)
@@ -158,7 +161,11 @@ struct FileTreePaneView: View {
                 placeholder("This project has no folder")
             }
         }
-        .onAppear { if let rootPath { load(rootPath) } }
+        .onAppear {
+            if let rootPath { load(rootPath) }
+            resolveBranches()
+        }
+        .onChange(of: folders.map(\.path)) { _ in resolveBranches() }
         .onChange(of: rootPath) { newRoot in
             expanded = []
             childrenByPath = [:]
@@ -183,6 +190,9 @@ struct FileTreePaneView: View {
                             } else {
                                 Text(menuTitle(folder, index: index))
                             }
+                            if let branch = branch(of: folder) {
+                                Text(branch)
+                            }
                         }
                     }
                 } label: {
@@ -196,17 +206,23 @@ struct FileTreePaneView: View {
                 folderLabel(showsChevron: false)
             }
             Spacer(minLength: 4)
-            Button {
-                reload()
+            Menu {
+                Button {
+                    reload()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
             } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.mutedForeground)
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help("Refresh")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
         }
         .padding(.horizontal, 8)
         .frame(height: 30)
@@ -214,6 +230,13 @@ struct FileTreePaneView: View {
 
     private func menuTitle(_ folder: ProjectFolder, index: Int) -> String {
         index == 0 ? "\(folder.displayName) (primary)" : folder.displayName
+    }
+
+    /// A folder's branch, shown only for multi-folder projects (a single
+    /// folder's branch is already in the titlebar).
+    private func branch(of folder: ProjectFolder) -> String? {
+        guard folders.count > 1 else { return nil }
+        return branchesByFolder[folder.path] ?? nil
     }
 
     private func folderLabel(showsChevron: Bool) -> some View {
@@ -225,6 +248,18 @@ struct FileTreePaneView: View {
                 .foregroundStyle(Theme.foreground)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            // Same compact suffix as the titlebar branch.
+            if let currentFolder, let branch = branch(of: currentFolder) {
+                HStack(spacing: 3) {
+                    ChromeIconView(icon: .gitBranch, size: 11)
+                    Text(branch)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundStyle(Theme.mutedForeground)
+                .opacity(0.55)
+            }
             if showsChevron {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
@@ -363,8 +398,28 @@ struct FileTreePaneView: View {
         }
     }
 
+    /// Each folder's current branch, read off the main thread (git runs
+    /// once per folder per appear / refresh / folder-list change).
+    private func resolveBranches() {
+        let paths = folders.map(\.path)
+        guard paths.count > 1 else {
+            branchesByFolder = [:]
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var resolved: [String: String?] = [:]
+            for path in paths {
+                resolved[path] = UnpeelStore.isGitRepo(path: path)
+                    ? WorktreeGit.currentBranch(repoPath: path)
+                    : nil
+            }
+            DispatchQueue.main.async { branchesByFolder = resolved }
+        }
+    }
+
     /// Re-read the root and every open folder; folders that vanished close.
     private func reload() {
+        resolveBranches()
         guard let rootPath else { return }
         childrenByPath = [:]
         load(rootPath)
