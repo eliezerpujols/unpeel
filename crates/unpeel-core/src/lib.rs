@@ -27,6 +27,8 @@ pub mod app_state;
 #[cfg(feature = "native-host")]
 pub mod apps_mcp;
 #[cfg(feature = "native-host")]
+pub mod browser_bridge;
+#[cfg(feature = "native-host")]
 pub mod browser_engine;
 #[cfg(feature = "native-host")]
 pub mod browser_mcp;

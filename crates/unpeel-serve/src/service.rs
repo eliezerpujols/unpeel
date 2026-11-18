@@ -490,6 +490,13 @@ pub fn run_service(mut report: impl FnMut(ServiceEvent)) -> Result<(), String> {
     }
     let real_home = unpeel_core::app_paths::real_unpeel_home();
     let lease = ServiceLease::acquire(&real_home)?;
+    // The Agentation overlay in project browsers reaches every workspace's
+    // open Sessions through this one loopback endpoint.
+    if let Err(error) = crate::browser_bridge_listener::spawn(|| {
+        SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+    }) {
+        report(ServiceEvent::Warning(error));
+    }
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not resolve Host executable: {error}"))?;
     let started_at_unix_ms = now_ms();

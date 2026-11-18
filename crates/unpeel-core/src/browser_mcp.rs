@@ -971,6 +971,11 @@ fn project_owner_command(
     if let Some(theme) = &options.theme {
         command.env("AGENT_BROWSER_COLOR_SCHEME", theme);
     }
+    // Agentation on every page of the project browser (Send to session).
+    if let Some(script) = crate::browser_bridge::write_init_script(&scope.state_dir, &scope.root_id) {
+        command.env("AGENT_BROWSER_INIT_SCRIPTS", script);
+        command.env("AGENT_BROWSER_ARGS", crate::browser_bridge::CHROME_ARGS);
+    }
     command
 }
 
@@ -1590,6 +1595,25 @@ fn exec_engine_with(
     // in; "system" leaves the engine default.
     if let Some(theme) = &options.theme {
         command.env("AGENT_BROWSER_COLOR_SCHEME", theme);
+    }
+    // Agentation overlay: every daemon registers it for the tab it drives
+    // (init scripts are per CDP session), local Chrome only — a remote
+    // provider's browser can't reach this Mac's loopback bridge.
+    if !matches!(cdp_binding, Some(CdpBinding::Remote(_))) {
+        let scope = cdp_binding.as_ref().and_then(CdpBinding::project_scope);
+        let script_dir = scope
+            .map(|scope| scope.state_dir.clone())
+            .unwrap_or_else(|| browser_artifacts_dir(session_id));
+        let project_id = scope
+            .map(|scope| scope.root_id.clone())
+            .or_else(|| session_host::load_manifest(session_id).map(|m| m.session.project_id))
+            .unwrap_or_default();
+        if let Some(script) = crate::browser_bridge::write_init_script(&script_dir, &project_id) {
+            command.env("AGENT_BROWSER_INIT_SCRIPTS", script);
+            if cdp_binding.is_none() {
+                command.env("AGENT_BROWSER_ARGS", crate::browser_bridge::CHROME_ARGS);
+            }
+        }
     }
 
     run_engine_process(

@@ -18,6 +18,7 @@ mod activity_snapshot;
 mod app_context;
 pub mod approvals;
 pub mod auto_stop;
+pub mod browser_bridge_listener;
 pub mod computer;
 pub mod control;
 pub mod direct_path;
