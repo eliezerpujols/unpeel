@@ -1338,6 +1338,10 @@ final class NativeRemoteBackend: @unchecked Sendable {
         let colorID: String?
         let dateSorted: Bool?
         let pinned: Bool?
+        /// `project.folders` fields. Optional, so nil keys are omitted and
+        /// an older bridge never sees them.
+        let folders: [RemoteProjectFolder]?
+        let agentFolderAccess: Bool?
     }
 
     func setProjectOrganization(
@@ -1353,7 +1357,9 @@ final class NativeRemoteBackend: @unchecked Sendable {
                 displayName: patch.displayName,
                 colorID: patch.colorID,
                 dateSorted: patch.dateSorted,
-                pinned: patch.pinned
+                pinned: patch.pinned,
+                folders: patch.folders,
+                agentFolderAccess: patch.agentFolderAccess
             ))
         } catch {
             throw NativeRemoteBackendError(

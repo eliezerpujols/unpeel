@@ -12069,29 +12069,9 @@ final class UnpeelStore: ObservableObject {
         case .setAgentAccess(let enabled):
             setProjectFolders(root, agentFolderAccess: enabled)
         case .add:
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.allowsMultipleSelection = true
-            panel.title = "Add folders to project"
-            panel.prompt = "Add"
-            panel.begin { [weak self] response in
-                guard response == .OK else { return }
-                let added = panel.urls.map { ProjectFolder(path: $0.path) }
-                Task { @MainActor in
-                    guard let self else { return }
-                    let current = self.effectiveProjectFolders(root)
-                    // A project growing from one folder to several turns on
-                    // agent access, same default as the New Project dialog —
-                    // otherwise agents silently see only the primary folder.
-                    let becomesMulti = current.count < 2 && current.count + added.count >= 2
-                    self.setProjectFolders(
-                        root,
-                        folders: current + added,
-                        agentFolderAccess: becomesMulti ? true : nil
-                    )
-                }
-            }
+            // Same dialog as New Project, prefilled: name, folders, the
+            // agent-access toggle; "Add Folders…" lives inside it.
+            presentEditProjectFolders(root)
         case .rename(let path):
             guard let folder = folders.first(where: { $0.path == path }) else { return }
             renamingProjectFolder = ProjectFolderRenameTarget(
