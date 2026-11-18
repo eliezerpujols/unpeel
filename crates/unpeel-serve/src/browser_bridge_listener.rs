@@ -17,7 +17,9 @@ const MAX_BODY: usize = browser_bridge::MAX_TEXT_BYTES + 16 * 1024;
 /// publish `bridge.json`, and serve until `should_stop` returns true.
 pub fn spawn(should_stop: fn() -> bool) -> Result<u16, String> {
     let saved = browser_bridge::read_config();
-    let preferred = saved.as_ref().map_or(browser_bridge::PREFERRED_PORT, |c| c.port);
+    let preferred = saved
+        .as_ref()
+        .map_or(browser_bridge::PREFERRED_PORT, |c| c.port);
     let listener = TcpListener::bind(("127.0.0.1", preferred))
         .or_else(|_| TcpListener::bind(("127.0.0.1", browser_bridge::PREFERRED_PORT)))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
@@ -135,6 +137,10 @@ fn handle_connection(mut stream: TcpStream, config: &BridgeConfig) {
         }
     }
     body.truncate(content_length);
-    let (status, json) = browser_bridge::handle(&path, &body, config);
+    let (status, json) = browser_bridge::handle(&path, &body, config, || {
+        crate::overlay::load()
+            .map(|o| o.project_colors)
+            .unwrap_or_default()
+    });
     respond(&mut stream, status, &json.to_string());
 }

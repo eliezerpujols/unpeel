@@ -13,6 +13,7 @@
 //! - A send is a user action from the browser: it is pasted (bracketed
 //!   paste, never Enter), the same as the user pasting into that terminal.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -39,7 +40,9 @@ pub struct BridgeConfig {
 }
 
 pub fn config_path() -> PathBuf {
-    app_paths::real_unpeel_home().join("browser").join("bridge.json")
+    app_paths::real_unpeel_home()
+        .join("browser")
+        .join("bridge.json")
 }
 
 pub fn read_config() -> Option<BridgeConfig> {
@@ -100,7 +103,10 @@ pub fn workspace_homes() -> Vec<WorkspaceHome> {
         home: real.clone(),
     }];
     for record in app_paths::read_workspace_registry(&real) {
-        if homes.iter().any(|known| same_path(&known.home, &record.home)) {
+        if homes
+            .iter()
+            .any(|known| same_path(&known.home, &record.home))
+        {
             continue;
         }
         homes.push(WorkspaceHome {
@@ -148,6 +154,8 @@ struct ProjectInfo {
     id: String,
     name: String,
     parent: Option<String>,
+    /// Folder color id (`sky`, `teal`, …) from `project_colors`.
+    color: Option<String>,
 }
 
 fn projects_at(home: &Path) -> Vec<ProjectInfo> {
@@ -157,6 +165,7 @@ fn projects_at(home: &Path) -> Vec<ProjectInfo> {
     let Ok(state) = serde_json::from_str::<Value>(&text) else {
         return Vec::new();
     };
+    let colors = state.get("project_colors").and_then(Value::as_object);
     state
         .get("projects")
         .and_then(Value::as_array)
@@ -166,11 +175,20 @@ fn projects_at(home: &Path) -> Vec<ProjectInfo> {
                 .filter_map(|p| {
                     Some(ProjectInfo {
                         id: p.get("id")?.as_str()?.to_owned(),
-                        name: p.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        name: p
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
                         parent: p
                             .get("parent_project_id")
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                        color: p
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| colors?.get(id)?.as_str())
                             .map(str::to_owned),
                     })
                 })
@@ -205,6 +223,9 @@ pub struct OpenSession {
     pub home: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The project's folder color id (its own, else its root's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     pub in_this_project: bool,
     /// Last activity (newest of the output journal and manifest writes).
     #[serde(skip)]
@@ -218,7 +239,11 @@ fn title_for(manifest: &HostedSessionManifest) -> String {
     }
     let command = manifest.session.command.trim();
     if !command.is_empty() {
-        return command.split_whitespace().next().unwrap_or(command).to_owned();
+        return command
+            .split_whitespace()
+            .next()
+            .unwrap_or(command)
+            .to_owned();
     }
     manifest.session.id.chars().take(8).collect()
 }
@@ -228,8 +253,15 @@ fn title_for(manifest: &HostedSessionManifest) -> String {
 fn open_sessions_at(
     workspace: &WorkspaceHome,
     browser_root: Option<&str>,
+    fallback_colors: &HashMap<String, String>,
 ) -> Vec<OpenSession> {
     let projects = projects_at(&workspace.home);
+    let color_of = |project: &ProjectInfo| {
+        project
+            .color
+            .clone()
+            .or_else(|| fallback_colors.get(&project.id).cloned())
+    };
     let Ok(entries) = std::fs::read_dir(workspace.home.join("app-sessions")) else {
         return Vec::new();
     };
@@ -241,8 +273,7 @@ fn open_sessions_at(
         let Ok(manifest) = serde_json::from_str::<HostedSessionManifest>(&text) else {
             continue;
         };
-        if manifest.state != HostedSessionState::Running
-            || !valid_session_id(&manifest.session.id)
+        if manifest.state != HostedSessionState::Running || !valid_session_id(&manifest.session.id)
         {
             continue;
         }
@@ -258,7 +289,12 @@ fn open_sessions_at(
             (Some(browser_root), Some(root)) => root.id == browser_root,
             _ => false,
         };
+        let own = projects
+            .iter()
+            .find(|p| p.id == manifest.session.project_id);
+        let color = own.and_then(color_of).or_else(|| root.and_then(color_of));
         sessions.push(OpenSession {
+            color,
             id: manifest.session.id.clone(),
             title: title_for(&manifest),
             project: projects
@@ -281,18 +317,41 @@ fn open_sessions_at(
 fn last_active(dir: &Path) -> SystemTime {
     ["output.bin", "manifest.json"]
         .iter()
-        .filter_map(|name| std::fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok())
+        .filter_map(|name| {
+            std::fs::metadata(dir.join(name))
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .max()
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Every open Session across all local workspaces, most recently active first.
-pub fn open_sessions(browser_home: Option<&Path>, browser_project: Option<&str>) -> Vec<OpenSession> {
+///
+/// `machine_colors` are the Mac app's folder colors for the machine home
+/// (they live in its UserDefaults, which the Host reads; scoped workspaces
+/// keep theirs in `app-state.json`).
+pub fn open_sessions(
+    browser_home: Option<&Path>,
+    browser_project: Option<&str>,
+    machine_colors: &HashMap<String, String>,
+) -> Vec<OpenSession> {
+    let machine_home = crate::app_paths::real_unpeel_home();
+    let none = HashMap::new();
     let mut all = Vec::new();
     for workspace in workspace_homes() {
         let is_browser_home = browser_home.is_some_and(|home| same_path(home, &workspace.home));
-        let root = if is_browser_home { browser_project } else { None };
-        all.extend(open_sessions_at(&workspace, root));
+        let root = if is_browser_home {
+            browser_project
+        } else {
+            None
+        };
+        let fallback = if same_path(&workspace.home, &machine_home) {
+            machine_colors
+        } else {
+            &none
+        };
+        all.extend(open_sessions_at(&workspace, root, fallback));
     }
     all.sort_by_key(|s| std::cmp::Reverse(s.last_active));
     all
@@ -321,16 +380,21 @@ pub fn paste(home: &Path, session_id: &str, text: &str) -> Result<(), String> {
     };
     std::thread::sleep(Duration::from_millis(settle));
     write_session(&socket, "\r")?;
-    std::thread::sleep(Duration::from_millis(session_input::ENTER_FOLLOWUP_DELAY_MS));
+    std::thread::sleep(Duration::from_millis(
+        session_input::ENTER_FOLLOWUP_DELAY_MS,
+    ));
     write_session(&socket, "\r")
 }
 
 /// One `Write` over a Session's control socket (path built for its own home).
 fn write_session(socket: &Path, data: &str) -> Result<(), String> {
-    let command = SessionHostCommand::Write { data: data.to_owned(), write_id: None };
+    let command = SessionHostCommand::Write {
+        data: data.to_owned(),
+        write_id: None,
+    };
     let line = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|_| "that session isn't running anymore".to_owned())?;
+    let mut stream =
+        UnixStream::connect(socket).map_err(|_| "that session isn't running anymore".to_owned())?;
     let timeout = Some(Duration::from_secs(3));
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
@@ -356,7 +420,12 @@ fn write_session(socket: &Path, data: &str) -> Result<(), String> {
 // MARK: - HTTP handlers (routing lives with the listener)
 
 /// Handle one bridge request body. Returns `(status, json)`.
-pub fn handle(path: &str, body: &[u8], config: &BridgeConfig) -> (u16, Value) {
+pub fn handle(
+    path: &str,
+    body: &[u8],
+    config: &BridgeConfig,
+    machine_colors: impl FnOnce() -> HashMap<String, String>,
+) -> (u16, Value) {
     let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let field = |key: &str| request.get(key).and_then(Value::as_str).unwrap_or("");
     if !token_matches(&config.token, field("token")) {
@@ -364,9 +433,11 @@ pub fn handle(path: &str, body: &[u8], config: &BridgeConfig) -> (u16, Value) {
     }
     match path {
         "/browser-bridge/sessions" => {
-            let home = Some(field("home")).filter(|h| !h.is_empty()).map(PathBuf::from);
+            let home = Some(field("home"))
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from);
             let project = Some(field("projectId")).filter(|p| !p.is_empty());
-            let sessions = open_sessions(home.as_deref(), project);
+            let sessions = open_sessions(home.as_deref(), project, &machine_colors());
             (200, json!({ "sessions": sessions }))
         }
         "/browser-bridge/send" => {
@@ -408,9 +479,7 @@ pub fn write_init_script(dir: &Path, project_id: &str) -> Option<PathBuf> {
         "projectName": root.map(|p| p.name.as_str()).unwrap_or(""),
         "home": home.to_string_lossy(),
     });
-    let script = format!(
-        "(function(){{const UNPEEL_BRIDGE={bridge};\n{OVERLAY_BUNDLE}\n}})();\n"
-    );
+    let script = format!("(function(){{const UNPEEL_BRIDGE={bridge};\n{OVERLAY_BUNDLE}\n}})();\n");
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join("agentation-init.js");
     let current = std::fs::read_to_string(&path).ok();
@@ -458,20 +527,41 @@ mod tests {
 
     #[test]
     fn unauthorized_requests_are_refused() {
-        let config = BridgeConfig { port: 1, token: "t".repeat(64) };
-        let (status, _) = handle("/browser-bridge/sessions", br#"{"token":"nope"}"#, &config);
+        let config = BridgeConfig {
+            port: 1,
+            token: "t".repeat(64),
+        };
+        let (status, _) = handle(
+            "/browser-bridge/sessions",
+            br#"{"token":"nope"}"#,
+            &config,
+            HashMap::new,
+        );
         assert_eq!(status, 401);
-        let (status, _) = handle("/browser-bridge/send", b"not json", &config);
+        let (status, _) = handle("/browser-bridge/send", b"not json", &config, HashMap::new);
         assert_eq!(status, 401);
     }
 
     #[test]
     fn root_project_walks_parents() {
         let projects = vec![
-            ProjectInfo { id: "root".into(), name: "App".into(), parent: None },
-            ProjectInfo { id: "child".into(), name: "wt".into(), parent: Some("root".into()) },
+            ProjectInfo {
+                id: "root".into(),
+                name: "App".into(),
+                parent: None,
+                color: None,
+            },
+            ProjectInfo {
+                id: "child".into(),
+                name: "wt".into(),
+                parent: Some("root".into()),
+                color: None,
+            },
         ];
-        assert_eq!(root_project(&projects, "child").map(|p| p.id.as_str()), Some("root"));
+        assert_eq!(
+            root_project(&projects, "child").map(|p| p.id.as_str()),
+            Some("root")
+        );
         assert!(root_project(&projects, "missing").is_none());
     }
 

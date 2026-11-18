@@ -58,7 +58,8 @@ const PICKER_CSS = `
 [data-unpeel-send] .us-search input { all: unset; flex: 1; min-width: 0; font: inherit;
   color: #fff; caret-color: #fff; }
 [data-unpeel-send] .us-search input::placeholder { color: rgba(255,255,255,.4); }
-[data-unpeel-send] .us-list { max-height: 300px; overflow-y: auto; padding: 0 6px; scrollbar-width: thin; }
+[data-unpeel-send] .us-list { max-height: 300px; overflow-y: auto; padding: 0 6px; scrollbar-width: none; }
+[data-unpeel-send] .us-list::-webkit-scrollbar { display: none; }
 [data-unpeel-send] .us-section { padding: 8px 10px 4px; font-size: 11px; font-weight: 500;
   color: rgba(255,255,255,.4); }
 [data-unpeel-send] .us-row { display: flex; align-items: center; gap: 9px; padding: 6px 10px;
@@ -70,6 +71,14 @@ const PICKER_CSS = `
 [data-unpeel-send] .us-icon svg { display: block; }
 [data-unpeel-send] .us-text { min-width: 0; flex: 1; }
 [data-unpeel-send] .us-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+[data-unpeel-send] .us-project { display: flex; align-items: center; gap: 5px; font-size: 11.5px;
+  font-weight: 600; color: rgba(255,255,255,.7); }
+[data-unpeel-send] .us-project span:last-child { min-width: 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+[data-unpeel-send] .us-dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: rgba(255,255,255,.35); }
+[data-unpeel-send].light .us-project { color: rgba(0,0,0,.6); }
+[data-unpeel-send].light .us-dot { background: rgba(0,0,0,.25); }
 [data-unpeel-send] .us-meta { font-size: 11.5px; color: rgba(255,255,255,.5); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 [data-unpeel-send] .us-empty { padding: 18px 16px; text-align: center; color: rgba(255,255,255,.5); }
@@ -127,6 +136,27 @@ function isLightToolbar(bar) {
 }
 
 let openPanel = null;
+
+// The Mac app's folder colors (Theme.swift ProjectFolderColor), light / dark.
+const FOLDER_COLORS = {
+  sky: ["#2095C9", "#7DD3FC"],
+  blue: ["#4F73E6", "#7EA6FF"],
+  violet: ["#7B5BDA", "#B79CFF"],
+  rose: ["#D75F8F", "#F79AC0"],
+  amber: ["#B87511", "#F8C86A"],
+  moss: ["#5F9A3D", "#9DD67A"],
+  teal: ["#159B91", "#64DCCB"],
+  graphite: ["#687083", "#B8BCC8"],
+};
+
+function projectLine(session, light) {
+  const line = el("div", "us-project");
+  const dot = el("span", "us-dot");
+  const color = FOLDER_COLORS[session.color];
+  if (color) dot.style.background = color[light ? 0 : 1];
+  line.append(dot, el("span", null, session.project || "No project"));
+  return line;
+}
 
 /** Agentation's own Settings toggle (not anything inside our panel). */
 function settingsButton() {
@@ -203,8 +233,8 @@ function pickSession(sessions) {
       node.appendChild(icon(AGENT_ICONS[session.agent] || TERMINAL_ICON));
       const text = el("div", "us-text");
       text.append(
-        el("div", "us-name", session.title),
-        el("div", "us-meta", [session.project, session.workspace].filter(Boolean).join(" · "))
+        projectLine(session, panel.classList.contains("light")),
+        el("div", "us-name", session.title)
       );
       node.appendChild(text);
       node.title = session.agent ? `${session.agent} — ${session.title}` : session.title;
