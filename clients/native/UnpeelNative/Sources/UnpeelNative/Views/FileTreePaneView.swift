@@ -227,7 +227,7 @@ struct FileTreePaneView: View {
 
     private func folderLabel(showsChevron: Bool) -> some View {
         HStack(spacing: 5) {
-            ProjectFolderIconView(icon: currentFolder?.parsedIcon, size: 10.5)
+            ProjectFolderIconView(icon: currentFolder?.parsedIcon, size: 9)
                 .foregroundStyle(Theme.mutedForeground)
             Text(currentFolder?.displayName ?? "")
                 .font(.system(size: 12, weight: .semibold))
