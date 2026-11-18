@@ -428,6 +428,22 @@ public struct RemoteProjectFolderSummary: Codable, Equatable, Identifiable, Send
     }
 }
 
+/// One folder of a multi-folder project (capability `project.folders`).
+/// The first entry is the primary folder and always equals the project's
+/// `path`. `icon` is `"emoji:<text>"` or `"glyph:<id>"`; unknown glyph ids
+/// fall back to the plain folder mark.
+public struct RemoteProjectFolder: Codable, Equatable, Hashable, Sendable {
+    public let path: String
+    public let name: String?
+    public let icon: String?
+
+    public init(path: String, name: String? = nil, icon: String? = nil) {
+        self.path = path
+        self.name = name
+        self.icon = icon
+    }
+}
+
 public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -459,6 +475,12 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
     /// when that list actually contains a child folder; older Hosts omit it
     /// and Controllers keep folders above sessions.
     public let sessionOrder: [String]?
+    /// Folders that make up the project (primary first). Absent for
+    /// single-folder projects and on Hosts before protocol minor 25.
+    public let folders: [RemoteProjectFolder]?
+    /// Agents launched in this project get every folder as a workspace dir
+    /// (runtime-owned flags at exec time). Absent = off.
+    public let agentFolderAccess: Bool?
 
     public init(
         id: String,
@@ -474,8 +496,11 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         mcpBlocked: Bool = false,
         sortOrder: Int? = nil,
         dateSorted: Bool? = nil,
-        sessionOrder: [String]? = nil
+        sessionOrder: [String]? = nil,
+        folders: [RemoteProjectFolder]? = nil,
+        agentFolderAccess: Bool? = nil
     ) {
+        self.agentFolderAccess = agentFolderAccess
         self.id = id
         self.name = name
         self.path = path
@@ -490,6 +515,7 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         self.sortOrder = sortOrder
         self.dateSorted = dateSorted
         self.sessionOrder = sessionOrder
+        self.folders = folders
     }
 
     public func replacingSessionOrder(_ sessionOrder: [String]?) -> RemoteProjectSummary {
@@ -507,7 +533,9 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
             mcpBlocked: mcpBlocked,
             sortOrder: sortOrder,
             dateSorted: dateSorted,
-            sessionOrder: sessionOrder
+            sessionOrder: sessionOrder,
+            folders: folders,
+            agentFolderAccess: agentFolderAccess
         )
     }
 }
@@ -1567,6 +1595,9 @@ public struct RemoteCreateSessionRequest: Codable, Equatable, Sendable {
     public let worktreeBranch: String?
     public let initialText: String?
     public let initialTextSubmitMode: RemoteTextSubmitMode
+    /// One of the project's folders to start in (`project.folders`). The
+    /// Host only accepts a folder already in its own catalog; nil = primary.
+    public let folderPath: String?
 
     public init(
         projectID: String,
@@ -1575,8 +1606,10 @@ public struct RemoteCreateSessionRequest: Codable, Equatable, Sendable {
         worktreePath: String? = nil,
         worktreeBranch: String? = nil,
         initialText: String? = nil,
-        initialTextSubmitMode: RemoteTextSubmitMode = .pasteAndSubmit
+        initialTextSubmitMode: RemoteTextSubmitMode = .pasteAndSubmit,
+        folderPath: String? = nil
     ) {
+        self.folderPath = folderPath
         self.projectID = projectID
         self.presetID = presetID
         self.command = command
@@ -2124,6 +2157,11 @@ public struct RemoteProjectOrganizationPatch: Codable, Equatable, Sendable {
     public let dateSorted: Bool?
     /// Pin/unpin a plain group above the parent's ordinary mixed rows.
     public let pinned: Bool?
+    /// Replace the project's folder list wholesale (`project.folders`);
+    /// primary first. An empty array clears it back to the single `path`.
+    public let folders: [RemoteProjectFolder]?
+    /// Turn the project's agent access to all its folders on/off.
+    public let agentFolderAccess: Bool?
 
     public init(
         projectID: String,
@@ -2132,8 +2170,12 @@ public struct RemoteProjectOrganizationPatch: Codable, Equatable, Sendable {
         displayName: String? = nil,
         colorID: String? = nil,
         dateSorted: Bool? = nil,
-        pinned: Bool? = nil
+        pinned: Bool? = nil,
+        folders: [RemoteProjectFolder]? = nil,
+        agentFolderAccess: Bool? = nil
     ) {
+        self.folders = folders
+        self.agentFolderAccess = agentFolderAccess
         self.projectID = projectID
         self.folderID = folderID
         self.sortOrder = sortOrder

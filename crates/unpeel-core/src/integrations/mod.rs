@@ -9,6 +9,47 @@ use crate::session_host::SessionHostLaunch;
 /// hosted child so Apps and scripts talk to the Host they run under.
 pub const HOST_BIN_ENV: &str = "UNPEEL_HOST_BIN";
 const APP_ACCENT_ENV: &str = "UNPEEL_APP_ACCENT";
+/// `project.folders`: newline-separated effective folders of the Session's
+/// project, primary first. Exported only when the project has two or more.
+pub const PROJECT_FOLDERS_ENV: &str = "UNPEEL_PROJECT_FOLDERS";
+/// `1` when this launch appended the runtime's workspace-dir flags
+/// ([`folder_access_exec_command`]); unset otherwise.
+pub const PROJECT_FOLDERS_ACCESS_ENV: &str = "UNPEEL_PROJECT_FOLDERS_ACCESS";
+
+/// The command to EXEC for a launch, restart, or resume when the project's
+/// `agent_folder_access` is on: `command` plus its runtime's workspace-dir
+/// flags for every effective folder except `cwd`. `None` (run the command as
+/// stored) unless all hold: the toggle is on, the project has two or more
+/// effective folders, the command is one simple command, and its runtime
+/// declares an `extra_dirs` adapter. The stored Session command never
+/// carries these flags, so turning the toggle off applies on the next launch
+/// and resume recipes never see them.
+pub fn folder_access_exec_command(
+    command: &str,
+    cwd: &str,
+    folders: &crate::state::ProjectFolderLaunch,
+) -> Option<String> {
+    if !folders.agent_folder_access || folders.folders.len() < 2 {
+        return None;
+    }
+    let command = command.trim();
+    if command.is_empty() || !shared::is_simple_command(command) {
+        return None;
+    }
+    let extra_dirs = integration_for_command(command)?.extra_dirs?;
+    let cwd = crate::state::normalize_project_folder_path(cwd);
+    let dirs: Vec<String> = folders
+        .folders
+        .iter()
+        .filter(|folder| crate::state::normalize_project_folder_path(folder) != cwd)
+        .cloned()
+        .collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    let injected = extra_dirs(command, &dirs);
+    (injected != command).then_some(injected)
+}
 
 #[derive(Clone, Copy)]
 pub struct BuiltinPresetDefinition {
@@ -25,8 +66,10 @@ pub struct BuiltinPresetDefinition {
 /// environment exported (see [`configure_host_command`]). Nothing here
 /// rewrites the command, wraps the executable, or edits provider
 /// configuration at launch. Provider-specific behavior is limited to the
-/// explicitly installed integration ([`Integration::install`]) and the
-/// resume recipe.
+/// explicitly installed integration ([`Integration::install`]), the
+/// resume recipe, and the one opt-in exception: `extra_dirs`, applied at
+/// exec time only for a project with agent folder access on
+/// ([`folder_access_exec_command`]).
 #[derive(Clone, Copy)]
 pub struct Integration {
     /// Escape interrupts the foreground turn in this runtime. Opt in only
@@ -43,6 +86,11 @@ pub struct Integration {
     /// an agent.
     pub install: Option<fn() -> Result<(), String>>,
     pub resume_adapter: Option<crate::resume::ResumeAdapter>,
+    /// The single opt-in exception to plain launches: when the user turned on
+    /// a project's `agent_folder_access`, append this runtime's
+    /// workspace-dir flags for the project's other folders to the command at
+    /// exec time (`adapter/folders.rs`). Never applied to a stored command.
+    pub extra_dirs: Option<fn(&str, &[String]) -> String>,
 }
 
 impl Integration {
@@ -51,11 +99,17 @@ impl Integration {
             escape_cancels_turn: false,
             install,
             resume_adapter: None,
+            extra_dirs: None,
         }
     }
 
     pub const fn with_escape_cancellation(mut self) -> Self {
         self.escape_cancels_turn = true;
+        self
+    }
+
+    pub const fn with_extra_dirs(mut self, extra_dirs: fn(&str, &[String]) -> String) -> Self {
+        self.extra_dirs = Some(extra_dirs);
         self
     }
 
@@ -165,6 +219,22 @@ pub fn configure_host_command(
     cmd: &mut CommandBuilder,
     shell_prelude: &mut Vec<String>,
 ) -> Result<(), String> {
+    let folders = crate::state::project_folder_launch_from_disk(&launch.session.project_id);
+    let injected =
+        folder_access_exec_command(&launch.session.command, &launch.cwd, &folders).is_some();
+    configure_host_command_with_folders(launch, cmd, shell_prelude, &folders, injected)
+}
+
+/// [`configure_host_command`] with the project's folder facts already read;
+/// `folder_access_injected` says whether the exec command carries the
+/// runtime's workspace-dir flags.
+pub fn configure_host_command_with_folders(
+    launch: &SessionHostLaunch,
+    cmd: &mut CommandBuilder,
+    shell_prelude: &mut Vec<String>,
+    project_folders: &crate::state::ProjectFolderLaunch,
+    folder_access_injected: bool,
+) -> Result<(), String> {
     // The unified MCP host uses this identity for every domain. These paths
     // must also be explicit for hookless headless/CLI launches: otherwise an
     // isolated `UNPEEL_HOME` can fall back to the user's default ~/.unpeel.
@@ -244,6 +314,29 @@ pub fn configure_host_command(
     } else {
         cmd.env_remove(APP_ACCENT_ENV);
         shell_prelude.push(format!("unset {APP_ACCENT_ENV}"));
+    }
+
+    // Multi-folder projects: generic session environment only (a launch
+    // never appends provider flags). Read at launch, so a restart or resume
+    // sees the project's current folders.
+    let folders = &project_folders.folders;
+    if folders.len() >= 2 {
+        let value = folders.join("\n");
+        cmd.env(PROJECT_FOLDERS_ENV, &value);
+        shell_prelude.push(format!(
+            "export {PROJECT_FOLDERS_ENV}={}",
+            shared::shell_quote(&value),
+        ));
+    } else {
+        cmd.env_remove(PROJECT_FOLDERS_ENV);
+        shell_prelude.push(format!("unset {PROJECT_FOLDERS_ENV}"));
+    }
+    if folder_access_injected {
+        cmd.env(PROJECT_FOLDERS_ACCESS_ENV, "1");
+        shell_prelude.push(format!("export {PROJECT_FOLDERS_ACCESS_ENV}=1"));
+    } else {
+        cmd.env_remove(PROJECT_FOLDERS_ACCESS_ENV);
+        shell_prelude.push(format!("unset {PROJECT_FOLDERS_ACCESS_ENV}"));
     }
 
     if let Some(port) = launch.hook_port {
@@ -466,6 +559,72 @@ mod tests {
         assert!(integration_for_command("/opt/unpeel/bin/not-an-agent --flag").is_none());
         assert!(!has_integration_installer("/opt/unpeel/bin/not-an-agent"));
         assert!(run_integration_installer("/opt/unpeel/bin/not-an-agent").is_err());
+    }
+
+    #[test]
+    fn folder_access_injects_runtime_flags_only_when_every_gate_holds() {
+        use crate::state::ProjectFolderLaunch;
+        let on = ProjectFolderLaunch {
+            folders: vec!["/src/app".into(), "/src/my api".into(), "/docs".into()],
+            agent_folder_access: true,
+        };
+        assert_eq!(
+            folder_access_exec_command("claude --resume 'a1'", "/src/app", &on).as_deref(),
+            Some("claude --resume 'a1' --add-dir '/src/my api' --add-dir '/docs'")
+        );
+        // The session's own folder is never repeated (trailing slash too).
+        assert_eq!(
+            folder_access_exec_command("codex --full-auto", "/src/my api/", &on).as_deref(),
+            Some("codex --full-auto --add-dir '/src/app' --add-dir '/docs'")
+        );
+        assert_eq!(
+            folder_access_exec_command("gemini", "/docs", &on).as_deref(),
+            Some("gemini --include-directories '/src/app,/src/my api'")
+        );
+        // Off, fewer than two folders, no adapter, unknown or compound
+        // commands, and blank terminals all run exactly as stored.
+        let off = ProjectFolderLaunch {
+            agent_folder_access: false,
+            ..on.clone()
+        };
+        let single = ProjectFolderLaunch {
+            folders: vec!["/src/app".into()],
+            agent_folder_access: true,
+        };
+        assert_eq!(folder_access_exec_command("claude", "/src/app", &off), None);
+        assert_eq!(
+            folder_access_exec_command("claude", "/src/app", &single),
+            None
+        );
+        for command in [
+            "",
+            "my-script --flag",
+            "opencode",
+            "claude && echo done",
+            "claude; rm -rf x",
+            "claude \"$(whoami)\"",
+            "claude -- 'prompt'",
+            "claude # comment",
+        ] {
+            assert_eq!(
+                folder_access_exec_command(command, "/src/app", &on),
+                None,
+                "{command:?}"
+            );
+        }
+        // Quoted metacharacters stay plain arguments.
+        assert!(folder_access_exec_command("claude 'a && b'", "/src/app", &on).is_some());
+    }
+
+    #[test]
+    fn simple_command_scanner_respects_quotes() {
+        assert!(shared::is_simple_command("claude --model 'opus;x' \"a|b\""));
+        assert!(shared::is_simple_command("claude a\\;b"));
+        assert!(!shared::is_simple_command("claude 'unterminated"));
+        assert!(!shared::is_simple_command("claude \"$HOME\""));
+        assert!(!shared::is_simple_command("claude > out.txt"));
+        assert!(!shared::is_simple_command("claude\nrm x"));
+        assert!(shared::is_simple_command("claude --x=a#b"));
     }
 
     /// A launch grant is never registration evidence on its own: the

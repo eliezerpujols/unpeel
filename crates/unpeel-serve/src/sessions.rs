@@ -1967,6 +1967,8 @@ pub fn mobile_snapshot(
                             worktree_branch: Option<&str>,
                             is_group: bool,
                             color_id: Option<&str>,
+                            project_folders: &[unpeel_core::state::ProjectFolder],
+                            agent_folder_access: bool,
                             projects: &mut Vec<serde_json::Value>| {
         if !seen_projects.insert(id.to_string()) {
             return;
@@ -2001,6 +2003,14 @@ pub fn mobile_snapshot(
             }
             if let Some(color_id) = color_id {
                 obj.insert("colorID".into(), color_id.into());
+            }
+            // `project.folders`: the record's own list only (a group's
+            // folders resolve through its parent on the Controller).
+            if !project_folders.is_empty() {
+                obj.insert("folders".into(), serde_json::json!(project_folders));
+            }
+            if agent_folder_access {
+                obj.insert("agentFolderAccess".into(), true.into());
             }
             if let Some(branch) = git_branch(path) {
                 obj.insert("gitBranch".into(), branch.into());
@@ -2041,6 +2051,12 @@ pub fn mobile_snapshot(
                     p.worktree_branch.as_deref(),
                     p.is_folder && parent_project_id.is_some(),
                     project_color(&p.id),
+                    &p.folders,
+                    // Top-level rows only; a group inherits through its parent.
+                    p.agent_folder_access
+                        && p.parent_project_id.is_none()
+                        && !p.is_folder
+                        && p.worktree_branch.is_none(),
                     &mut projects,
                 );
             }
@@ -2065,6 +2081,8 @@ pub fn mobile_snapshot(
                 worktree_branch,
                 child.is_some() && worktree_branch.is_none(),
                 project_color(id),
+                &[],
+                false,
                 &mut projects,
             );
         }
@@ -2442,6 +2460,7 @@ mod tests {
                 is_folder: false,
                 worktree_path: None,
                 worktree_branch: None,
+                folders: Vec::new(),
             }],
             create_presets,
             Arc::new(move |request| {

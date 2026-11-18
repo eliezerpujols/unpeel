@@ -169,6 +169,25 @@ enum LaunchConfig {
 /// `~/.unpeel` files, not the defaults domain. When `UNPEEL_HOME` is set we use
 /// a suite derived from that path so the blank instance is fully isolated.
 enum AppDefaults {
+    /// The release app's bundle id, which is also its defaults domain.
+    static let releaseDomain = "com.unpeel.native"
+
+    /// The machine-wide defaults domain. Dev builds have their own bundle id
+    /// (`com.unpeel.native.dev`, so macOS privacy grants and notification
+    /// settings never flip between dev and release), but they keep reading
+    /// and writing the release domain so `dev:native` shares the installed
+    /// app's overlays exactly as before — and so the Host's overlay reader
+    /// (`unpeel-serve/src/overlay.rs`) still finds them. Gated on the
+    /// dev-build plist marker: test bundles must never touch the real domain.
+    nonisolated(unsafe) static let machine: UserDefaults = {
+        if Bundle.main.object(forInfoDictionaryKey: "UnpeelDevelopmentBuild") as? Bool == true,
+           Bundle.main.bundleIdentifier != releaseDomain,
+           let defaults = UserDefaults(suiteName: releaseDomain) {
+            return defaults
+        }
+        return .standard
+    }()
+
     // UserDefaults is internally thread-safe but not `Sendable`; this matches
     // how `UserDefaults.standard` is used freely across the app.
     nonisolated(unsafe) static let shared: UserDefaults = {
@@ -191,7 +210,7 @@ enum AppDefaults {
                 return defaults
             }
         }
-        return .standard
+        return machine
     }
 
     /// Deterministic FNV-1a hash — Swift's `String.hashValue` is salted per

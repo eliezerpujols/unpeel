@@ -1461,11 +1461,13 @@ fn headless_create_context(
         (snapshot.bootstrap.clone(), snapshot.create_presets.clone())
     };
 
-    let projects = bootstrap
+    let wire_projects = bootstrap
         .get("projects")
         .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+        .cloned()
+        .unwrap_or_default();
+    let projects = wire_projects
+        .iter()
         .filter_map(|project| {
             let id = project.get("id")?.as_str()?.to_owned();
             let path = project
@@ -1493,6 +1495,10 @@ fn headless_create_context(
                 // a top-level project never accepts an arbitrary request path.
                 worktree_path: worktree_branch.as_ref().map(|_| path),
                 worktree_branch,
+                folders: unpeel_core::controller_api::wire_project_effective_folders(
+                    project,
+                    &wire_projects,
+                ),
             })
         })
         .collect();
@@ -4052,7 +4058,14 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
                 "macID": "conformance-host",
                 "macName": "Conformance Host",
                 "folders": [],
-                "projects": [{ "id": "conformance-project" }],
+                "projects": [
+                    { "id": "conformance-project" },
+                    {
+                        "id": "conformance-group",
+                        "parentProjectID": "conformance-project",
+                        "isGroup": true,
+                    },
+                ],
                 "presets": [{
                     "id": "conformance-preset", "label": "Claude",
                     "command": "claude", "enabled": true,

@@ -63,9 +63,17 @@ struct Project: Codable, Identifiable, Hashable, Sendable {
     let worktreeBranch: String?
     let workspacesEnabled: Bool?
     let mcpBlocked: Bool?
+    /// Folders that make up the project (`project.folders`); primary first,
+    /// equal to `path`. Nil/empty = a single-folder project. Groups carry
+    /// none of their own — resolve through the parent.
+    var folders: [ProjectFolder]? = nil
+    /// Agents get every folder as a workspace dir (`agent_folder_access`).
+    /// Groups use their parent's value.
+    var agentFolderAccess: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, path
+        case id, name, path, folders
+        case agentFolderAccess = "agent_folder_access"
         case pinnedAt = "pinned_at"
         case parentProjectID = "parent_project_id"
         case sortOrder = "sort_order"
@@ -77,12 +85,123 @@ struct Project: Codable, Identifiable, Hashable, Sendable {
 
     var isWorktree: Bool { worktreeBranch != nil && parentProjectID != nil }
 
+    /// The project's own folder list, or its single `path` as one folder.
+    var ownFolders: [ProjectFolder] {
+        if let folders, !folders.isEmpty { return folders }
+        return [ProjectFolder(path: path)]
+    }
+
+    var hasMultipleFolders: Bool { (folders?.count ?? 0) > 1 }
+
     /// Only plain organizational child groups accept a running session drop.
     /// Worktree children need an explicit restart/resume to change checkout,
     /// while top-level projects remain reorder targets rather than filing
     /// targets.
     var acceptsSessionDrop: Bool {
         parentProjectID != nil && worktreeBranch == nil && isFolder == true
+    }
+}
+
+/// One folder of a multi-folder project, mirroring `ProjectFolder` in
+/// state.rs. `icon` is `"emoji:<text>"` or `"glyph:<id>"`.
+struct ProjectFolder: Codable, Hashable, Sendable {
+    var path: String
+    var name: String?
+    var icon: String?
+
+    init(path: String, name: String? = nil, icon: String? = nil) {
+        self.path = path
+        self.name = name
+        self.icon = icon
+    }
+
+    var folderName: String {
+        let last = URL(fileURLWithPath: path).lastPathComponent
+        return last.isEmpty || last == "/" ? path : last
+    }
+
+    /// The custom name, else the folder's own name.
+    var displayName: String {
+        if let name, !name.trimmingCharacters(in: .whitespaces).isEmpty { return name }
+        return folderName
+    }
+
+    var parsedIcon: ProjectFolderIcon? { icon.flatMap(ProjectFolderIcon.init(wire:)) }
+}
+
+/// A folder's icon: an emoji, or one of the built-in glyphs (SF Symbols on
+/// Apple clients). Unknown glyph ids decode to `nil` so the plain folder
+/// mark shows instead.
+enum ProjectFolderIcon: Hashable, Sendable {
+    case emoji(String)
+    case glyph(ProjectFolderGlyph)
+
+    init?(wire: String) {
+        if wire.hasPrefix("emoji:") {
+            let text = String(wire.dropFirst("emoji:".count))
+            guard !text.isEmpty else { return nil }
+            self = .emoji(text)
+        } else if wire.hasPrefix("glyph:"),
+                  let glyph = ProjectFolderGlyph(rawValue: String(wire.dropFirst("glyph:".count))) {
+            self = .glyph(glyph)
+        } else {
+            return nil
+        }
+    }
+
+    var wire: String {
+        switch self {
+        case .emoji(let text): return "emoji:\(text)"
+        case .glyph(let glyph): return "glyph:\(glyph.rawValue)"
+        }
+    }
+}
+
+/// Built-in folder glyphs. Raw values are the wire ids — never rename one.
+enum ProjectFolderGlyph: String, CaseIterable, Hashable, Sendable {
+    case folder, code, terminal, server, globe, app, phone, database
+    case package, book, doc, paint, gear, flask, cloud, lock
+
+    var title: String {
+        switch self {
+        case .folder: return "Folder"
+        case .code: return "Code"
+        case .terminal: return "Terminal"
+        case .server: return "Server"
+        case .globe: return "Web"
+        case .app: return "App"
+        case .phone: return "Mobile"
+        case .database: return "Database"
+        case .package: return "Package"
+        case .book: return "Docs"
+        case .doc: return "Document"
+        case .paint: return "Design"
+        case .gear: return "Config"
+        case .flask: return "Experiments"
+        case .cloud: return "Cloud"
+        case .lock: return "Private"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .folder: return "folder"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .terminal: return "terminal"
+        case .server: return "server.rack"
+        case .globe: return "globe"
+        case .app: return "app.badge"
+        case .phone: return "iphone"
+        case .database: return "cylinder.split.1x2"
+        case .package: return "shippingbox"
+        case .book: return "book.closed"
+        case .doc: return "doc.text"
+        case .paint: return "paintbrush"
+        case .gear: return "gearshape"
+        case .flask: return "flask"
+        case .cloud: return "cloud"
+        case .lock: return "lock"
+        }
     }
 }
 

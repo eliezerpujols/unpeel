@@ -16,6 +16,7 @@ runtimes/<slug>/
 ├── adapter/
 │   ├── setup.rs          # optional: `pub fn install()` — hooks + MCP shim registration
 │   ├── resume.rs         # optional: `ADAPTER` — resume/fresh recipes from hook-captured ids
+│   ├── folders.rs        # optional: `extra_dirs` — workspace-dir flags for opt-in multi-folder projects
 │   ├── transcript.rs     # optional: transcript discovery and parsing
 │   └── tests.rs          # optional: the package's own conformance tests
 ├── assets/
@@ -149,8 +150,14 @@ The recipe is five files, each optional after the first:
 3. `adapter/resume.rs` — `pub(super) const ADAPTER: ResumeAdapter`: how a
    hook-captured conversation id becomes a resume command, and the
    documented continue-last fallback.
-4. `adapter/transcript.rs` — normalized records from provider storage.
-5. `adapter/tests.rs` — the package's conformance tests; shared fixtures come
+4. `adapter/folders.rs` — `pub(super) fn extra_dirs(command: &str, dirs:
+   &[String]) -> String`: append the provider's documented workspace-dir
+   flags (shell-quoted with `shared::shell_quote`). The Host calls it only at
+   exec time for a project whose user opted into agent folder access
+   (`docs/agents/clients/project-folders.md`); omit the file when the
+   provider has no such flag.
+5. `adapter/transcript.rs` — normalized records from provider storage.
+6. `adapter/tests.rs` — the package's conformance tests; shared fixtures come
    from `crate::hook_assets::test_support::*`.
 
 A runtime with no safe hook or resume primitive omits that capability

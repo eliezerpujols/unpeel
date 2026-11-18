@@ -146,6 +146,51 @@ pub struct HostCreateProject {
     pub is_folder: bool,
     pub worktree_path: Option<String>,
     pub worktree_branch: Option<String>,
+    /// Effective folder list (`project.folders`), primary first: the
+    /// project's own folders, or for a plain group its parent's; empty for a
+    /// single-folder project. Ignored for worktree children.
+    pub folders: Vec<String>,
+}
+
+/// Effective folder paths for a `HostCreateProject` built from published
+/// bootstrap rows (`projects[]` wire objects): a row's own `folders`, or for a
+/// plain group (`isGroup`, no `worktreeBranch`) its `parentProjectID` row's.
+pub fn wire_project_effective_folders(project: &Value, wire_projects: &[Value]) -> Vec<String> {
+    if project
+        .get("worktreeBranch")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Vec::new();
+    }
+    let own = wire_project_folder_paths(project);
+    if !own.is_empty() {
+        return own;
+    }
+    let is_group = project
+        .get("isGroup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let parent = project.get("parentProjectID").and_then(Value::as_str);
+    match (is_group, parent) {
+        (true, Some(parent)) => wire_projects
+            .iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(parent))
+            .map(wire_project_folder_paths)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn wire_project_folder_paths(project: &Value) -> Vec<String> {
+    project
+        .get("folders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|folder| folder.get("path").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Host-owned preset data exposed to the shared create resolver.
@@ -301,6 +346,11 @@ struct HostCreateWireRequest {
     worktree_path: Option<String>,
     #[serde(default)]
     worktree_branch: Option<String>,
+    /// `project.folders`: start in this folder of the project. Must be one of
+    /// the Host's effective folders (or the project path); never introduces
+    /// a path.
+    #[serde(default)]
+    folder_path: Option<String>,
     #[serde(default)]
     initial_text: Option<String>,
     #[serde(default)]
@@ -507,6 +557,11 @@ fn resolve_host_create(
         MAX_CREATE_BRANCH_BYTES,
         "worktree branch",
     )?;
+    validate_optional_create_value(
+        request.folder_path.as_deref(),
+        MAX_CREATE_PATH_BYTES,
+        "folder path",
+    )?;
     if request
         .initial_text
         .as_ref()
@@ -528,12 +583,59 @@ fn resolve_host_create(
     if project.is_folder && project.path.trim().is_empty() {
         return Err(ControllerApiError::new(400, "project is a folder"));
     }
+    // `folderPath` selects one of the Host-owned folders; like the worktree
+    // fields it can never introduce a path. Worktree children are a single
+    // checkout: folders do not apply to them.
+    let is_worktree = project.worktree_path.is_some() || project.worktree_branch.is_some();
+    let normalized_request_folder = request
+        .folder_path
+        .as_deref()
+        .map(crate::state::normalize_project_folder_path);
+    let folder_cwd = match normalized_request_folder.as_deref() {
+        Some(_) if is_worktree => {
+            return Err(ControllerApiError::new(
+                400,
+                "folder does not belong to project",
+            ))
+        }
+        Some(requested) => {
+            let belongs = if project.folders.is_empty() {
+                crate::state::normalize_project_folder_path(&project.path) == requested
+            } else {
+                project
+                    .folders
+                    .iter()
+                    .any(|folder| crate::state::normalize_project_folder_path(folder) == requested)
+            };
+            if !belongs {
+                return Err(ControllerApiError::new(
+                    400,
+                    "folder does not belong to project",
+                ));
+            }
+            // Return the Host's own spelling, never the request's.
+            Some(
+                project
+                    .folders
+                    .iter()
+                    .find(|folder| crate::state::normalize_project_folder_path(folder) == requested)
+                    .cloned()
+                    .unwrap_or_else(|| project.path.clone()),
+            )
+        }
+        None if !is_worktree => project.folders.first().cloned(),
+        None => None,
+    };
+
     validate_host_create_value(&project.path, MAX_CREATE_PATH_BYTES, "project path")?;
     if let Some(path) = project.worktree_path.as_deref() {
         validate_host_create_value(path, MAX_CREATE_PATH_BYTES, "worktree path")?;
     }
     if let Some(branch) = project.worktree_branch.as_deref() {
         validate_host_create_value(branch, MAX_CREATE_BRANCH_BYTES, "worktree branch")?;
+    }
+    for folder in &project.folders {
+        validate_host_create_value(folder, MAX_CREATE_PATH_BYTES, "folder path")?;
     }
 
     // Request worktree fields are compatibility assertions only. They can
@@ -587,9 +689,8 @@ fn resolve_host_create(
     Ok(ResolvedHostCreate {
         project_id,
         command,
-        cwd: project
-            .worktree_path
-            .clone()
+        cwd: folder_cwd
+            .or_else(|| project.worktree_path.clone())
             .unwrap_or_else(|| project.path.clone()),
         worktree_path: project.worktree_path.clone(),
         worktree_branch: project.worktree_branch.clone(),
@@ -2104,6 +2205,7 @@ mod tests {
                     is_folder: false,
                     worktree_path: None,
                     worktree_branch: None,
+                    folders: Vec::new(),
                 },
                 HostCreateProject {
                     id: "worktree-1".into(),
@@ -2111,6 +2213,7 @@ mod tests {
                     is_folder: false,
                     worktree_path: Some("/host/worktrees/feature".into()),
                     worktree_branch: Some("feature/remote".into()),
+                    folders: Vec::new(),
                 },
                 HostCreateProject {
                     id: "folder-1".into(),
@@ -2118,6 +2221,7 @@ mod tests {
                     is_folder: true,
                     worktree_path: None,
                     worktree_branch: None,
+                    folders: Vec::new(),
                 },
                 HostCreateProject {
                     id: "group-1".into(),
@@ -2125,6 +2229,25 @@ mod tests {
                     is_folder: true,
                     worktree_path: None,
                     worktree_branch: None,
+                    folders: Vec::new(),
+                },
+                HostCreateProject {
+                    id: "multi-1".into(),
+                    path: "/host/app".into(),
+                    is_folder: false,
+                    worktree_path: None,
+                    worktree_branch: None,
+                    folders: vec!["/host/app".into(), "/host/api".into(), "/host/docs".into()],
+                },
+                // A group whose copied path went stale: the effective list
+                // comes from its parent, and cwd follows the parent's primary.
+                HostCreateProject {
+                    id: "multi-group".into(),
+                    path: "/host/old-primary".into(),
+                    is_folder: true,
+                    worktree_path: None,
+                    worktree_branch: None,
+                    folders: vec!["/host/app".into(), "/host/api".into(), "/host/docs".into()],
                 },
             ],
             vec![
@@ -2622,6 +2745,113 @@ mod tests {
         assert_eq!(executed[1].project_id, "group-1");
         assert_eq!(executed[1].cwd, "/host/project");
         assert_eq!(executed[1].worktree_path, None);
+    }
+
+    #[test]
+    fn create_starts_in_a_host_owned_project_folder() {
+        let captured = Arc::new(Mutex::new(Vec::<ResolvedHostCreate>::new()));
+        let executor_captured = Arc::clone(&captured);
+        let context = create_catalog(Arc::new(move |request| {
+            executor_captured
+                .lock()
+                .expect("capture lock")
+                .push(request);
+            Ok(HostCreateOutcome {
+                session_id: "folder-session".into(),
+                session: None,
+            })
+        }));
+        let create = |body: Value| {
+            let mut request = valid_create_request();
+            request.body = body;
+            route_with_create_context(&request, None, Some(&context)).unwrap()
+        };
+        let last_cwd = || {
+            captured
+                .lock()
+                .expect("capture lock")
+                .last()
+                .map(|request| request.cwd.clone())
+        };
+
+        // Default: the primary folder.
+        assert_eq!(
+            create(json!({ "projectID": "multi-1", "command": "codex" })).status,
+            200
+        );
+        assert_eq!(last_cwd().as_deref(), Some("/host/app"));
+        // A chosen folder (trailing slash normalizes to the Host spelling).
+        let response = create(json!({
+            "projectID": "multi-1",
+            "command": "codex",
+            "folderPath": "/host/api/",
+        }));
+        assert_eq!(response.status, 200, "{:?}", response.body);
+        assert_eq!(last_cwd().as_deref(), Some("/host/api"));
+        // A group resolves through its parent's folders, primary by default.
+        assert_eq!(
+            create(json!({ "projectID": "multi-group", "command": "codex" })).status,
+            200
+        );
+        assert_eq!(last_cwd().as_deref(), Some("/host/app"));
+        assert_eq!(
+            create(json!({
+                "projectID": "multi-group",
+                "command": "codex",
+                "folderPath": "/host/docs",
+            }))
+            .status,
+            200
+        );
+        assert_eq!(last_cwd().as_deref(), Some("/host/docs"));
+        // A single-folder project accepts only its own path.
+        assert_eq!(
+            create(json!({
+                "projectID": "project-1",
+                "command": "codex",
+                "folderPath": "/host/project",
+            }))
+            .status,
+            200
+        );
+        assert_eq!(last_cwd().as_deref(), Some("/host/project"));
+        let executed = captured.lock().expect("capture lock").len();
+
+        for (project, folder) in [
+            ("multi-1", "/attacker/chosen"),
+            ("multi-1", "/host/project"),
+            ("project-1", "/host/app"),
+            ("worktree-1", "/host/worktrees/feature"),
+        ] {
+            let response = create(json!({
+                "projectID": project,
+                "command": "codex",
+                "folderPath": folder,
+            }));
+            assert_eq!(response.status, 400, "{project} {folder}");
+            assert_eq!(response.body["error"], "folder does not belong to project");
+        }
+        assert_eq!(captured.lock().expect("capture lock").len(), executed);
+    }
+
+    #[test]
+    fn wire_effective_folders_follow_a_groups_parent() {
+        let rows = vec![
+            json!({ "id": "p", "path": "/a", "folders": [{ "path": "/a" }, { "path": "/b", "name": "B" }] }),
+            json!({ "id": "g", "path": "/a", "parentProjectID": "p", "isGroup": true }),
+            json!({ "id": "w", "path": "/wt", "parentProjectID": "p", "worktreeBranch": "x" }),
+            json!({ "id": "s", "path": "/s" }),
+        ];
+        assert_eq!(
+            wire_project_effective_folders(&rows[0], &rows),
+            vec!["/a", "/b"]
+        );
+        assert_eq!(
+            wire_project_effective_folders(&rows[1], &rows),
+            vec!["/a", "/b"]
+        );
+        assert!(wire_project_effective_folders(&rows[2], &rows).is_empty());
+        assert!(wire_project_effective_folders(&rows[3], &rows).is_empty());
     }
 
     #[test]

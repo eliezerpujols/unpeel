@@ -732,7 +732,7 @@ final class RemoteHostRuntime: ObservableObject {
 
     static var defaultForceLinkForDevelopment: Bool {
         guard RemoteHostFeature.pickerEnabled else { return false }
-        return UserDefaults.standard.bool(forKey: "unpeel.native.forceLink")
+        return AppDefaults.machine.bool(forKey: "unpeel.native.forceLink")
     }
 
     /// SSH is the advanced/admin fallback. It carries the same Host contract
@@ -3452,6 +3452,7 @@ extension RemoteHostRuntime {
         static let orderSet = "session.order.set"
         static let projectOrganizationSet = "project.organization.set"
         static let projectNameSet = "project.name.set"
+        static let projectFolders = "project.folders"
         static let projectPinSet = "project.pin.set"
         static let presetsSet = RemoteControlProtocol.presetsSetCapability
         static let workspaceSettingsSet = RemoteControlProtocol.workspaceSettingsSetCapability
@@ -3720,6 +3721,25 @@ extension RemoteHostRuntime {
         )
     }
 
+    /// Replace a top-level project's folder list (`project.folders`);
+    /// primary first, empty = back to its single path.
+    func setProjectFolders(
+        projectID: String,
+        folders: [RemoteProjectFolder]?,
+        agentFolderAccess: Bool? = nil
+    ) async throws {
+        try await setProjectOrganization(
+            projectID: projectID,
+            capability: HostOperation.projectFolders,
+            operation: "edit project folders",
+            patch: RemoteProjectOrganizationPatch(
+                projectID: projectID,
+                folders: folders,
+                agentFolderAccess: agentFolderAccess
+            )
+        )
+    }
+
     func setProjectFolderColor(projectID: String, colorID: String?) async throws {
         try await setProjectOrganization(
             projectID: projectID,
@@ -3925,7 +3945,9 @@ extension RemoteHostRuntime {
         command: String? = nil,
         // Background creates (the right panel's launcher) must not steal the
         // user's current selection; the new pane appearing IS the feedback.
-        selectOnCreate: Bool = true
+        selectOnCreate: Bool = true,
+        /// One of the project's folders (`project.folders`); nil = primary.
+        folderPath: String? = nil
     ) async throws -> String {
         // A newer explicit selection intent supersedes any unresolved legacy
         // replacement correlation.
@@ -3943,7 +3965,8 @@ extension RemoteHostRuntime {
                 worktreePath: nil,
                 worktreeBranch: nil,
                 initialText: nil,
-                initialTextSubmitMode: .pasteAndSubmit
+                initialTextSubmitMode: .pasteAndSubmit,
+                folderPath: folderPath
             ))
             createdReceipt = created
         }

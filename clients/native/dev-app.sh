@@ -65,7 +65,7 @@ wait_for_dist_exit() {
 # Replace the running Unpeel Dev after the new bundle is ready so the old
 # instance stays usable during the compile. Quit by CFBundleName first (Cocoa
 # termination), then signal leftover dist PIDs only — never `quit app "Unpeel"`
-# or the shared bundle id, both of which would hit the installed app.
+# or the release bundle id, both of which would hit the installed app.
 pids="$(dist_unpeel_pids "$EXE")"
 if [ -n "$pids" ]; then
   echo "==> quitting running Unpeel Dev"
@@ -93,7 +93,8 @@ APPLESCRIPT
 fi
 
 echo "==> launching $APP"
-# Dev and release intentionally share a bundle id. Opening the bundle as a
-# document lets Launch Services resolve that id back to /Applications. Pass the
-# exact bundle as the application instead, and request a fresh instance.
+# Dev builds have their own bundle id (com.unpeel.native.dev), but an older
+# release-flavored bundle in dist/ may still carry com.unpeel.native, which
+# Launch Services would resolve back to /Applications. Pass the exact bundle
+# as the application and request a fresh instance either way.
 open -n -a "$APP"

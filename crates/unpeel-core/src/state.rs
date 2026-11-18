@@ -141,6 +141,258 @@ pub struct Project {
     /// When true, the sidebar offers the slide-in workspaces view for this project.
     #[serde(default)]
     pub workspaces_enabled: bool,
+    /// Multi-folder projects (`project.folders`). Empty = a single-folder
+    /// project at `path`. When non-empty, `folders[0].path == path` (the
+    /// primary): every writer that sets folders also sets `path`. A malformed
+    /// list costs the reader only this field (see
+    /// [`deserialize_project_folders_lenient`]).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_project_folders_lenient"
+    )]
+    pub folders: Vec<ProjectFolder>,
+    /// `project.folders` opt-in: launches of a runtime with a workspace-dir
+    /// adapter get the project's other folders as provider flags at exec
+    /// time (`integrations::folder_access_exec_command`). Meaningful only on
+    /// top-level, non-worktree projects; a group uses its parent's value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_folder_access: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Maximum folders one project may carry.
+pub const PROJECT_FOLDERS_MAX: usize = 32;
+/// Same bound as the Host create resolver's path limit.
+pub const PROJECT_FOLDER_PATH_MAX_BYTES: usize = 16 * 1024;
+pub const PROJECT_FOLDER_NAME_MAX_BYTES: usize = 200;
+const PROJECT_FOLDER_ICON_TEXT_MAX_BYTES: usize = 32;
+
+/// One folder of a multi-folder project. Persisted in `app-state.json` and
+/// published on the wire with the same keys (`path`, `name`, `icon`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectFolder {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `emoji:<text>` or `glyph:<id>`; unknown glyph ids are allowed (clients
+    /// fall back to their default icon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+fn deserialize_project_folders_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ProjectFolder>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    // A newer/older writer's malformed list must never cost the document or
+    // the project row: an unreadable list reads as "single folder".
+    Ok(serde_json::from_value::<Vec<ProjectFolder>>(value)
+        .ok()
+        .and_then(|folders| validate_project_folders(folders).ok())
+        .unwrap_or_default())
+}
+
+/// Strip trailing slashes (never from `/` itself) so `/a/` and `/a` compare
+/// equal.
+pub fn normalize_project_folder_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() && path.starts_with('/') {
+        "/".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn has_control_chars(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
+/// Validate one folder icon: `emoji:<text>` (1..=32 bytes, no control
+/// characters) or `glyph:<id>` (`^[a-z0-9-]{1,32}$`).
+pub fn validate_project_folder_icon(icon: &str) -> Result<(), String> {
+    if let Some(text) = icon.strip_prefix("emoji:") {
+        if text.is_empty()
+            || text.len() > PROJECT_FOLDER_ICON_TEXT_MAX_BYTES
+            || has_control_chars(text)
+        {
+            return Err("invalid folder icon".into());
+        }
+        return Ok(());
+    }
+    if let Some(id) = icon.strip_prefix("glyph:") {
+        if id.is_empty()
+            || id.len() > PROJECT_FOLDER_ICON_TEXT_MAX_BYTES
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err("invalid folder icon".into());
+        }
+        return Ok(());
+    }
+    Err("invalid folder icon".into())
+}
+
+/// The one shared validator for a project's folder list. Returns the
+/// normalized list: paths without trailing slashes, names trimmed, and an
+/// empty name or icon treated as absent. Rejects relative/oversized/NUL
+/// paths, duplicate paths, bad names or icons, and more than
+/// [`PROJECT_FOLDERS_MAX`] folders.
+pub fn validate_project_folders(folders: Vec<ProjectFolder>) -> Result<Vec<ProjectFolder>, String> {
+    if folders.len() > PROJECT_FOLDERS_MAX {
+        return Err(format!("too many folders (maximum {PROJECT_FOLDERS_MAX})"));
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let path = &folder.path;
+        // Control characters are refused too: folders travel newline-joined
+        // in `UNPEEL_PROJECT_FOLDERS`.
+        if path.is_empty()
+            || !path.starts_with('/')
+            || path.len() > PROJECT_FOLDER_PATH_MAX_BYTES
+            || has_control_chars(path)
+        {
+            return Err("folder path must be absolute".into());
+        }
+        let path = normalize_project_folder_path(path);
+        if !seen.insert(path.clone()) {
+            return Err("duplicate folder path".into());
+        }
+        let name = match folder.name.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(name) => {
+                if name.len() > PROJECT_FOLDER_NAME_MAX_BYTES || has_control_chars(name) {
+                    return Err("invalid folder name".into());
+                }
+                Some(name.to_owned())
+            }
+        };
+        let icon = match folder.icon.as_deref() {
+            None | Some("") => None,
+            Some(icon) => {
+                validate_project_folder_icon(icon)?;
+                Some(icon.to_owned())
+            }
+        };
+        normalized.push(ProjectFolder { path, name, icon });
+    }
+    Ok(normalized)
+}
+
+/// Decode and validate a wire/JSON `folders` value (an array of
+/// `{path, name?, icon?}`), returning the normalized list.
+pub fn parse_project_folders_value(
+    value: &serde_json::Value,
+) -> Result<Vec<ProjectFolder>, String> {
+    let Some(entries) = value.as_array() else {
+        return Err("folders must be an array".into());
+    };
+    if entries.len() > PROJECT_FOLDERS_MAX {
+        return Err(format!("too many folders (maximum {PROJECT_FOLDERS_MAX})"));
+    }
+    let folders = serde_json::from_value::<Vec<ProjectFolder>>(value.clone())
+        .map_err(|_| "folders must be objects with a string path".to_owned())?;
+    validate_project_folders(folders)
+}
+
+/// The folders a Session launched in `project_id` can reach, primary first:
+/// the project's own folders; for a plain group (folder record with a parent
+/// and no worktree branch) its parent's; empty for worktree children and
+/// single-folder projects.
+pub fn effective_project_folders(projects: &[Project], project_id: &str) -> Vec<ProjectFolder> {
+    let Some(project) = projects.iter().find(|project| project.id == project_id) else {
+        return Vec::new();
+    };
+    if project.worktree_branch.is_some() {
+        return Vec::new();
+    }
+    if !project.folders.is_empty() {
+        return project.folders.clone();
+    }
+    if project.is_folder {
+        if let Some(parent) = project
+            .parent_project_id
+            .as_deref()
+            .and_then(|parent| projects.iter().find(|candidate| candidate.id == parent))
+        {
+            return parent.folders.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// Whether `project_id`'s agents get its folders as provider flags: a
+/// top-level project's own `agent_folder_access`, a plain group's parent's;
+/// always false for worktree children.
+pub fn effective_agent_folder_access(projects: &[Project], project_id: &str) -> bool {
+    let Some(project) = projects.iter().find(|project| project.id == project_id) else {
+        return false;
+    };
+    if project.worktree_branch.is_some() {
+        return false;
+    }
+    match project.parent_project_id.as_deref() {
+        None => project.agent_folder_access,
+        Some(parent) if project.is_folder => projects
+            .iter()
+            .find(|candidate| candidate.id == parent)
+            .is_some_and(|parent| parent.worktree_branch.is_none() && parent.agent_folder_access),
+        Some(_) => false,
+    }
+}
+
+/// The launch-time folder facts for a Session's project, read from disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectFolderLaunch {
+    /// Effective folder paths, primary first.
+    pub folders: Vec<String>,
+    /// Effective `agent_folder_access`.
+    pub agent_folder_access: bool,
+}
+
+/// [`effective_project_folders`] as paths.
+pub fn effective_project_folder_paths(projects: &[Project], project_id: &str) -> Vec<String> {
+    effective_project_folders(projects, project_id)
+        .into_iter()
+        .map(|folder| folder.path)
+        .collect()
+}
+
+/// Effective folders of `project_id` read from the raw `app-state.json`
+/// document; project rows that do not decode are skipped rather than costing
+/// the whole list.
+pub fn effective_project_folders_from_disk(project_id: &str) -> Vec<ProjectFolder> {
+    effective_project_folders(&projects_from_disk(), project_id)
+}
+
+/// Folder paths and the effective agent toggle for one launch, read once.
+pub fn project_folder_launch_from_disk(project_id: &str) -> ProjectFolderLaunch {
+    let projects = projects_from_disk();
+    ProjectFolderLaunch {
+        folders: effective_project_folder_paths(&projects, project_id),
+        agent_folder_access: effective_agent_folder_access(&projects, project_id),
+    }
+}
+
+fn projects_from_disk() -> Vec<Project> {
+    let Ok(state) = crate::app_state::load() else {
+        return Vec::new();
+    };
+    state
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| serde_json::from_value(row.clone()).ok())
+        .collect()
 }
 
 /// Reach of an Unpeel Sessions MCP caller: how far a permitted caller can
@@ -1260,6 +1512,122 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn project_folders_validate_normalize_and_read_leniently() {
+        use super::{
+            effective_project_folder_paths, parse_project_folders_value, validate_project_folders,
+            ProjectFolder,
+        };
+        let folders = parse_project_folders_value(&serde_json::json!([
+            { "path": "/a/", "name": "  Web  ", "icon": "emoji:🌐" },
+            { "path": "/", "name": "", "icon": "glyph:future-icon-2" },
+        ]))
+        .unwrap();
+        assert_eq!(
+            folders,
+            vec![
+                ProjectFolder {
+                    path: "/a".into(),
+                    name: Some("Web".into()),
+                    icon: Some("emoji:🌐".into())
+                },
+                ProjectFolder {
+                    path: "/".into(),
+                    name: None,
+                    icon: Some("glyph:future-icon-2".into())
+                },
+            ]
+        );
+        for bad in [
+            serde_json::json!([{ "path": "" }]),
+            serde_json::json!([{ "path": "a/b" }]),
+            serde_json::json!([{ "path": "/a\u{0}" }]),
+            serde_json::json!([{ "path": "/a" }, { "path": "/a//" }]),
+            serde_json::json!([{ "path": "/a", "name": "x".repeat(201) }]),
+            serde_json::json!([{ "path": "/a", "icon": "emoji:\n" }]),
+            serde_json::json!([{ "path": "/a", "icon": format!("emoji:{}", "x".repeat(33)) }]),
+            serde_json::json!([{ "path": "/a", "icon": "glyph:" }]),
+            serde_json::json!([{ "path": "/a", "icon": "glyph:a_b" }]),
+            serde_json::json!([{ "name": "no path" }]),
+            serde_json::json!({ "path": "/a" }),
+        ] {
+            assert!(parse_project_folders_value(&bad).is_err(), "{bad}");
+        }
+        let many = (0..33)
+            .map(|i| ProjectFolder {
+                path: format!("/f{i}"),
+                name: None,
+                icon: None,
+            })
+            .collect();
+        assert!(validate_project_folders(many).is_err());
+
+        // A malformed list costs only the field, never the row or document.
+        let state: AppState = serde_json::from_value(serde_json::json!({ "projects": [
+            { "id": "p", "name": "p", "path": "/a", "folders": [{ "path": "/a" }, { "path": "/b" }] },
+            { "id": "g", "name": "g", "path": "/stale", "parent_project_id": "p", "is_folder": true },
+            { "id": "w", "name": "w", "path": "/wt", "parent_project_id": "p", "worktree_branch": "x" },
+            { "id": "bad", "name": "bad", "path": "/c", "folders": [{ "path": "relative" }] },
+            { "id": "odd", "name": "odd", "path": "/d", "folders": "nope" },
+        ]}))
+        .unwrap();
+        assert_eq!(state.projects.len(), 5);
+        assert!(state.projects[3].folders.is_empty());
+        assert!(state.projects[4].folders.is_empty());
+        assert_eq!(
+            effective_project_folder_paths(&state.projects, "p"),
+            vec!["/a", "/b"]
+        );
+        assert_eq!(
+            effective_project_folder_paths(&state.projects, "g"),
+            vec!["/a", "/b"]
+        );
+        assert!(effective_project_folder_paths(&state.projects, "w").is_empty());
+        assert!(effective_project_folder_paths(&state.projects, "bad").is_empty());
+
+        // The agent toggle: top-level own value, a group inherits, worktrees
+        // and other children never.
+        let toggled: AppState = serde_json::from_value(serde_json::json!({ "projects": [
+            { "id": "p", "name": "p", "path": "/a", "agent_folder_access": true },
+            { "id": "g", "name": "g", "path": "/a", "parent_project_id": "p", "is_folder": true },
+            { "id": "w", "name": "w", "path": "/wt", "parent_project_id": "p", "worktree_branch": "x", "agent_folder_access": true },
+            { "id": "q", "name": "q", "path": "/q" },
+            { "id": "qg", "name": "qg", "path": "/q", "parent_project_id": "q", "is_folder": true, "agent_folder_access": true },
+        ]}))
+        .unwrap();
+        assert!(super::effective_agent_folder_access(&toggled.projects, "p"));
+        assert!(super::effective_agent_folder_access(&toggled.projects, "g"));
+        assert!(!super::effective_agent_folder_access(
+            &toggled.projects,
+            "w"
+        ));
+        assert!(!super::effective_agent_folder_access(
+            &toggled.projects,
+            "q"
+        ));
+        assert!(
+            !super::effective_agent_folder_access(&toggled.projects, "qg"),
+            "a group's own flag is ignored"
+        );
+        let encoded = serde_json::to_value(&toggled.projects).unwrap();
+        assert_eq!(encoded[0]["agent_folder_access"], true);
+        assert!(
+            encoded[3].get("agent_folder_access").is_none(),
+            "false is omitted"
+        );
+        assert!(
+            parse_project_folders_value(&serde_json::json!([{ "path": "/a\nb" }])).is_err(),
+            "paths travel newline-joined"
+        );
+        // Round trip: an empty list is omitted, a list is kept.
+        let encoded = serde_json::to_value(&state.projects).unwrap();
+        assert!(encoded[1].get("folders").is_none());
+        assert_eq!(
+            encoded[0]["folders"],
+            serde_json::json!([{ "path": "/a" }, { "path": "/b" }])
+        );
+    }
+
+    #[test]
     fn initial_session_label_uses_command_or_abbreviated_cwd() {
         assert_eq!(initial_session_label("claude", "/tmp/project"), "claude");
         assert_eq!(
@@ -1288,6 +1656,8 @@ mod tests {
             is_folder: false,
             worktree_branch: None,
             workspaces_enabled: false,
+            folders: Vec::new(),
+            agent_folder_access: false,
         }
     }
 
@@ -1536,6 +1906,8 @@ mod tests {
                     is_folder: false,
                     worktree_branch: None,
                     workspaces_enabled: false,
+                    folders: Vec::new(),
+                    agent_folder_access: false,
                 },
                 Project {
                     id: "p2".into(),
@@ -1548,6 +1920,8 @@ mod tests {
                     is_folder: false,
                     worktree_branch: None,
                     workspaces_enabled: false,
+                    folders: Vec::new(),
+                    agent_folder_access: false,
                 },
             ],
             pinned_sessions: HashMap::from([

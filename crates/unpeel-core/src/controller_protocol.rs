@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const HOST_PROTOCOL_MAJOR: u16 = 1;
-pub const HOST_PROTOCOL_MINOR: u16 = 24;
+pub const HOST_PROTOCOL_MINOR: u16 = 25;
 
 pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "approval.answer",
@@ -65,6 +65,7 @@ pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "integrations.install",
     "settings.git.read",
     "settings.git.set",
+    "project.folders",
 ];
 
 pub const HEADLESS_HOST_CAPABILITIES: &[&str] = &[
@@ -116,6 +117,7 @@ pub const HEADLESS_HOST_CAPABILITIES: &[&str] = &[
     "integrations.install",
     "settings.git.read",
     "settings.git.set",
+    "project.folders",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +384,15 @@ mod tests {
                     Some("claude")
                 );
                 assert_eq!(typed.sessions[0].provider_id, None);
+            }
+            if case["id"] == "multi-folder-project" {
+                let folders = typed.projects[0].folders.as_ref().expect("folders decode");
+                assert_eq!(folders.len(), 3);
+                assert_eq!(folders[0].path, typed.projects[0].path, "primary is path");
+                assert_eq!(folders[1].name, None);
+                assert_eq!(folders[1].icon.as_deref(), Some("emoji:🛠"));
+                assert_eq!(typed.projects[1].folders, None, "groups carry none");
+                assert_eq!(typed.projects[2].folders, None);
             }
         }
     }

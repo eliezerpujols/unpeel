@@ -1102,7 +1102,7 @@ private struct HostNotificationsSettingsPanel: View {
         hasOverride = own != nil
         // Own value → default workspace's (.standard baseline) → on.
         menuAttention = own
-            ?? UserDefaults.standard.object(
+            ?? AppDefaults.machine.object(
                 forKey: UnpeelStore.menuAttentionDetectionKey
             ) as? Bool
             ?? true
@@ -1207,7 +1207,7 @@ private struct HostFeaturesSettingsPanel: View {
         if let own = suite.object(forKey: feature.defaultsKey) as? Bool {
             return own
         }
-        if let inherited = UserDefaults.standard.object(
+        if let inherited = AppDefaults.machine.object(
             forKey: feature.defaultsKey
         ) as? Bool {
             return inherited

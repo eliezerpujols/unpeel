@@ -2740,7 +2740,7 @@ fn tool_get_current_session(_args: &Value) -> Result<String, String> {
         })
         .count();
 
-    let result = json!({
+    let mut result = json!({
         "current_session": session_context_json(&caller, &activity),
         "group": {
             "id": group_id,
@@ -2749,6 +2749,13 @@ fn tool_get_current_session(_args: &Value) -> Result<String, String> {
         "access": current_session_access_json(&security, &caller),
         "pane_context": caller_pane_context_json(&caller.session.id, &activity),
     });
+    // Multi-folder projects: the folders this Session's agent may work in
+    // (primary first; also exported as UNPEEL_PROJECT_FOLDERS).
+    let project_folders =
+        crate::state::effective_project_folders_from_disk(&caller.session.project_id);
+    if project_folders.len() >= 2 {
+        result["project_folders"] = json!(project_folders);
+    }
 
     serde_json::to_string_pretty(&result)
         .map_err(|e| format!("Failed to encode current-session context: {e}"))

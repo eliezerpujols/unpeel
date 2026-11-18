@@ -110,7 +110,12 @@ makes sense for coding, it does not belong here.
   (`unpeel integrations install`, the `integrations.install` Host verb) into
   the provider's own global config, pointing at the stable shim
   `~/.unpeel/bin/unpeel-mcp`; the Host only refreshes what the user
-  installed after an upgrade.
+  installed after an upgrade. The single exception: a project's opt-in
+  `agent_folder_access` (multi-folder projects) appends the runtime-owned
+  workspace-dir flags (`runtimes/<slug>/adapter/folders.rs`, e.g.
+  `--add-dir`) at exec time. They are never stored in the Session command,
+  manifest, or resume recipe, and nothing else is ever appended
+  (`docs/agents/clients/project-folders.md`).
 
 ## Working in this repository
 
@@ -160,7 +165,7 @@ Controller only. Neither hosts sessions: "the server" is exactly `crates/`.
 Detail lives in `docs/agents/clients/` (`dev-builds.md`, `terminal.md`,
 `panes.md`, `workspaces.md`, `presets.md`, `session-activity.md`,
 `transcripts.md`, `remote-control.md`, `controller-assisted-pairing.md`,
-`worktrees.md`); the root rules below always apply.
+`worktrees.md`, `project-folders.md`); the root rules below always apply.
 
 ### Layout
 

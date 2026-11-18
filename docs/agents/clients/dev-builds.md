@@ -56,13 +56,19 @@ through Sparkle, not `cp`.
 
 Dev builds live at `clients/native/dist/Unpeel.app` (`bun run dev:native` builds,
 signs, quits any already-running **Unpeel Dev** from that dist bundle, then
-launches it with `open -n` so an installed app with the shared bundle id
-cannot steal the launch). The installed `/Applications/Unpeel.app` is never
+launches it with `open -n -a` on the exact bundle, so Launch Services can never
+resolve the launch to the installed app). The installed `/Applications/Unpeel.app` is never
 quit. They are visually distinct: **"Unpeel Dev"** in the
 menu bar with a **burnt-orange** icon background (release is dark) — quit one
-by name with `osascript -e 'quit app "Unpeel Dev"'`. Both apps still share the
-bundle id `com.unpeel.native`, so `open` re-focuses an already-running
-installed instance instead of launching the dev build.
+by name with `osascript -e 'quit app "Unpeel Dev"'`. Dev builds have their own
+bundle id, `com.unpeel.native.dev` (release keeps `com.unpeel.native`): macOS
+keys privacy grants (Files & Folders, Full Disk Access) and notification
+settings by bundle id, and with a shared id the two builds — signed by
+different certificates — kept invalidating each other's grants and
+re-prompting. System Settings lists the dev build as **Unpeel Dev**. Defaults
+are unaffected: dev builds read and write the release domain through
+`AppDefaults.machine` (`LaunchConfig.swift`), so `dev:native` still shares the
+installed app's overlays, and the Host's overlay reader still finds them.
 
 **In dev, always run "Unpeel Dev" — and check that it says so.** Release
 builds land in the *same* `dist/Unpeel.app` path: after any `bun run release:mac`

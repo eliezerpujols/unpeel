@@ -1445,7 +1445,11 @@ enum SidebarListContentBuilder {
                 isFolder: summary.isGroup == true ? true : nil,
                 worktreeBranch: summary.worktreeBranch,
                 workspacesEnabled: nil,
-                mcpBlocked: summary.mcpBlocked ? true : nil
+                mcpBlocked: summary.mcpBlocked ? true : nil,
+                folders: summary.folders?.map {
+                    ProjectFolder(path: $0.path, name: $0.name, icon: $0.icon)
+                },
+                agentFolderAccess: summary.agentFolderAccess
             ))
             projectSummaries[summary.id] = summary
         }

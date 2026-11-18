@@ -1155,6 +1155,12 @@ pub fn generated_integration_source(descriptors: &[DiscoveredRuntimeDescriptor])
         if has("resume.rs") {
             output.push_str(&format!("    mod resume {{ {} }}\n", include("resume.rs")));
         }
+        if has("folders.rs") {
+            output.push_str(&format!(
+                "    mod folders {{ {} }}\n",
+                include("folders.rs")
+            ));
+        }
         let installer = if has("setup.rs") {
             "Some(setup::install)"
         } else {
@@ -1168,6 +1174,9 @@ pub fn generated_integration_source(descriptors: &[DiscoveredRuntimeDescriptor])
         }
         if has("resume.rs") {
             output.push_str("\n        .with_resume_adapter(resume::ADAPTER)");
+        }
+        if has("folders.rs") {
+            output.push_str("\n        .with_extra_dirs(folders::extra_dirs)");
         }
         output.push_str(";\n");
         if has("tests.rs") {

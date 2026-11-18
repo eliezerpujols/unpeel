@@ -76,6 +76,52 @@
         "sessions": [],
         "capturedAtUnixMs": 1
       }
+    },
+    {
+      "id": "multi-folder-project",
+      "compatible": true,
+      "bootstrap": {
+        "protocolVersion": 1,
+        "hostProtocol": {
+          "majorVersion": 1,
+          "minorVersion": 25,
+          "capabilities": ["host.bootstrap", "session.create", "project.folders"]
+        },
+        "folders": [],
+        "projects": [
+          {
+            "id": "project-app",
+            "name": "App",
+            "path": "/dev/app",
+            "mcpBlocked": false,
+            "sortOrder": 0,
+            "folders": [
+              { "path": "/dev/app", "name": "Web", "icon": "glyph:globe" },
+              { "path": "/dev/api", "icon": "emoji:🛠" },
+              { "path": "/dev/docs", "name": "Docs", "icon": "glyph:future-glyph" }
+            ]
+          },
+          {
+            "id": "group-backlog",
+            "name": "Backlog",
+            "path": "/dev/app",
+            "parentProjectID": "project-app",
+            "isGroup": true,
+            "mcpBlocked": false,
+            "sortOrder": 1
+          },
+          {
+            "id": "project-single",
+            "name": "Single",
+            "path": "/dev/single",
+            "mcpBlocked": false,
+            "sortOrder": 2
+          }
+        ],
+        "presets": [],
+        "sessions": [],
+        "capturedAtUnixMs": 1
+      }
     }
   ]
 }

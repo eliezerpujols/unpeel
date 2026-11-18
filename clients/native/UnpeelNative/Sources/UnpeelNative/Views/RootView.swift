@@ -112,6 +112,13 @@ struct RootView: View {
             .sheet(isPresented: $store.remoteFolderPickerPresented, onDismiss: { store.finishRemoteFolderPicker(nil) }) {
                 RemoteFolderPicker(runtime: store.remoteHostRuntime) { store.finishRemoteFolderPicker($0) }
             }
+            .sheet(item: $store.projectFoldersEditor) { request in
+                ProjectFoldersEditorSheet(request: request) { name, folders, agentAccess in
+                    store.finishProjectFoldersEditor(
+                        name: name, folders: folders, agentFolderAccess: agentAccess
+                    )
+                }
+            }
             // Pane-title chips use the same detached Session drag controller
             // as sidebar rows, so they can sort the split or land at an exact
             // sidebar insertion gap with one continuous gesture.

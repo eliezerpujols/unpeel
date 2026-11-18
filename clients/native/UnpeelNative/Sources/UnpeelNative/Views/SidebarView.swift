@@ -813,7 +813,11 @@ struct SidebarView: View {
                         // A `.localWorkspace` is the same machine — offer Add
                         // Project against its scoped home.
                         SidebarEmptyProjectsView {
-                            store.pickProjectFolder { _ in }
+                            if store.canCreateMultiFolderProject {
+                                store.presentNewProjectDialog()
+                            } else {
+                                store.pickProjectFolder { _ in }
+                            }
                         }
                     } else {
                         RemoteScopeEmptySidebarView(
@@ -1152,6 +1156,9 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.canPin == rhs.canPin
             && lhs.isDateSorted == rhs.isDateSorted
             && lhs.workspaceMoveTargets == rhs.workspaceMoveTargets
+            && lhs.projectFolders == rhs.projectFolders
+            && lhs.canEditFolders == rhs.canEditFolders
+            && lhs.agentFolderAccess == rhs.agentFolderAccess
     }
 }
 
@@ -1245,6 +1252,7 @@ struct ProjectNodeView: View {
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 projectRow
+                folderRenameRow
                 if isExpanded {
                     sessionList
                         .transition(.sessionListContent)
@@ -1266,11 +1274,27 @@ struct ProjectNodeView: View {
         }
     }
 
+    /// Right-click ▸ Folders ▸ Rename: an inline field under this row, the
+    /// same editor sessions use (Enter saves, Esc cancels, blank = the
+    /// folder's own name).
+    @ViewBuilder
+    private var folderRenameRow: some View {
+        if let target = store.renamingProjectFolder, target.rowID == node.id {
+            ProjectFolderRenameRow(
+                folder: target.folder,
+                depth: depth,
+                onCommit: { store.commitProjectFolderRename($0) },
+                onCancel: { store.renamingProjectFolder = nil }
+            )
+        }
+    }
+
     /// Header + sessions as one hover target so a muted wash can sit
     /// behind the whole group or worktree.
     private var groupCluster: some View {
         VStack(alignment: .leading, spacing: 0) {
             projectRow
+            folderRenameRow
             if isExpanded {
                 sessionList
                     .transition(.sessionListContent)
@@ -1418,6 +1442,16 @@ struct ProjectNodeView: View {
                 : [],
             onMoveToWorkspace: { dest in
                 store.moveProjectToLocalWorkspace(projectID: node.id, dest: dest)
+            },
+            projectFolders: node.project.worktreeBranch == nil
+                ? store.effectiveProjectFolders(node.id)
+                : [],
+            canEditFolders: store.canEditProjectFolders(
+                node.project.parentProjectID == nil ? node.id : (node.project.parentProjectID ?? node.id)
+            ),
+            agentFolderAccess: store.projectAgentFolderAccess(node.id),
+            onFolderAction: { action in
+                store.performProjectFolderAction(node.id, action)
             }
         ).equatable()
 
@@ -1977,6 +2011,14 @@ struct ProjectRowView: View {
     /// Other local workspaces; empty hides the project "Move to" menu.
     var workspaceMoveTargets: [WorkspaceMoveTarget] = []
     var onMoveToWorkspace: (WorkspaceMoveTarget) -> Void = { _ in }
+    /// Folders the project's sessions can start in (a group's are its
+    /// parent's). A multi-folder project gets the right-click ▸ Folders menu
+    /// and a folder-count badge.
+    var projectFolders: [ProjectFolder] = []
+    /// Folder rename/icon/add/remove allowed in this scope.
+    var canEditFolders = false
+    var agentFolderAccess = false
+    var onFolderAction: (ProjectFolderAction) -> Void = { _ in }
 
     /// Worktree children get "Remove worktree" instead of the plain
     /// Remove confirm (ProjectItem.svelte:933).
@@ -2131,6 +2173,10 @@ struct ProjectRowView: View {
                     .truncationMode(.tail)
             }
 
+            if !isChildFolder, projectFolders.count > 1 {
+                ProjectFolderCountBadge(folders: projectFolders)
+            }
+
             if isPinned {
                 SidebarPinnedIndicator()
                     .padding(.leading, -2)
@@ -2235,6 +2281,21 @@ struct ProjectRowView: View {
                         }
                     }
                 }
+            }
+            // Multi-folder projects: start a session in a specific folder,
+            // rename/icon each folder. Single-folder top-level projects only
+            // get "Add folder…" here to grow into a multi-folder project.
+            if projectFolders.count > 1 {
+                ProjectFoldersMenu(
+                    folders: projectFolders,
+                    presets: menuPresets,
+                    canEdit: canEditFolders,
+                    showsFilesystemVerbs: showsFilesystemVerbs,
+                    agentAccess: agentFolderAccess,
+                    onAction: onFolderAction
+                )
+            } else if node.project.parentProjectID == nil, canEditFolders {
+                Button("Add folder to project…") { onFolderAction(.add) }
             }
             // Folder color is a MAIN-project verb: groups and worktrees stay
             // neutral so nesting reads by indent, not tint (decided
@@ -2798,7 +2859,9 @@ func sessionRowShowsCopyTranscript(
 /// Inline title editor. A dedicated view so `@State` is born with the
 /// current label — assigning the draft in `onAppear` left one empty frame
 /// (the title blinked) before the field populated.
-private struct SessionRowRenameField: View {
+/// Inline rename field shared by session rows and the project folder
+/// rename row: Enter commits, Esc cancels, click-away commits.
+struct SessionRowRenameField: View {
     let onCommit: (String) -> Void
     let onCancel: () -> Void
 

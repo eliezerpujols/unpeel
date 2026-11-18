@@ -202,7 +202,7 @@ enum UnpeelFeatureFlags {
             return own
         }
         if !UnpeelWorkspaceContext.isDefaultInstance,
-           let inherited = UserDefaults.standard.object(forKey: feature.defaultsKey) as? Bool {
+           let inherited = AppDefaults.machine.object(forKey: feature.defaultsKey) as? Bool {
             return inherited
         }
         return feature.defaultOn

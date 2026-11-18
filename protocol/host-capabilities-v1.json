@@ -2,13 +2,21 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 24,
+    "minor": 25,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 25,
+        "release": "0.7.8",
+        "summary": "Multi-folder projects. Bootstrap project rows carry an optional `folders` list (`[{path, name?, icon?}]`, first = primary = `path`; a group resolves through its parent); `POST /mobile/sessions` accepts `folderPath` (one of the Host's folders; never introduces a path); `project.add` accepts `name` and `folders`; `project.organization.set` accepts `folders` to replace the list (`[]` clears). Sessions with two or more folders get `UNPEEL_PROJECT_FOLDERS`. A top-level project's opt-in `agentFolderAccess` (bootstrap row field, `project.organization.set` and `project.add` input; groups inherit) appends the runtime's workspace-dir flags at exec time and sets `UNPEEL_PROJECT_FOLDERS_ACCESS=1`.",
+        "capabilities": [
+          "project.folders"
+        ]
+      },
       {
         "minor": 24,
         "release": "0.7.8",
@@ -471,6 +479,13 @@
       "id": "settings.git.set",
       "method": "POST",
       "path": "/mobile/git-settings",
+      "native": true,
+      "tui": true
+    },
+    {
+      "id": "project.folders",
+      "method": "POST",
+      "path": "/mobile/project-organization#folders",
       "native": true,
       "tui": true
     }

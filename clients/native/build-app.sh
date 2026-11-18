@@ -399,13 +399,20 @@ if [ -n "$SPARKLE_FEED_URL" ]; then
 fi
 DEV_BUILD_PLIST_KEYS=""
 # Dev builds are named "Unpeel Dev" (menu bar, Dock tooltip, force-quit list)
-# so they're tellable from the installed release app; the bundle id stays
-# com.unpeel.native either way. Quit them with `osascript -e 'quit app
-# "Unpeel Dev"'` — plain "Unpeel" targets the installed app.
+# so they're tellable from the installed release app, and get their own bundle
+# id com.unpeel.native.dev: macOS keys privacy grants (Files & Folders, …) and
+# notification settings by bundle id, so a shared id made the dev and release
+# builds — signed by different certificates — invalidate each other's grants
+# and re-prompt. Dev builds still read/write the release defaults domain
+# (`AppDefaults.machine`), so `dev:native` shares the installed app's
+# overlays as before. Quit them with `osascript -e 'quit app "Unpeel Dev"'`
+# — plain "Unpeel" targets the installed app.
 APP_NAME="Unpeel"
+BUNDLE_ID="com.unpeel.native"
 if [ "$UNPEEL_DEV_BUILD" = "1" ]; then
   DEV_BUILD_PLIST_KEYS="    <key>UnpeelDevelopmentBuild</key> <true/>"
   APP_NAME="Unpeel Dev"
+  BUNDLE_ID="com.unpeel.native.dev"
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -416,7 +423,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>            <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>     <string>$APP_NAME</string>
     <key>CFBundleExecutable</key>      <string>UnpeelNative</string>
-    <key>CFBundleIdentifier</key>      <string>com.unpeel.native</string>
+    <key>CFBundleIdentifier</key>      <string>$BUNDLE_ID</string>
     <key>CFBundleIconName</key>        <string>AppIcon</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>$VERSION</string>

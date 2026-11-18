@@ -423,6 +423,21 @@ fn projects(args: &[String]) -> Result<(), String> {
                         project.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                         project.get("path").and_then(|v| v.as_str()).unwrap_or(""),
                     );
+                    // Multi-folder projects: the primary is `path` above;
+                    // list the other folders indented beneath it.
+                    for folder in project
+                        .get("folders")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .skip(1)
+                    {
+                        let Some(path) = folder.get("path").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let name = folder.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("  {name:22} {path}");
+                    }
                 }
             }
             if let Some(overlay) = unpeel_serve::overlay::load() {

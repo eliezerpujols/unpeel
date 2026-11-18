@@ -225,6 +225,8 @@ struct ProjectRecord {
     is_folder: bool,
     worktree_branch: Option<String>,
     pinned: bool,
+    folders: Vec<crate::state::ProjectFolder>,
+    agent_folder_access: bool,
 }
 
 struct DiskCatalog {
@@ -327,6 +329,17 @@ impl DiskCatalog {
                 if date_sorted_projects.contains(&project.id) {
                     object.insert("dateSorted".into(), true.into());
                 }
+                if !project.folders.is_empty() {
+                    object.insert("folders".into(), json!(project.folders));
+                }
+                // Top-level rows only; a group inherits through its parent.
+                if project.agent_folder_access
+                    && project.parent_id.is_none()
+                    && !project.is_folder
+                    && project.worktree_branch.is_none()
+                {
+                    object.insert("agentFolderAccess".into(), true.into());
+                }
                 if let Some(color) = project_colors
                     .and_then(|colors| colors.get(&project.id))
                     .and_then(Value::as_str)
@@ -335,6 +348,20 @@ impl DiskCatalog {
                 }
             }
             wire_projects.push(value);
+            let effective_folders: Vec<String> = if project.worktree_branch.is_some() {
+                Vec::new()
+            } else if !project.folders.is_empty() {
+                project.folders.iter().map(|f| f.path.clone()).collect()
+            } else if project.is_folder {
+                project
+                    .parent_id
+                    .as_deref()
+                    .and_then(|parent| projects.iter().find(|p| p.id == parent))
+                    .map(|parent| parent.folders.iter().map(|f| f.path.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             create_projects.push(HostCreateProject {
                 id: project.id.clone(),
                 path: project.path.clone(),
@@ -344,6 +371,7 @@ impl DiskCatalog {
                     .as_ref()
                     .map(|_| project.path.clone()),
                 worktree_branch: project.worktree_branch.clone(),
+                folders: effective_folders,
             });
         }
 
@@ -769,6 +797,19 @@ pub fn project_organization_response(
             _ => return (400, error("sortOrder must be a non-negative integer")),
         },
     };
+    // `project.folders`: replaces the list wholesale; `[]` clears it.
+    let folders = match body.get("folders") {
+        None | Some(Value::Null) => None,
+        Some(value) => match crate::state::parse_project_folders_value(value) {
+            Ok(folders) => Some(folders),
+            Err(message) => return (400, error(&message)),
+        },
+    };
+    let agent_folder_access = match body.get("agentFolderAccess") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return (400, error("agentFolderAccess must be a boolean")),
+    };
     let folder_move_requested = match body.get("folderID") {
         None | Some(Value::Null) => false,
         Some(Value::String(_)) => true,
@@ -806,6 +847,16 @@ pub fn project_organization_response(
     if pinned.is_some() && !is_group {
         return (400, error("Only groups can be pinned remotely"));
     }
+    if (folders.is_some() || agent_folder_access.is_some())
+        && (is_group
+            || parent_id.is_some()
+            || target
+                .get("worktreeBranch")
+                .and_then(Value::as_str)
+                .is_some())
+    {
+        return (400, error("Only top-level projects can have folders"));
+    }
     if let Some(color) = color_id.as_deref() {
         // Folder color is a MAIN-project verb — groups and worktrees stay
         // neutral (same rule as the desktop and TUI menus).
@@ -827,6 +878,8 @@ pub fn project_organization_response(
         && date_sorted.is_none()
         && sort_order.is_none()
         && pinned.is_none()
+        && folders.is_none()
+        && agent_folder_access.is_none()
     {
         // Match the native DTO: an empty patch, explicit nulls, and a name
         // that trims to empty are successful no-ops.
@@ -837,6 +890,24 @@ pub fn project_organization_response(
     // Controllers must refresh Host state before deciding whether to retry.
     // The group/non-group split was already answered from the wire catalog
     // above, so a failure here is broken shared state or IO, not validation.
+    // Folders go first: a record the Host does not own (a desktop-overlay
+    // project) fails here before any other field applies.
+    if let Some(folders) = folders.as_deref() {
+        if let Err(e) = crate::session_ops::set_project_folders(project_id, folders) {
+            return (
+                500,
+                error(&format!("organization folders preflight failed: {e}")),
+            );
+        }
+    }
+    if let Some(enabled) = agent_folder_access {
+        if let Err(e) = crate::session_ops::set_agent_folder_access(project_id, enabled) {
+            return (
+                500,
+                error(&format!("organization folders preflight failed: {e}")),
+            );
+        }
+    }
     if let Some(name) = display_name {
         if let Err(e) = crate::session_ops::rename_project(project_id, &name) {
             return (
@@ -1824,6 +1895,13 @@ fn project_records(state: &Value) -> Vec<ProjectRecord> {
                     && parent_id.is_some()
                     && worktree_branch.is_none()
                     && has_pin_marker,
+                // Same leniency as the typed reader: a malformed list reads
+                // as a single-folder project.
+                folders: value
+                    .get("folders")
+                    .and_then(|folders| crate::state::parse_project_folders_value(folders).ok())
+                    .unwrap_or_default(),
+                agent_folder_access: bool_field(value, &["agent_folder_access"]).unwrap_or(false),
             })
         })
         .collect();
@@ -3176,6 +3254,66 @@ mod tests {
             case(json!({ "projectID": "p1", "displayName": "   " })),
             200,
             "whitespace-only rename trims to a no-op"
+        );
+        for (body, why) in [
+            (
+                json!({ "projectID": "p1", "folders": "/tmp/one" }),
+                "folders must be an array",
+            ),
+            (
+                json!({ "projectID": "p1", "folders": [{ "path": "relative/dir" }] }),
+                "relative folder path",
+            ),
+            (
+                json!({ "projectID": "p1", "folders": [{ "path": "/a" }, { "path": "/a/" }] }),
+                "duplicate folder path",
+            ),
+            (
+                json!({ "projectID": "p1", "folders": [{ "path": "/a", "icon": "sparkles" }] }),
+                "icon without a kind prefix",
+            ),
+            (
+                json!({ "projectID": "p1", "folders": [{ "path": "/a", "icon": "glyph:Star" }] }),
+                "glyph ids are lowercase",
+            ),
+            (
+                json!({ "projectID": "p1", "folders": [{ "path": "/a", "name": "x\u{7}" }] }),
+                "control characters in a name",
+            ),
+            (
+                json!({ "projectID": "g1", "folders": [{ "path": "/tmp/one" }] }),
+                "groups resolve folders through their parent",
+            ),
+            (
+                json!({ "projectID": "w1", "folders": [{ "path": "/tmp/one-feature" }] }),
+                "worktree children are a single checkout",
+            ),
+        ] {
+            assert_eq!(case(body), 400, "{why}");
+        }
+        for (body, why) in [
+            (
+                json!({ "projectID": "g1", "agentFolderAccess": true }),
+                "groups inherit the parent's toggle",
+            ),
+            (
+                json!({ "projectID": "w1", "agentFolderAccess": true }),
+                "worktree children have no folders",
+            ),
+            (
+                json!({ "projectID": "p1", "agentFolderAccess": "on" }),
+                "agentFolderAccess must be a boolean",
+            ),
+        ] {
+            assert_eq!(case(body), 400, "{why}");
+        }
+        let too_many: Vec<Value> = (0..33)
+            .map(|i| json!({ "path": format!("/f{i}") }))
+            .collect();
+        assert_eq!(
+            case(json!({ "projectID": "p1", "folders": too_many })),
+            400,
+            "at most 32 folders"
         );
     }
 

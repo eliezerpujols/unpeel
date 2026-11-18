@@ -32,6 +32,8 @@ enum HostServiceAgent {
     /// user's real unit at `dist/Unpeel.app`; they get their own label.
     static let developmentLabel = "com.unpeel.native.dev.serve"
     static let bundleIdentifier = "com.unpeel.native"
+    /// Dev builds' own bundle id (privacy grants stay separate from release).
+    static let developmentBundleIdentifier = "com.unpeel.native.dev"
     /// `UNPEEL_NATIVE_SERVICE_LAUNCHER=direct` restores the pre-2026-09-06
     /// fork for diagnostics. Anything else (or unset) uses launchd.
     static let launcherOverrideEnvVar = "UNPEEL_NATIVE_SERVICE_LAUNCHER"
@@ -85,7 +87,11 @@ enum HostServiceAgent {
 
     /// The unit body. Deterministic so an unchanged install is a byte-equal
     /// file and never re-bootstrapped.
-    nonisolated static func renderPlist(label: String, hostBinary: String) throws -> Data {
+    nonisolated static func renderPlist(
+        label: String,
+        hostBinary: String,
+        associatedBundleIdentifier: String? = nil
+    ) throws -> Data {
         let unit: [String: Any] = [
             "Label": label,
             "ProgramArguments": [hostBinary, "__serve__"],
@@ -94,7 +100,10 @@ enum HostServiceAgent {
             "KeepAlive": false,
             "ProcessType": "Interactive",
             // Login Items groups the background item under the app.
-            "AssociatedBundleIdentifiers": [bundleIdentifier],
+            "AssociatedBundleIdentifiers": [
+                associatedBundleIdentifier
+                    ?? (label == developmentLabel ? developmentBundleIdentifier : bundleIdentifier),
+            ],
         ]
         return try PropertyListSerialization.data(
             fromPropertyList: unit,

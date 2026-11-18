@@ -1011,4 +1011,41 @@ final class RemoteControlProtocolTests: XCTestCase {
         XCTFail("could not locate protocol/\(name) from \(#filePath) — set UNPEEL_PROTOCOL_DIR at a protocol/ directory")
         return [:]
     }
+
+    func testProjectSummaryFoldersAreOptionalAndRoundTrip() throws {
+        let legacy = #"{"id":"p","name":"P","path":"/a","mcpBlocked":false}"#
+        let decodedLegacy = try JSONDecoder().decode(
+            RemoteProjectSummary.self, from: Data(legacy.utf8)
+        )
+        XCTAssertNil(decodedLegacy.folders)
+
+        let summary = RemoteProjectSummary(
+            id: "p", name: "P", path: "/a",
+            folders: [
+                RemoteProjectFolder(path: "/a", name: "Web", icon: "glyph:globe"),
+                RemoteProjectFolder(path: "/b"),
+            ]
+        )
+        XCTAssertEqual(try roundTrip(summary), summary)
+        XCTAssertEqual(summary.replacingSessionOrder(["s1"]).folders, summary.folders)
+    }
+
+    func testCreateRequestAndOrganizationPatchCarryFolders() throws {
+        let request = RemoteCreateSessionRequest(projectID: "p", command: "claude", folderPath: "/b")
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        XCTAssertEqual(encoded?["folderPath"] as? String, "/b")
+        let plain = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(RemoteCreateSessionRequest(projectID: "p", command: "x"))
+        ) as? [String: Any]
+        XCTAssertNil(plain?["folderPath"])
+
+        let access = RemoteProjectOrganizationPatch(projectID: "p", agentFolderAccess: false)
+        let accessJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(access)) as? [String: Any]
+        XCTAssertEqual(accessJSON?["agentFolderAccess"] as? Bool, false)
+        XCTAssertNil(accessJSON?["folders"])
+
+        let clear = RemoteProjectOrganizationPatch(projectID: "p", folders: [])
+        let clearJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(clear)) as? [String: Any]
+        XCTAssertEqual((clearJSON?["folders"] as? [Any])?.count, 0)
+    }
 }

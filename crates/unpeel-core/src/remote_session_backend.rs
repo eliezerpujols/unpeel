@@ -74,6 +74,9 @@ const TRANSCRIPT_MARKDOWN_CAPABILITY: &str = "session.transcript.markdown";
 const METRICS_CAPABILITY: &str = "session.metrics.read";
 const PAIRING_INVITATION_CAPABILITY: &str = "pairing.invitation";
 const UPLOAD_CAPABILITY: &str = "artifact.upload";
+const PROJECT_FOLDERS_CAPABILITY: &str = "project.folders";
+/// Mirror of the Host's `state::PROJECT_FOLDERS_MAX`.
+pub const REMOTE_PROJECT_FOLDERS_MAX: usize = 32;
 pub const REMOTE_CAPABILITY_OUTPUT_READ: &str = OUTPUT_CAPABILITY;
 pub const REMOTE_CAPABILITY_INPUT_WRITE: &str = WRITE_CAPABILITY;
 pub const REMOTE_CAPABILITY_RESIZE_DESKTOP: &str = RESIZE_DESKTOP_CAPABILITY;
@@ -169,6 +172,18 @@ pub struct RemoteProjectFolderSummary {
     pub sort_order: Option<i64>,
 }
 
+/// One folder of a multi-folder project (`project.folders`). The first entry
+/// is the primary and equals the project's `path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProjectFolderEntry {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `emoji:<text>` or `glyph:<id>`; unknown glyph ids fall back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteProjectSummary {
@@ -198,6 +213,15 @@ pub struct RemoteProjectSummary {
     /// compatibility; absent means the manual/custom order.
     #[serde(default)]
     pub date_sorted: Option<bool>,
+    /// `project.folders` (minor 25): this record's own folder list, present
+    /// only when it has at least one entry. A group resolves its folders
+    /// through its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folders: Option<Vec<RemoteProjectFolderEntry>>,
+    /// `project.folders`: present (true) only on a top-level row whose agents
+    /// get the project's folders as provider flags. A group inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_folder_access: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1028,6 +1052,11 @@ pub struct RemoteProjectOrganizationPatch {
     pub color_id: Option<String>,
     pub date_sorted: Option<bool>,
     pub pinned: Option<bool>,
+    /// `project.folders`: replace the folder list wholesale (first = primary,
+    /// which becomes the project's path). `Some(vec![])` clears it.
+    pub folders: Option<Vec<RemoteProjectFolderEntry>>,
+    /// `project.folders`: the per-project agent folder access toggle.
+    pub agent_folder_access: Option<bool>,
 }
 
 impl RemoteProjectOrganizationPatch {
@@ -1044,6 +1073,8 @@ impl RemoteProjectOrganizationPatch {
             && self.color_id.is_none()
             && self.date_sorted.is_none()
             && self.pinned.is_none()
+            && self.folders.is_none()
+            && self.agent_folder_access.is_none()
     }
 }
 
@@ -1410,6 +1441,10 @@ struct ProjectOrganizationWire<'a> {
     date_sorted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pinned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folders: Option<&'a [RemoteProjectFolderEntry]>,
+    #[serde(rename = "agentFolderAccess", skip_serializing_if = "Option::is_none")]
+    agent_folder_access: Option<bool>,
 }
 
 /// Initial-text submit behavior for a Controller-created Session; matches the
@@ -1433,6 +1468,8 @@ pub struct RemoteSessionCreateRequest {
     pub command: Option<String>,
     pub worktree_path: Option<String>,
     pub worktree_branch: Option<String>,
+    /// `project.folders`: start in this Host-owned folder of the project.
+    pub folder_path: Option<String>,
     pub initial_text: Option<String>,
     pub initial_text_submit_mode: RemoteTextSubmitMode,
 }
@@ -1468,6 +1505,8 @@ struct CreateSessionWire<'a> {
     worktree_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     worktree_branch: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_text: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1571,34 +1610,35 @@ impl RemoteSessionBackend {
                 .to_string()
                 .into_bytes());
         }
-        let (method, capability, path, keys): (&str, &str, &str, &[&str]) = match operation {
-            "directories" => (
-                "GET",
-                "filesystem.directories.list",
-                "/mobile/directories",
-                &["path", "after", "hidden"],
-            ),
-            "createDirectory" => (
-                "POST",
-                "filesystem.directories.create",
-                "/mobile/directories/create",
-                &["path"],
-            ),
-            "addProject" => ("POST", "project.add", "/mobile/projects/add", &["path"]),
-            "readFile" => (
-                "GET",
-                "filesystem.file.read",
-                "/mobile/files/read",
-                &["path", "offset"],
-            ),
-            _ => {
-                return Err(effect_failure(
-                    OPERATION,
-                    RemoteEffectFailureKind::NotApplied,
-                    invalid_effect_input(OPERATION, "Unknown Host resource operation"),
-                ))
-            }
-        };
+        let (method, mut capability, path, keys): (&str, &'static str, &str, &[&str]) =
+            match operation {
+                "directories" => (
+                    "GET",
+                    "filesystem.directories.list",
+                    "/mobile/directories",
+                    &["path", "after", "hidden"],
+                ),
+                "createDirectory" => (
+                    "POST",
+                    "filesystem.directories.create",
+                    "/mobile/directories/create",
+                    &["path"],
+                ),
+                "addProject" => ("POST", "project.add", "/mobile/projects/add", &["path"]),
+                "readFile" => (
+                    "GET",
+                    "filesystem.file.read",
+                    "/mobile/files/read",
+                    &["path", "offset"],
+                ),
+                _ => {
+                    return Err(effect_failure(
+                        OPERATION,
+                        RemoteEffectFailureKind::NotApplied,
+                        invalid_effect_input(OPERATION, "Unknown Host resource operation"),
+                    ))
+                }
+            };
         let query: Vec<_> = keys
             .iter()
             .map(|key| (*key, value(key).to_owned()))
@@ -1611,7 +1651,70 @@ impl RemoteSessionBackend {
                 })
         } else {
             let turn = self.inner.begin_effect();
-            let body: HashMap<_, _> = query.into_iter().collect();
+            let mut body: serde_json::Map<String, serde_json::Value> = query
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), serde_json::Value::String(value)))
+                .collect();
+            if operation == "addProject" {
+                // `project.folders`: optional display name and a folder list
+                // (`folders`, the JSON array text `[{path,name?,icon?}]`).
+                // Absent parameters stay absent on the wire.
+                if let Some(name) = parameters.get("name").filter(|name| !name.is_empty()) {
+                    body.insert("name".into(), serde_json::Value::String(name.clone()));
+                }
+                // `agentFolderAccess` arrives as the string "true"/"false".
+                match parameters.get("agentFolderAccess").map(String::as_str) {
+                    None | Some("") => {}
+                    Some(raw @ ("true" | "false")) => {
+                        body.insert(
+                            "agentFolderAccess".into(),
+                            serde_json::Value::Bool(raw == "true"),
+                        );
+                        capability = PROJECT_FOLDERS_CAPABILITY;
+                    }
+                    Some(_) => {
+                        return Err(effect_failure(
+                            OPERATION,
+                            RemoteEffectFailureKind::NotApplied,
+                            invalid_effect_input(
+                                OPERATION,
+                                "agentFolderAccess must be true or false",
+                            ),
+                        ))
+                    }
+                }
+                if let Some(raw) = parameters.get("folders").filter(|raw| !raw.is_empty()) {
+                    let folders: Vec<RemoteProjectFolderEntry> = serde_json::from_str(raw)
+                        .map_err(|_| {
+                            effect_failure(
+                                OPERATION,
+                                RemoteEffectFailureKind::NotApplied,
+                                invalid_effect_input(OPERATION, "folders must be a JSON array"),
+                            )
+                        })?;
+                    if folders.len() > REMOTE_PROJECT_FOLDERS_MAX {
+                        return Err(effect_failure(
+                            OPERATION,
+                            RemoteEffectFailureKind::NotApplied,
+                            invalid_effect_input(OPERATION, "too many folders"),
+                        ));
+                    }
+                    // An older Host would ignore `folders` and add a
+                    // single-folder project: require the capability.
+                    capability = PROJECT_FOLDERS_CAPABILITY;
+                    body.insert(
+                        "folders".into(),
+                        serde_json::to_value(folders).expect("folder entries serialize"),
+                    );
+                    if body
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(str::is_empty)
+                    {
+                        body.remove("path");
+                    }
+                }
+            }
             self.inner
                 .perform_effect_exchange(
                     &turn,
@@ -2186,6 +2289,23 @@ impl RemoteSessionBackend {
                     ));
                 }
             }
+            if let Some(folders) = patch.folders.as_deref() {
+                if folders.len() > REMOTE_PROJECT_FOLDERS_MAX {
+                    return Err(invalid_effect_input(OPERATION, "too many folders"));
+                }
+                // Shape checks only; the Host's shared validator is the
+                // authority for names, icons, and duplicates.
+                if folders.iter().any(|folder| {
+                    !folder.path.starts_with('/')
+                        || folder.path.len() > REMOTE_CREATE_PATH_MAX_BYTES
+                        || folder.path.contains('\0')
+                }) {
+                    return Err(invalid_effect_input(
+                        OPERATION,
+                        "folder path must be absolute",
+                    ));
+                }
+            }
             Ok(())
         })?;
         let body = encode_effect_body(
@@ -2197,12 +2317,19 @@ impl RemoteSessionBackend {
                 color_id: patch.color_id.as_deref(),
                 date_sorted: patch.date_sorted,
                 pinned: patch.pinned,
+                folders: patch.folders.as_deref(),
+                agent_folder_access: patch.agent_folder_access,
             },
         )?;
+        let capability = if patch.folders.is_some() || patch.agent_folder_access.is_some() {
+            PROJECT_FOLDERS_CAPABILITY
+        } else {
+            PROJECT_ORGANIZATION_CAPABILITY
+        };
         self.inner.perform_effect(
             &effect_turn,
             OPERATION,
-            PROJECT_ORGANIZATION_CAPABILITY,
+            capability,
             PROJECT_ORGANIZATION_PATH,
             body,
         )
@@ -2628,6 +2755,7 @@ impl RemoteSessionBackend {
                 command: request.command.as_deref(),
                 worktree_path: request.worktree_path.as_deref(),
                 worktree_branch: request.worktree_branch.as_deref(),
+                folder_path: request.folder_path.as_deref(),
                 initial_text: request.initial_text.as_deref(),
                 initial_text_submit_mode: request
                     .initial_text
@@ -2635,10 +2763,17 @@ impl RemoteSessionBackend {
                     .then_some(request.initial_text_submit_mode),
             },
         )?;
+        // Choosing a folder needs a Host that understands it; an older Host
+        // would silently ignore the field and start in the primary.
+        let capability = if request.folder_path.is_some() {
+            PROJECT_FOLDERS_CAPABILITY
+        } else {
+            CREATE_CAPABILITY
+        };
         let exchange = self.inner.perform_effect_exchange(
             &effect_turn,
             OPERATION,
-            CREATE_CAPABILITY,
+            capability,
             SESSIONS_CREATE_PATH,
             &[],
             "application/json",
@@ -3857,6 +3992,11 @@ fn validate_create_request(
             request.worktree_branch.as_deref(),
             REMOTE_CREATE_BRANCH_MAX_BYTES,
             "worktree branch",
+        ),
+        (
+            request.folder_path.as_deref(),
+            REMOTE_CREATE_PATH_MAX_BYTES,
+            "folder path",
         ),
     ] {
         if let Some(value) = value {
@@ -6896,6 +7036,8 @@ mod tests {
                         date_sorted: Some(true),
                         pinned: Some(true),
                         sort_order: None,
+                        folders: None,
+                        agent_folder_access: None,
                     }
                 )
                 .unwrap()

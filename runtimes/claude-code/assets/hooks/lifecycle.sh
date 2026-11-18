@@ -171,6 +171,13 @@ fi
 # treat a Claude-shaped SessionStart as busy. This is what re-links an
 # Unpeel session to the conversation the user resumed inside claude,
 # before any prompt is typed. Also accept Grok/Cursor camelCase names.
+# Multi-folder projects: Claude's own PascalCase SessionStart (launch,
+# /resume, /clear, /compact) gets a context note listing the folders. Not for
+# the camelCase compat names other tools send through this script.
+_unpeel_folder_context=""
+[ "$LAST_EVENT_NAME" = "SessionStart" ] && [ -n "${UNPEEL_PROJECT_FOLDERS:-}" ] \
+  && _unpeel_folder_context=1
+
 case "$LAST_EVENT_NAME" in
   SessionStart|session_start|sessionStart)
     INPUT=$(printf '%s' "$INPUT" | sed \
@@ -244,5 +251,28 @@ if [ -n "$UNPEEL_SESSION_ID" ]; then
 fi
 
 trace_claude_hook ""
+
+# Claude reads a SessionStart hook's stdout JSON; `additionalContext` reaches
+# the model. Folder paths are validated (absolute, no control characters), so
+# escaping backslash and quote is enough; lines join with a JSON "\n".
+print_folder_context() {
+  _folder_text="This Unpeel project spans several folders (primary first):"
+  while IFS= read -r _folder; do
+    [ -n "$_folder" ] || continue
+    _folder_text="$_folder_text\\n- $(json_escape_string "$_folder")"
+  done <<UNPEEL_FOLDERS
+$UNPEEL_PROJECT_FOLDERS
+UNPEEL_FOLDERS
+  if [ "${UNPEEL_PROJECT_FOLDERS_ACCESS:-}" = "1" ]; then
+    _folder_text="$_folder_text\\nYou can read and edit all of them."
+  else
+    _folder_text="$_folder_text\\nAccess outside the current folder may require the user's approval."
+  fi
+  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$_folder_text"
+}
+
+if [ -n "$_unpeel_folder_context" ]; then
+  print_folder_context
+fi
 
 exit 0

@@ -79,6 +79,19 @@ final class HostServiceAgentTests: XCTestCase {
         XCTAssertNil(unit["EnvironmentVariables"], "the machine service resolves its own homes")
     }
 
+    func testDevelopmentUnitIsAssociatedWithTheDevBundle() throws {
+        let data = try HostServiceAgent.renderPlist(
+            label: HostServiceAgent.developmentLabel,
+            hostBinary: "/tmp/dist/Unpeel.app/Contents/MacOS/unpeel-host"
+        )
+        let unit = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        )
+        XCTAssertEqual(
+            unit["AssociatedBundleIdentifiers"] as? [String], ["com.unpeel.native.dev"]
+        )
+    }
+
     func testFirstRunWritesTheUnitThenBootstrapsAndKickstarts() throws {
         let tool = FakeLaunchctl()
         XCTAssertEqual(ensure(tool), .running(label: HostServiceAgent.releaseLabel, rewrote: true))

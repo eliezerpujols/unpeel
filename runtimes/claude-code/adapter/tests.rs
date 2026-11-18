@@ -189,6 +189,64 @@ fn claude_hook_script_forwards_session_start_as_hook_seen() {
 }
 
 #[test]
+fn claude_session_start_prints_folder_context_only_for_multi_folder_sessions() {
+    let run = |event: &str, folders: Option<&str>, access: Option<&str>| {
+        let label = "claude-folder-context";
+        let script = write_temp_hook_script(label, crate::hook_assets::CLAUDE_HOOK_SCRIPT);
+        let mut command = Command::new("bash");
+        command
+            .arg(&script)
+            .env("HOME", hook_env_home(label))
+            .env("UNPEEL_SESSION_ID", "folder-context")
+            .env("UNPEEL_APP_PORT", "")
+            .env("UNPEEL_APP_PORT_REGISTRY_FILE", hook_env_home(label).join("no-ports"))
+            .env("UNPEEL_HOOK_TRACE_FILE", hook_trace_file(label))
+            .env_remove("GROK_SESSION_ID")
+            .env_remove("UNPEEL_PROJECT_FOLDERS")
+            .env_remove("UNPEEL_PROJECT_FOLDERS_ACCESS");
+        if let Some(folders) = folders {
+            command.env("UNPEEL_PROJECT_FOLDERS", folders);
+        }
+        if let Some(access) = access {
+            command.env("UNPEEL_PROJECT_FOLDERS_ACCESS", access);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn claude hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(json!({ "hook_event_name": event, "session_id": "s" }).to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let stdout = run("SessionStart", Some("/a b/\"q\"\n/c\\d*\n/e"), Some("1"));
+    let value: Value = serde_json::from_str(stdout.trim()).expect("hook stdout is JSON");
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert_eq!(
+        value["hookSpecificOutput"]["additionalContext"],
+        "This Unpeel project spans several folders (primary first):\n- /a b/\"q\"\n- /c\\d*\n- /e\nYou can read and edit all of them."
+    );
+    let stdout = run("SessionStart", Some("/a\n/b"), None);
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .ends_with("Access outside the current folder may require the user's approval."));
+    // Single-folder Sessions and every other event stay silent on stdout.
+    assert_eq!(run("SessionStart", None, Some("1")), "");
+    assert_eq!(run("Stop", Some("/a\n/b"), Some("1")), "");
+    assert_eq!(run("sessionStart", Some("/a\n/b"), Some("1")), "");
+}
+
+#[test]
 fn claude_hook_script_records_permission_tool_name() {
     let session_dir = temp_path("claude-record-perm");
     let payload = json!({

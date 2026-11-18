@@ -226,7 +226,7 @@ enum UnpeelWorkspaceContext {
     /// sentinel used by older callers. Other workspace instances read the
     /// standard suite so the sidebar presents one shared name.
     nonisolated static var defaultWorkspaceName: String? {
-        UserDefaults.standard.string(forKey: defaultWorkspaceNameKey)?
+        AppDefaults.machine.string(forKey: defaultWorkspaceNameKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
     }
@@ -235,7 +235,7 @@ enum UnpeelWorkspaceContext {
     nonisolated static func renameDefaultWorkspace(to rawName: String) -> Bool {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return false }
-        UserDefaults.standard.set(name, forKey: defaultWorkspaceNameKey)
+        AppDefaults.machine.set(name, forKey: defaultWorkspaceNameKey)
         return true
     }
 

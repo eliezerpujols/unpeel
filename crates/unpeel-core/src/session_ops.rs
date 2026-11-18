@@ -686,6 +686,135 @@ pub fn set_pinned(session_id: &str, pinned: bool) -> Result<(), String> {
     })
 }
 
+/// Replace a top-level project's folder list (`project.folders`). The list
+/// must already be normalized by [`crate::state::validate_project_folders`].
+/// A non-empty list makes `folders[0].path` the project's `path` and moves
+/// every plain group child still carrying the old primary path along with it;
+/// an empty list clears the folders and keeps the current path. Only
+/// top-level, non-worktree, non-group records accept folders.
+pub fn set_project_folders(
+    project_id: &str,
+    folders: &[crate::state::ProjectFolder],
+) -> Result<(), String> {
+    crate::app_state::edit(|state| set_project_folders_in_state(state, project_id, folders))
+}
+
+pub(crate) fn set_project_folders_in_state(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    project_id: &str,
+    folders: &[crate::state::ProjectFolder],
+) -> Result<(), String> {
+    use crate::state::normalize_project_folder_path;
+    let projects = state
+        .get_mut("projects")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("this project is managed by the desktop app — edit its folders there")?;
+    let string = |project: &serde_json::Value, key: &str| {
+        project
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+    };
+    let index = projects
+        .iter()
+        .position(|project| string(project, "id").as_deref() == Some(project_id))
+        .ok_or("this project is managed by the desktop app — edit its folders there")?;
+    let target = &projects[index];
+    if string(target, "parent_project_id").is_some()
+        || string(target, "worktree_branch").is_some()
+        || target
+            .get("is_folder")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err("only top-level projects can have folders".into());
+    }
+    let old_primary = string(target, "path").unwrap_or_default();
+    let Some(primary) = folders.first().map(|folder| folder.path.clone()) else {
+        if let Some(object) = projects[index].as_object_mut() {
+            object.remove("folders");
+        }
+        return Ok(());
+    };
+    let folders_value = serde_json::to_value(folders).map_err(|error| error.to_string())?;
+    if let Some(object) = projects[index].as_object_mut() {
+        object.insert("folders".into(), folders_value);
+        object.insert("path".into(), serde_json::Value::String(primary.clone()));
+    }
+    if normalize_project_folder_path(&old_primary) != primary {
+        let old_primary = normalize_project_folder_path(&old_primary);
+        for project in projects.iter_mut() {
+            let is_group_child = string(project, "parent_project_id").as_deref()
+                == Some(project_id)
+                && string(project, "worktree_branch").is_none()
+                && project
+                    .get("is_folder")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+            let follows_primary = string(project, "path")
+                .is_some_and(|path| normalize_project_folder_path(&path) == old_primary);
+            if is_group_child && follows_primary {
+                if let Some(object) = project.as_object_mut() {
+                    object.insert("path".into(), serde_json::Value::String(primary.clone()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Turn a top-level project's agent folder access on or off
+/// (`project.folders`). Off removes the key; groups inherit the parent's.
+pub fn set_agent_folder_access(project_id: &str, enabled: bool) -> Result<(), String> {
+    crate::app_state::edit(|state| set_agent_folder_access_in_state(state, project_id, enabled))
+}
+
+pub(crate) fn set_agent_folder_access_in_state(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    project_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let project = top_level_project_mut(state, project_id)?;
+    if enabled {
+        project.insert("agent_folder_access".into(), serde_json::Value::Bool(true));
+    } else {
+        project.remove("agent_folder_access");
+    }
+    Ok(())
+}
+
+fn top_level_project_mut<'a>(
+    state: &'a mut serde_json::Map<String, serde_json::Value>,
+    project_id: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>, String> {
+    const UNOWNED: &str = "this project is managed by the desktop app — edit its folders there";
+    let project = state
+        .get_mut("projects")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(UNOWNED)?
+        .iter_mut()
+        .find(|project| project.get("id").and_then(serde_json::Value::as_str) == Some(project_id))
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or(UNOWNED)?;
+    let present = |key: &str| {
+        project
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    if present("parent_project_id")
+        || present("worktree_branch")
+        || project
+            .get("is_folder")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err("only top-level projects can have folders".into());
+    }
+    Ok(project)
+}
+
 /// Pin or unpin one plain sidebar group.
 ///
 /// The marker lives on the group's project record so removing it reveals the
@@ -2642,9 +2771,86 @@ mod tests {
         prepare_legacy_pin_groups, provider_transcript_has_resume_data,
         remove_migrated_pin_entries, remove_unreferenced_legacy_pin_groups, rename_project_in,
         rewrite_app_state_session_references, rewrite_session_order_references_at,
-        rewrite_session_order_value, set_group_pinned_in_state,
-        validate_session_order_references_at, InitialTextSubmitMode,
+        rewrite_session_order_value, set_agent_folder_access_in_state, set_group_pinned_in_state,
+        set_project_folders_in_state, validate_session_order_references_at, InitialTextSubmitMode,
     };
+
+    #[test]
+    fn agent_folder_access_is_a_top_level_flag_removed_when_off() {
+        let serde_json::Value::Object(mut state) = serde_json::json!({ "projects": [
+            { "id": "p1", "name": "app", "path": "/src/app" },
+            { "id": "g1", "name": "Backlog", "path": "/src/app", "parent_project_id": "p1", "is_folder": true },
+        ]}) else {
+            unreachable!()
+        };
+        set_agent_folder_access_in_state(&mut state, "p1", true).unwrap();
+        assert_eq!(state["projects"][0]["agent_folder_access"], true);
+        set_agent_folder_access_in_state(&mut state, "p1", false).unwrap();
+        assert!(state["projects"][0].get("agent_folder_access").is_none());
+        assert!(set_agent_folder_access_in_state(&mut state, "g1", true).is_err());
+        assert!(set_agent_folder_access_in_state(&mut state, "nope", true).is_err());
+    }
+
+    #[test]
+    fn set_project_folders_moves_primary_and_following_groups_only() {
+        use crate::state::ProjectFolder;
+        let serde_json::Value::Object(mut state) = serde_json::json!({ "projects": [
+            { "id": "p1", "name": "app", "path": "/src/app/", "future_key": 1 },
+            { "id": "g1", "name": "Backlog", "path": "/src/app", "parent_project_id": "p1", "is_folder": true },
+            { "id": "g2", "name": "Elsewhere", "path": "/src/other", "parent_project_id": "p1", "is_folder": true },
+            { "id": "w1", "name": "feature", "path": "/src/app", "parent_project_id": "p1", "worktree_branch": "f" },
+        ]}) else {
+            unreachable!()
+        };
+        let folders = vec![
+            ProjectFolder {
+                path: "/src/web".into(),
+                name: Some("Web".into()),
+                icon: Some("glyph:globe".into()),
+            },
+            ProjectFolder {
+                path: "/src/app".into(),
+                name: None,
+                icon: None,
+            },
+        ];
+        set_project_folders_in_state(&mut state, "p1", &folders).unwrap();
+        let projects = state["projects"].as_array().unwrap();
+        assert_eq!(projects[0]["path"], "/src/web");
+        assert_eq!(projects[0]["future_key"], 1, "unknown keys survive");
+        assert_eq!(
+            projects[0]["folders"],
+            serde_json::json!([
+                { "path": "/src/web", "name": "Web", "icon": "glyph:globe" },
+                { "path": "/src/app" },
+            ])
+        );
+        assert_eq!(
+            projects[1]["path"], "/src/web",
+            "group following the old primary moves"
+        );
+        assert_eq!(
+            projects[2]["path"], "/src/other",
+            "a group with its own path stays"
+        );
+        assert_eq!(
+            projects[3]["path"], "/src/app",
+            "worktree checkouts never move"
+        );
+
+        for id in ["g1", "w1"] {
+            assert!(set_project_folders_in_state(&mut state, id, &folders).is_err());
+        }
+        assert!(set_project_folders_in_state(&mut state, "missing", &folders).is_err());
+
+        set_project_folders_in_state(&mut state, "p1", &[]).unwrap();
+        let projects = state["projects"].as_array().unwrap();
+        assert!(projects[0].get("folders").is_none(), "[] clears the list");
+        assert_eq!(
+            projects[0]["path"], "/src/web",
+            "and keeps the current path"
+        );
+    }
 
     #[test]
     fn rename_sets_a_top_level_or_group_name_and_refuses_worktree_children() {

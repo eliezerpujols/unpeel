@@ -309,7 +309,77 @@ fn project_path(scope: &ResourceScope, raw: &str) -> Result<String, Failure> {
         .ok_or_else(|| fail(400, "Folder path must be UTF-8"))
 }
 
-fn persist_project(path: &str) -> Result<Value, Failure> {
+/// `POST /mobile/projects/add`: `path` alone (shipped shape), or with
+/// `project.folders` an optional `name` and `folders` (`[{path,name?,icon?}]`,
+/// each proven inside the scope like `path`). With folders, `path` may be
+/// omitted and becomes `folders[0].path`; when both are given they must
+/// agree. Dedupe stays on the primary path.
+fn add_project(scope: &ResourceScope, body: &Value) -> Result<Value, Failure> {
+    let name = match body.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) => match name.trim() {
+            "" => None,
+            name if name.len() > crate::state::PROJECT_FOLDER_NAME_MAX_BYTES
+                || name.chars().any(char::is_control) =>
+            {
+                return Err(fail(400, "invalid project name"))
+            }
+            name => Some(name.to_owned()),
+        },
+        Some(_) => return Err(fail(400, "name must be a string")),
+    };
+    let agent_folder_access = match body.get("agentFolderAccess") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(fail(400, "agentFolderAccess must be a boolean")),
+    };
+    let folders = match body.get("folders") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => {
+            // Shape first (cheap, before any filesystem access), then prove
+            // every folder exists inside the scope and record the resolved
+            // spelling, re-validated as a whole for duplicates.
+            let parsed = crate::state::parse_project_folders_value(value)
+                .map_err(|message| fail(400, message))?;
+            let mut resolved = Vec::with_capacity(parsed.len());
+            for folder in parsed {
+                resolved.push(crate::state::ProjectFolder {
+                    path: project_path(scope, &folder.path)?,
+                    ..folder
+                });
+            }
+            crate::state::validate_project_folders(resolved)
+                .map_err(|message| fail(400, message))?
+        }
+    };
+    // An empty `path` is the shipped "home" shorthand, except beside folders
+    // where it means "omitted".
+    let raw_path = body
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.is_empty() || folders.is_empty());
+    let path = match (raw_path, folders.first()) {
+        (Some(raw), primary) => {
+            let path = project_path(scope, raw)?;
+            if primary.is_some_and(|primary| {
+                crate::state::normalize_project_folder_path(&path) != primary.path
+            }) {
+                return Err(fail(400, "path must equal the first folder"));
+            }
+            path
+        }
+        (None, Some(primary)) => primary.path.clone(),
+        (None, None) => return Err(fail(400, "path required")),
+    };
+    persist_project(&path, name.as_deref(), &folders, agent_folder_access)
+}
+
+fn persist_project(
+    path: &str,
+    name: Option<&str>,
+    folders: &[crate::state::ProjectFolder],
+    agent_folder_access: bool,
+) -> Result<Value, Failure> {
     crate::app_state::edit(|state| {
         let projects = state
             .entry("projects")
@@ -321,13 +391,21 @@ fn persist_project(path: &str) -> Result<Value, Failure> {
         }) {
             return Ok(project.clone());
         }
-        let project = json!({
+        let mut project = json!({
             "id": format!("host-{}", uuid::Uuid::new_v4()),
-            "name": Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or("/"),
+            "name": name.unwrap_or_else(|| {
+                Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or("/")
+            }),
             "path": path,
             "sort_order": projects.len(),
             "is_folder": false,
         });
+        if !folders.is_empty() {
+            project["folders"] = json!(folders);
+        }
+        if agent_folder_access {
+            project["agent_folder_access"] = json!(true);
+        }
         projects.push(project.clone());
         Ok(project)
     })
@@ -402,9 +480,7 @@ pub fn route(request: &ControllerRequest) -> Option<ControllerResponse> {
         ("POST", "/mobile/directories/create") => body_path(request)
             .and_then(|raw| ResourceScope::from_host().resolve(raw))
             .and_then(|resolved| create_directory(&resolved)),
-        ("POST", "/mobile/projects/add") => body_path(request)
-            .and_then(|raw| project_path(&ResourceScope::from_host(), raw))
-            .and_then(|path| persist_project(&path)),
+        ("POST", "/mobile/projects/add") => add_project(&ResourceScope::from_host(), &request.body),
         ("GET", "/mobile/files/read") => {
             let offset = query("offset")
                 .parse()
@@ -612,6 +688,55 @@ mod tests {
                     .map(|_| json!(null))
             ),
             403
+        );
+    }
+
+    /// Validation paths only: each case fails before `persist_project`
+    /// touches `app-state.json`.
+    #[test]
+    fn add_project_folders_are_validated_and_scoped_before_any_write() {
+        let fixture = fixture();
+        let src = fixture.project.join("src");
+        let docs = fixture.home.join("docs");
+        let case = |body: Value| status(add_project(&fixture.scope, &body));
+        assert_eq!(case(json!({})), 400, "path or folders required");
+        assert_eq!(case(json!({ "folders": "nope" })), 400);
+        assert_eq!(
+            case(json!({ "folders": [{ "path": "relative" }] })),
+            400,
+            "relative folder"
+        );
+        assert_eq!(
+            case(json!({ "folders": [{ "path": fixture.outside }] })),
+            403,
+            "folders are proven inside the scope like path"
+        );
+        assert_eq!(
+            case(
+                json!({ "folders": [{ "path": src }, { "path": format!("{}/", src.display()) }] })
+            ),
+            400,
+            "duplicate folder"
+        );
+        assert_eq!(
+            case(json!({ "path": docs, "folders": [{ "path": src }, { "path": docs }] })),
+            400,
+            "path must equal the primary folder"
+        );
+        assert_eq!(
+            case(json!({ "folders": [{ "path": src, "icon": "emoji:" }] })),
+            400,
+            "empty emoji"
+        );
+        assert_eq!(case(json!({ "path": src, "name": 7 })), 400);
+        assert_eq!(
+            case(json!({ "path": src, "agentFolderAccess": "yes" })),
+            400
+        );
+        assert_eq!(
+            case(json!({ "path": src, "name": "x".repeat(201) })),
+            400,
+            "name is bounded"
         );
     }
 

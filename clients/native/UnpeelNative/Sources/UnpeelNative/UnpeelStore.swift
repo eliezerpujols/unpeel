@@ -517,7 +517,7 @@ final class UnpeelStore: ObservableObject {
             return own
         }
         if !UnpeelWorkspaceContext.isDefaultInstance,
-           let inherited = UserDefaults.standard.object(
+           let inherited = AppDefaults.machine.object(
                forKey: menuAttentionDetectionKey
            ) as? Bool {
             return inherited
@@ -2555,6 +2555,16 @@ final class UnpeelStore: ObservableObject {
         return result
     }
 
+    /// `app-state.json` shape of a folder list (`ProjectFolder` in state.rs).
+    nonisolated static func sharedStateFolders(_ folders: [ProjectFolder]) -> [[String: Any]] {
+        folders.map { folder in
+            var entry: [String: Any] = ["path": folder.path]
+            if let name = folder.name, !name.isEmpty { entry["name"] = name }
+            if let icon = folder.icon, !icon.isEmpty { entry["icon"] = icon }
+            return entry
+        }
+    }
+
     private func mirrorProjectsToSharedState() {
         let records = loadNativeProjects()
         let tombstoned = Set(
@@ -2591,10 +2601,22 @@ final class UnpeelStore: ObservableObject {
             if let parent = record.parentProjectID { desired["parent_project_id"] = parent }
             if let branch = record.worktreeBranch { desired["worktree_branch"] = branch }
             if record.isFolder == true { desired["is_folder"] = true }
+            if let folders = record.folders, !folders.isEmpty {
+                desired["folders"] = Self.sharedStateFolders(folders)
+            }
+            if record.agentFolderAccess == true { desired["agent_folder_access"] = true }
             if let index = projects.firstIndex(where: { ($0["id"] as? String) == record.id }) {
                 // Update in place, preserving fields we don't model.
                 var mergedEntry = projects[index]
                 var rowChanged = false
+                if record.folders?.isEmpty == true, mergedEntry["folders"] != nil {
+                    mergedEntry.removeValue(forKey: "folders")
+                    rowChanged = true
+                }
+                if record.agentFolderAccess == false, mergedEntry["agent_folder_access"] != nil {
+                    mergedEntry.removeValue(forKey: "agent_folder_access")
+                    rowChanged = true
+                }
                 for (key, value) in desired
                 where (mergedEntry[key] as? NSObject) != (value as? NSObject) {
                     mergedEntry[key] = value
@@ -3968,6 +3990,10 @@ final class UnpeelStore: ObservableObject {
     }
 
     @Published var remoteFolderPickerPresented = false
+    /// Inline folder rename under a project/group row.
+    @Published var renamingProjectFolder: ProjectFolderRenameTarget?
+    /// The New Project / Edit Folders dialog (RootView presents it).
+    @Published var projectFoldersEditor: ProjectFoldersEditorRequest?
     private var remoteFolderCompletion: (@MainActor (String?) -> Void)?
     private var remoteFolderScope: SelectedHostScope?
 
@@ -4190,7 +4216,7 @@ final class UnpeelStore: ObservableObject {
     /// default instance itself (its own overlay IS the baseline).
     static func inheritedDefaultTheme() -> ThemePreference? {
         guard !UnpeelWorkspaceContext.isDefaultInstance else { return nil }
-        return UserDefaults.standard.string(forKey: nativeThemeKey)
+        return AppDefaults.machine.string(forKey: nativeThemeKey)
             .flatMap(ThemePreference.init(rawValue:))
     }
 
@@ -4506,7 +4532,7 @@ final class UnpeelStore: ObservableObject {
         }
         // Decision 4: no setting of its own — inherit the default
         // workspace's baseline from the shared `.standard` domain.
-        if let raw = UserDefaults.standard.string(forKey: nativeThemeKey),
+        if let raw = AppDefaults.machine.string(forKey: nativeThemeKey),
            let preference = ThemePreference(rawValue: raw) {
             return preference
         }
@@ -11610,6 +11636,386 @@ final class UnpeelStore: ObservableObject {
 
     /// After a Host-routed rename succeeded: update the matching native
     /// record without mirroring (the file already carries the new name).
+    // MARK: - Multi-folder projects (`project.folders`)
+
+    /// The folders a project's sessions can start in: its own list; a plain
+    /// group resolves through its parent (groups are project-wide); a
+    /// worktree child is just its checkout.
+    func effectiveProjectFolders(_ projectID: String) -> [ProjectFolder] {
+        guard let project = displayProjectsByID[projectID] ?? projectsByID[projectID]
+        else { return [] }
+        if project.worktreeBranch != nil { return [ProjectFolder(path: project.path)] }
+        if project.isFolder == true, let parentID = project.parentProjectID,
+           let parent = displayProjectsByID[parentID] ?? projectsByID[parentID] {
+            return parent.ownFolders
+        }
+        return project.ownFolders
+    }
+
+    /// Whether this scope can edit a top-level project's folders: the
+    /// Host must advertise `project.folders` when it owns the verb; plain
+    /// `.local` falls back to the local records.
+    func canEditProjectFolders(_ projectID: String) -> Bool {
+        guard let project = displayProjectsByID[projectID] ?? projectsByID[projectID],
+              project.parentProjectID == nil, project.worktreeBranch == nil
+        else { return false }
+        if routesProjectVerbThroughHost(projectID) {
+            return remoteHostRuntime.supportsHostOperation(
+                RemoteHostRuntime.HostOperation.projectFolders
+            )
+        }
+        return selectedHostScope == .local
+    }
+
+    /// The New Project dialog builds multi-folder projects from local
+    /// folders, so it is offered on this Mac's default scope only; other
+    /// scopes keep the single-folder picker.
+    var canCreateMultiFolderProject: Bool { selectedHostScope == .local }
+
+    /// Sanitized folder list: absolute, de-duplicated, trimmed names, max 32.
+    nonisolated static func sanitizedProjectFolders(_ folders: [ProjectFolder]) -> [ProjectFolder] {
+        var seen = Set<String>()
+        var result: [ProjectFolder] = []
+        for folder in folders {
+            // Check before normalizing: URL(fileURLWithPath:) would resolve a
+            // relative path against the app's working directory.
+            guard folder.path.hasPrefix("/") else { continue }
+            let path = normalizedProjectPath(folder.path)
+            guard seen.insert(path).inserted else { continue }
+            let name = folder.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            result.append(ProjectFolder(
+                path: path,
+                name: (name?.isEmpty ?? true) ? nil : name,
+                icon: (folder.icon?.isEmpty ?? true) ? nil : folder.icon
+            ))
+            if result.count == 32 { break }
+        }
+        return result
+    }
+
+    /// Replace a top-level project's folder list (primary first) and/or its
+    /// agent access to all folders (nil = leave unchanged). The project's
+    /// `path` follows the primary, and so do plain groups that still carry
+    /// the old primary path. A single plain folder clears the list back to
+    /// an ordinary one-folder project.
+    @discardableResult
+    func setProjectFolders(
+        _ projectID: String,
+        folders rawFolders: [ProjectFolder]? = nil,
+        agentFolderAccess: Bool? = nil
+    ) -> Bool {
+        guard canEditProjectFolders(projectID),
+              let project = displayProjectsByID[projectID] ?? projectsByID[projectID]
+        else { return false }
+        let oldPath = project.path
+        var stored: [ProjectFolder]?
+        var primaryPath = oldPath
+        if let rawFolders {
+            let folders = Self.sanitizedProjectFolders(rawFolders)
+            guard let primary = folders.first else { return false }
+            let list: [ProjectFolder] = (folders.count == 1
+                && primary.name == nil && primary.icon == nil) ? [] : folders
+            if list != (project.folders ?? []) || primary.path != project.path {
+                stored = list
+                primaryPath = primary.path
+            }
+        }
+        let access = agentFolderAccess.flatMap {
+            $0 == (project.agentFolderAccess ?? false) ? nil : $0
+        }
+        guard stored != nil || access != nil else { return false }
+
+        if routesProjectVerbThroughHost(projectID) {
+            let wire = stored?.map {
+                RemoteProjectFolder(path: $0.path, name: $0.name, icon: $0.icon)
+            }
+            performRemoteVerb("Couldn't update the project's folders") { [weak self] runtime in
+                try await runtime.setProjectFolders(
+                    projectID: projectID, folders: wire, agentFolderAccess: access
+                )
+                // The Host wrote app-state.json; keep native records in step
+                // so a later mirror never reverts the primary path.
+                self?.applyProjectFoldersToNativeRecords(
+                    projectID, folders: stored, agentFolderAccess: access,
+                    primaryPath: primaryPath, oldPath: oldPath
+                )
+            }
+            return true
+        }
+        guard selectedHostScope == .local else { return false }
+        if !applyProjectFoldersToNativeRecords(
+            projectID, folders: stored, agentFolderAccess: access,
+            primaryPath: primaryPath, oldPath: oldPath
+        ) {
+            // A project another frontend created: edit app-state directly.
+            let changed = editPresetStateAnnouncing { object in
+                var projects = (object["projects"] as? [[String: Any]]) ?? []
+                guard let index = projects.firstIndex(where: {
+                    ($0["id"] as? String) == projectID && $0["parent_project_id"] == nil
+                }) else { return }
+                if let access {
+                    if access {
+                        projects[index]["agent_folder_access"] = true
+                    } else {
+                        projects[index].removeValue(forKey: "agent_folder_access")
+                    }
+                }
+                if let stored {
+                    projects[index]["path"] = primaryPath
+                    if stored.isEmpty {
+                        projects[index].removeValue(forKey: "folders")
+                    } else {
+                        projects[index]["folders"] = Self.sharedStateFolders(stored)
+                    }
+                    for child in projects.indices
+                    where (projects[child]["parent_project_id"] as? String) == projectID
+                        && (projects[child]["is_folder"] as? Bool) == true
+                        && projects[child]["worktree_branch"] == nil
+                        && (projects[child]["path"] as? String) == oldPath {
+                        projects[child]["path"] = primaryPath
+                    }
+                }
+                object["projects"] = projects
+            }
+            guard changed else { return false }
+        }
+        rescan()
+        return true
+    }
+
+    /// Returns false when no native record owns this project. Nil
+    /// `folders`/`agentFolderAccess` leave that part unchanged.
+    @discardableResult
+    private func applyProjectFoldersToNativeRecords(
+        _ projectID: String,
+        folders: [ProjectFolder]?,
+        agentFolderAccess: Bool?,
+        primaryPath: String,
+        oldPath: String
+    ) -> Bool {
+        var records = loadNativeProjects()
+        guard let index = records.firstIndex(where: { $0.id == projectID }) else { return false }
+        if let agentFolderAccess { records[index].agentFolderAccess = agentFolderAccess }
+        if let folders {
+            records[index].path = primaryPath
+            records[index].folders = folders
+            for child in records.indices
+            where records[child].parentProjectID == projectID
+                && records[child].isFolder == true
+                && records[child].worktreeBranch == nil
+                && records[child].path == oldPath {
+                records[child].path = primaryPath
+            }
+        }
+        guard let data = try? JSONEncoder().encode(records) else { return false }
+        AppDefaults.shared.set(data, forKey: Self.nativeProjectsKey)
+        mirrorProjectsToSharedState()
+        return true
+    }
+
+    /// Effective agent access for a project row (groups use the parent's).
+    func projectAgentFolderAccess(_ projectID: String) -> Bool {
+        guard let project = displayProjectsByID[projectID] ?? projectsByID[projectID]
+        else { return false }
+        if project.isFolder == true, project.worktreeBranch == nil,
+           let parentID = project.parentProjectID,
+           let parent = displayProjectsByID[parentID] ?? projectsByID[parentID] {
+            return parent.agentFolderAccess ?? false
+        }
+        return project.agentFolderAccess ?? false
+    }
+
+    /// New Project dialog → one project made of `folders` (primary first).
+    /// Reuses a top-level project whose path is already the primary. The
+    /// whole record (name, path, folders) is written in one step: `rescan()`
+    /// may be asynchronous, so a follow-up edit could not find it yet.
+    @discardableResult
+    func createProject(
+        name rawName: String,
+        folders rawFolders: [ProjectFolder],
+        agentFolderAccess: Bool = false
+    ) -> String? {
+        guard canCreateMultiFolderProject else { return nil }
+        let folders = Self.sanitizedProjectFolders(rawFolders)
+        guard let primary = folders.first else { return nil }
+        let stored: [ProjectFolder] = (folders.count == 1
+            && primary.name == nil && primary.icon == nil) ? [] : folders
+        let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmedName.isEmpty ? Self.projectFolderName(primary.path) : trimmedName
+
+        let projectID: String
+        let existingID = projectsByID.values.first(where: {
+            $0.parentProjectID == nil
+                && Self.normalizedProjectPath($0.path) == primary.path
+        })?.id ?? loadNativeProjects().first(where: {
+            $0.parentProjectID == nil
+                && Self.normalizedProjectPath($0.path) == primary.path
+        })?.id
+        if let existingID {
+            // Already a project here: fold the dialog's folders into it.
+            projectID = existingID
+            setProjectFolders(projectID, folders: folders, agentFolderAccess: agentFolderAccess)
+            if !trimmedName.isEmpty { renameTopLevelProject(projectID, to: trimmedName) }
+        } else {
+            projectID = "native-\(UUID().uuidString.lowercased())"
+            var records = loadNativeProjects()
+            records.append(NativeProjectRecord(
+                id: projectID, name: name, path: primary.path, folders: stored,
+                agentFolderAccess: agentFolderAccess ? true : nil
+            ))
+            guard let data = try? JSONEncoder().encode(records) else { return nil }
+            AppDefaults.shared.set(data, forKey: Self.nativeProjectsKey)
+            mirrorProjectsToSharedState()
+            rescan()
+        }
+        settingsVisible = false
+        selectedSessionID = nil
+        expandedProjectIDs.insert(projectID)
+        launcherProjectID = projectID
+        return projectID
+    }
+
+    /// The dialog's request: nil `projectID` = New Project.
+    struct ProjectFoldersEditorRequest: Identifiable, Equatable {
+        let id = UUID()
+        let projectID: String?
+        let name: String
+        let folders: [ProjectFolder]
+        let agentFolderAccess: Bool
+    }
+
+    func presentNewProjectDialog(initialFolders: [String] = []) {
+        guard canCreateMultiFolderProject else { addProjectFolder(); return }
+        projectFoldersEditor = ProjectFoldersEditorRequest(
+            projectID: nil,
+            name: "",
+            folders: initialFolders.map { ProjectFolder(path: Self.normalizedProjectPath($0)) },
+            // New multi-folder projects give agents every folder by default.
+            agentFolderAccess: true
+        )
+    }
+
+    func presentEditProjectFolders(_ projectID: String) {
+        guard canEditProjectFolders(projectID),
+              let project = displayProjectsByID[projectID] ?? projectsByID[projectID]
+        else { return }
+        projectFoldersEditor = ProjectFoldersEditorRequest(
+            projectID: projectID, name: project.name, folders: project.ownFolders,
+            agentFolderAccess: project.agentFolderAccess ?? false
+        )
+    }
+
+    func finishProjectFoldersEditor(
+        name: String, folders: [ProjectFolder]?, agentFolderAccess: Bool
+    ) {
+        guard let request = projectFoldersEditor else { return }
+        projectFoldersEditor = nil
+        guard let folders else { return }
+        if let projectID = request.projectID {
+            setProjectFolders(projectID, folders: folders, agentFolderAccess: agentFolderAccess)
+            if name.trimmingCharacters(in: .whitespacesAndNewlines) != request.name,
+               canRenameTopLevelProject(projectID) {
+                renameTopLevelProject(projectID, to: name)
+            }
+        } else {
+            createProject(name: name, folders: folders, agentFolderAccess: agentFolderAccess)
+        }
+    }
+
+    /// Right-click ▸ Folders actions on a project row.
+    func performProjectFolderAction(_ projectID: String, _ action: ProjectFolderAction) {
+        let root = rootProjectID(forFolderActionsOf: projectID)
+        var folders = effectiveProjectFolders(projectID)
+        switch action {
+        case let .launch(preset, folderPath):
+            launchSession(
+                projectID: projectID,
+                command: preset.command,
+                sourcePresetID: preset.command.isEmpty ? nil : preset.id,
+                folderPath: folderPath
+            )
+        case .reveal(let path):
+            revealInFinder(path: path)
+        case .edit:
+            presentEditProjectFolders(root)
+        case .setAgentAccess(let enabled):
+            setProjectFolders(root, agentFolderAccess: enabled)
+        case .add:
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.allowsMultipleSelection = true
+            panel.title = "Add folders to project"
+            panel.prompt = "Add"
+            panel.begin { [weak self] response in
+                guard response == .OK else { return }
+                let added = panel.urls.map { ProjectFolder(path: $0.path) }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.setProjectFolders(root, folders: self.effectiveProjectFolders(root) + added)
+                }
+            }
+        case .rename(let path):
+            guard let folder = folders.first(where: { $0.path == path }) else { return }
+            renamingProjectFolder = ProjectFolderRenameTarget(
+                rowID: projectID, rootProjectID: root, folder: folder
+            )
+        case let .setIcon(path, icon):
+            guard let index = folders.firstIndex(where: { $0.path == path }) else { return }
+            folders[index].icon = icon?.wire
+            setProjectFolders(root, folders: folders)
+        case .chooseEmoji(let path):
+            guard let index = folders.firstIndex(where: { $0.path == path }) else { return }
+            let alert = NSAlert()
+            alert.messageText = "Folder emoji"
+            alert.informativeText = "Type or paste one emoji (⌃⌘Space opens the emoji picker)."
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+            if case .emoji(let text)? = folders[index].parsedIcon { field.stringValue = text }
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Set")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            folders[index].icon = text.isEmpty
+                ? nil
+                : ProjectFolderIcon.emoji(String(text.prefix(1))).wire
+            setProjectFolders(root, folders: folders)
+        case .makePrimary(let path):
+            guard let index = folders.firstIndex(where: { $0.path == path }), index > 0
+            else { return }
+            let folder = folders.remove(at: index)
+            folders.insert(folder, at: 0)
+            setProjectFolders(root, folders: folders)
+        case .remove(let path):
+            guard folders.count > 1 else { return }
+            folders.removeAll { $0.path == path }
+            setProjectFolders(root, folders: folders)
+        }
+    }
+
+    /// Inline rename result: blank resets to the folder's own name.
+    func commitProjectFolderRename(_ rawName: String) {
+        guard let target = renamingProjectFolder else { return }
+        renamingProjectFolder = nil
+        var folders = effectiveProjectFolders(target.rootProjectID)
+        guard let index = folders.firstIndex(where: { $0.path == target.folder.path }) else { return }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newName: String? = (name.isEmpty || name == folders[index].folderName) ? nil : name
+        guard newName != folders[index].name else { return }
+        folders[index].name = newName
+        setProjectFolders(target.rootProjectID, folders: folders)
+    }
+
+    /// Folder edits always apply to the top-level project (groups share it).
+    private func rootProjectID(forFolderActionsOf projectID: String) -> String {
+        guard let project = displayProjectsByID[projectID] ?? projectsByID[projectID],
+              project.isFolder == true, project.worktreeBranch == nil,
+              let parentID = project.parentProjectID
+        else { return projectID }
+        return parentID
+    }
+
     private func recordHostRenamedNativeProject(_ projectID: String, name: String) {
         var records = loadNativeProjects()
         guard let index = records.firstIndex(where: { $0.id == projectID }),
@@ -13684,7 +14090,8 @@ final class UnpeelStore: ObservableObject {
     struct NativeProjectRecord: Codable, Equatable {
         let id: String
         var name: String
-        let path: String
+        /// The primary folder; equals `folders[0].path` when folders is set.
+        var path: String
         var parentProjectID: String?
         var worktreeBranch: String?
         /// True only for linked worktrees adopted automatically from Git.
@@ -13694,6 +14101,12 @@ final class UnpeelStore: ObservableObject {
         /// Plain group child folders (parent set, no branch); optional so
         /// records written by older builds keep decoding.
         var isFolder: Bool?
+        /// Multi-folder project list (primary first). Nil = this record does
+        /// not model folders (the mirror leaves app-state's untouched); empty
+        /// = explicitly single-folder (the mirror removes the key).
+        var folders: [ProjectFolder]?
+        /// `agent_folder_access`; nil = not modeled (mirror leaves it).
+        var agentFolderAccess: Bool?
     }
 
     private static let nativeProjectsKey = "unpeel.native.projects"
@@ -13736,7 +14149,9 @@ final class UnpeelStore: ObservableObject {
                     isFolder: record.isFolder,
                     worktreeBranch: record.worktreeBranch,
                     workspacesEnabled: nil,
-                    mcpBlocked: nil
+                    mcpBlocked: nil,
+                    folders: record.folders?.isEmpty == false ? record.folders : nil,
+                    agentFolderAccess: record.agentFolderAccess
                 )
             }
     }
@@ -13938,6 +14353,9 @@ final class UnpeelStore: ObservableObject {
     /// handleAddProject:1099-1120): folder picker, then the project appears
     /// in the tree. Stored natively; never written to app-state.json.
     func addProjectFolder() {
+        // This Mac's default scope: the New Project dialog (several folders
+        // can make up one project). Other scopes keep the folder picker.
+        if canCreateMultiFolderProject { presentNewProjectDialog(); return }
         guard selectedHostScope.isLocalMachine else { pickProjectFolder { _ in }; return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -15287,7 +15705,12 @@ final class UnpeelStore: ObservableObject {
 
     /// Writes a launch file and spawns unpeel-host detached, then polls for
     /// the manifest (≤2s) and selects the new session.
-    func launchSession(projectID: String, command: String, sourcePresetID: String? = nil) {
+    func launchSession(
+        projectID: String,
+        command: String,
+        sourcePresetID: String? = nil,
+        folderPath: String? = nil
+    ) {
         // Remote scope: session creation is a Host operation. The matching
         // Host preset id is preferred so the Host resolves its own catalog;
         // a bare command travels as-is. No local spawn can happen here.
@@ -15303,7 +15726,8 @@ final class UnpeelStore: ObservableObject {
             try await runtime.createSession(
                 projectID: projectID,
                 presetID: presetID,
-                command: presetID == nil ? command : nil
+                command: presetID == nil ? command : nil,
+                folderPath: folderPath
             )
         }
     }
@@ -15645,7 +16069,11 @@ extension UnpeelStore {
                 isFolder: summary.isGroup == true ? true : nil,
                 worktreeBranch: summary.worktreeBranch,
                 workspacesEnabled: nil,
-                mcpBlocked: summary.mcpBlocked ? true : nil
+                mcpBlocked: summary.mcpBlocked ? true : nil,
+                folders: summary.folders?.map {
+                    ProjectFolder(path: $0.path, name: $0.name, icon: $0.icon)
+                },
+                agentFolderAccess: summary.agentFolderAccess
             ))
         }
         let knownProjectIDs = Set(projects.map(\.id))

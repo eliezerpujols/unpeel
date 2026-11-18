@@ -26,6 +26,11 @@ struct ProjectContext {
     id: String,
     name: String,
     path: String,
+    /// `project.folders`: the effective folders (a group's come from its
+    /// parent), primary first. Omitted for single-folder projects and
+    /// worktree checkouts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<unpeel_core::state::ProjectFolder>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -56,6 +61,8 @@ struct ProjectRecord {
     path: String,
     parent_id: Option<String>,
     worktree_branch: Option<String>,
+    is_folder: bool,
+    folders: Vec<unpeel_core::state::ProjectFolder>,
 }
 
 pub(crate) fn response_with_overlay(
@@ -109,6 +116,8 @@ fn project_records(
                     path: project.path.clone(),
                     parent_id: project.parent_project_id.clone(),
                     worktree_branch: project.worktree_branch.clone(),
+                    is_folder: project.is_folder,
+                    folders: project.folders.clone(),
                 },
             );
         }
@@ -123,6 +132,8 @@ fn project_records(
                 path: path.clone(),
                 parent_id: child.map(|(parent, _)| parent.clone()),
                 worktree_branch: child.and_then(|(_, branch)| branch.clone()),
+                is_folder: child.is_some_and(|(_, branch)| branch.is_none()),
+                folders: Vec::new(),
             });
             record.name.clone_from(name);
             if !path.is_empty() {
@@ -155,6 +166,18 @@ fn resolve_project(
     } else {
         selected
     };
+    let folders = match selected {
+        Some(project) if !selected_is_worktree && !project.folders.is_empty() => {
+            project.folders.clone()
+        }
+        Some(project) if !selected_is_worktree && project.is_folder => project
+            .parent_id
+            .as_deref()
+            .and_then(|parent| records.get(parent))
+            .map(|parent| parent.folders.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let project = base.and_then(|project| {
         let path = absolute_wire_path(&project.path)?;
         valid_wire_text(&project.id, 256)
@@ -164,6 +187,7 @@ fn resolve_project(
             id: project.id.clone(),
             name: project.name.clone(),
             path,
+            folders,
         })
     });
 
@@ -308,6 +332,31 @@ mod tests {
                     path: "/repo".into(),
                     parent_id: None,
                     worktree_branch: None,
+                    is_folder: false,
+                    folders: vec![
+                        unpeel_core::state::ProjectFolder {
+                            path: "/repo".into(),
+                            name: None,
+                            icon: None,
+                        },
+                        unpeel_core::state::ProjectFolder {
+                            path: "/docs".into(),
+                            name: Some("Docs".into()),
+                            icon: Some("glyph:book".into()),
+                        },
+                    ],
+                },
+            ),
+            (
+                "group".to_string(),
+                ProjectRecord {
+                    id: "group".into(),
+                    name: "Backlog".into(),
+                    path: "/repo".into(),
+                    parent_id: Some("base".into()),
+                    worktree_branch: None,
+                    is_folder: true,
+                    folders: Vec::new(),
                 },
             ),
             (
@@ -318,11 +367,22 @@ mod tests {
                     path: "/repo-feature".into(),
                     parent_id: Some("base".into()),
                     worktree_branch: Some("feature/context".into()),
+                    is_folder: false,
+                    folders: Vec::new(),
                 },
             ),
         ]);
         let (project, worktree) = resolve_project("child", None, None, "/repo-feature", &records);
-        assert_eq!(project.unwrap().path, "/repo");
+        let project = project.unwrap();
+        assert_eq!(project.path, "/repo");
+        assert!(
+            project.folders.is_empty(),
+            "a worktree checkout has no folders"
+        );
+        let (group, _) = resolve_project("group", None, None, "/repo", &records);
+        let folders = group.unwrap().folders;
+        assert_eq!(folders.len(), 2, "a group reports its parent's folders");
+        assert_eq!(folders[1].name.as_deref(), Some("Docs"));
         assert_eq!(
             worktree.unwrap(),
             WorktreeContext {

@@ -437,7 +437,7 @@ struct WorkspacesSettingsPanel: View {
                     homeDir: URL(fileURLWithPath: record.home, isDirectory: true)
                 )
             } else if isDefault {
-                UserDefaults.standard
+                AppDefaults.machine
                     .set(tint.rawValue, forKey: UnpeelStore.nativeAppTintKey)
                 Self.pingReloadAppearance(
                     homeDir: UnpeelWorkspaceRegistry.realUnpeelDir
@@ -816,14 +816,14 @@ enum RemoteWorkspaceTint {
     private static let key = "unpeel.native.remoteWorkspaceTint"
 
     static func get(_ hostID: String) -> AppTint {
-        (UserDefaults.standard.dictionary(forKey: key)?[hostID] as? String)
+        (AppDefaults.machine.dictionary(forKey: key)?[hostID] as? String)
             .flatMap(AppTint.init(rawValue:)) ?? .none
     }
 
     static func set(_ tint: AppTint, hostID: String) {
-        var map = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+        var map = AppDefaults.machine.dictionary(forKey: key) as? [String: String] ?? [:]
         map[hostID] = tint.rawValue
-        UserDefaults.standard.set(map, forKey: key)
+        AppDefaults.machine.set(map, forKey: key)
     }
 }
 

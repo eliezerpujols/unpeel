@@ -36,7 +36,7 @@ struct PluginSettingsPanel: View {
     @State private var pendingIntegrations: Set<String> = []
     @State private var integrationErrors: [String: String] = [:]
     @State private var showManualSetup = false
-    @State private var bannerDismissed = UserDefaults.standard.bool(forKey: PluginSettingsPanel.bannerDismissedKey)
+    @State private var bannerDismissed = AppDefaults.machine.bool(forKey: PluginSettingsPanel.bannerDismissedKey)
     @ObservedObject private var terminalFont = TerminalFontModel.shared
 
     /// Per-viewer convenience only: the "install these integrations?" banner
@@ -418,7 +418,7 @@ struct PluginSettingsPanel: View {
 
     private func dismissBanner() {
         withAnimation(motion) { bannerDismissed = true }
-        UserDefaults.standard.set(true, forKey: Self.bannerDismissedKey)
+        AppDefaults.machine.set(true, forKey: Self.bannerDismissedKey)
     }
 
     /// First-run nudge: agents were found on the Host that Unpeel could

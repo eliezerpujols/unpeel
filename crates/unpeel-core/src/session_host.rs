@@ -1234,7 +1234,14 @@ fn resume_agent_in_place(
         mcp_enabled,
         browser_mcp_enabled,
     );
-    let startup_command = relaunch_command.trim().to_string();
+    // Project folders (opt-in): flags and the two folder variables are
+    // recomputed from the current project state for this generation, since
+    // the live shell still holds the values from its own launch.
+    let startup_command = folder_access_relaunch_command(
+        relaunch_command.trim(),
+        &manifest.session.project_id,
+        &manifest.cwd,
+    );
 
     let guard = runtime
         .lock()
@@ -2428,6 +2435,39 @@ fn build_startup_shell_script(
 /// persistent fish shell after the provider exits. Other live-shell syntaxes
 /// are rejected before the current agent is touched; they cannot safely share
 /// either POSIX or fish quoting rules.
+/// The in-place relaunch command with the project-folder environment and,
+/// when the project's `agent_folder_access` applies, the runtime's
+/// workspace-dir flags. POSIX assignment prefixes are valid in every shell
+/// family this path accepts (fish runs the recipe under `/bin/sh`).
+#[cfg(unix)]
+fn folder_access_relaunch_command(command: &str, project_id: &str, cwd: &str) -> String {
+    let folders = crate::state::project_folder_launch_from_disk(project_id);
+    folder_access_relaunch_command_for(command, cwd, &folders)
+}
+
+#[cfg(unix)]
+fn folder_access_relaunch_command_for(
+    command: &str,
+    cwd: &str,
+    folders: &crate::state::ProjectFolderLaunch,
+) -> String {
+    // Single-folder projects relaunch exactly as before (a live shell that
+    // still exports a since-removed list keeps it until the next launch).
+    if folders.folders.len() < 2 {
+        return command.to_string();
+    }
+    let injected = integrations::folder_access_exec_command(command, cwd, folders);
+    let access = if injected.is_some() { "1" } else { "" };
+    let list = folders.folders.join("\n");
+    format!(
+        "{}={} {}={access} {}",
+        integrations::PROJECT_FOLDERS_ENV,
+        shared::shell_quote(&list),
+        integrations::PROJECT_FOLDERS_ACCESS_ENV,
+        injected.as_deref().unwrap_or(command),
+    )
+}
+
 #[cfg(unix)]
 fn runtime_generation_scoped_command(
     shell_family: ShellFamily,
@@ -6226,7 +6266,24 @@ pub(crate) fn start_host(
             Some(true) | None => cmd.env("COLORFGBG", "15;0"),
             Some(false) => cmd.env("COLORFGBG", "0;15"),
         };
-        integrations::configure_host_command(&launch, &mut cmd, &mut shell_prelude)?;
+        // Project folders: the one opt-in exception to plain launches. The
+        // exec command may carry the runtime's workspace-dir flags; the
+        // manifest keeps `launch.session.command` exactly as stored.
+        let project_folders =
+            crate::state::project_folder_launch_from_disk(&launch.session.project_id);
+        let folder_access_command = integrations::folder_access_exec_command(
+            trimmed_command,
+            &launch.cwd,
+            &project_folders,
+        );
+        integrations::configure_host_command_with_folders(
+            &launch,
+            &mut cmd,
+            &mut shell_prelude,
+            &project_folders,
+            folder_access_command.is_some(),
+        )?;
+        let exec_command = folder_access_command.as_deref().unwrap_or(trimmed_command);
         let registration = integrations::mcp_registration_evidence(
             runtime_id,
             launch.mcp_enabled,
@@ -6247,7 +6304,7 @@ pub(crate) fn start_host(
             cmd.args(["-l", "-i"]);
         } else {
             let startup_command =
-                runtime_generation_scoped_command(ShellFamily::Posix, trimmed_command, 1);
+                runtime_generation_scoped_command(ShellFamily::Posix, exec_command, 1);
             let startup_command = if launches_resume_agent_runtime {
                 runtime_launch_completion_command(
                     ShellFamily::Posix,
@@ -6517,6 +6574,38 @@ mod tests {
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_relaunch_recomputes_folder_flags_and_env() {
+        use super::folder_access_relaunch_command_for;
+        use crate::state::ProjectFolderLaunch;
+        let on = ProjectFolderLaunch {
+            folders: vec!["/a".into(), "/b c".into()],
+            agent_folder_access: true,
+        };
+        assert_eq!(
+            folder_access_relaunch_command_for("claude --resume 'x'", "/a", &on),
+            "UNPEEL_PROJECT_FOLDERS='/a\n/b c' UNPEEL_PROJECT_FOLDERS_ACCESS=1 claude --resume 'x' --add-dir '/b c'"
+        );
+        let off = ProjectFolderLaunch {
+            agent_folder_access: false,
+            ..on.clone()
+        };
+        assert_eq!(
+            folder_access_relaunch_command_for("claude --resume 'x'", "/a", &off),
+            "UNPEEL_PROJECT_FOLDERS='/a\n/b c' UNPEEL_PROJECT_FOLDERS_ACCESS= claude --resume 'x'"
+        );
+        let single = ProjectFolderLaunch {
+            folders: vec!["/a".into()],
+            agent_folder_access: true,
+        };
+        assert_eq!(
+            folder_access_relaunch_command_for("claude --resume 'x'", "/a", &single),
+            "claude --resume 'x'",
+            "single-folder projects relaunch exactly as before"
+        );
+    }
 
     #[test]
     fn agent_control_wire_keeps_legacy_restart_and_adds_resume() {

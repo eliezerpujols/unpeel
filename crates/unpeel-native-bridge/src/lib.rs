@@ -28,9 +28,10 @@ use unpeel_core::relay_connection::{
 use unpeel_core::remote_session_backend::{
     RemoteBootstrapSnapshot, RemoteCreatedSession, RemoteDesktopResize, RemoteEffectFailure,
     RemoteEffectFailureKind, RemoteOutputPage, RemoteOutputPollOptions, RemotePresetPatch,
-    RemoteProjectOrganizationPatch, RemoteSessionBackend, RemoteSessionBackendError,
-    RemoteSessionCreateRequest, RemoteSessionMetrics, RemoteSessionSummary, RemoteTextSubmitMode,
-    RemoteTranscriptMarkdown, RemoteWorkspaceSettingsPatch,
+    RemoteProjectFolderEntry, RemoteProjectOrganizationPatch, RemoteSessionBackend,
+    RemoteSessionBackendError, RemoteSessionCreateRequest, RemoteSessionMetrics,
+    RemoteSessionSummary, RemoteTextSubmitMode, RemoteTranscriptMarkdown,
+    RemoteWorkspaceSettingsPatch,
 };
 use unpeel_core::ssh_connection::{
     install_unpeel_over_ssh, LocalProcessConnection, SshAskpass, SshConnectionOptions,
@@ -1881,6 +1882,9 @@ struct NativeCreateSessionRequestWire {
     worktree_path: Option<String>,
     #[serde(default)]
     worktree_branch: Option<String>,
+    /// `project.folders`: start in this Host-owned folder of the project.
+    #[serde(default)]
+    folder_path: Option<String>,
     #[serde(default)]
     initial_text: Option<String>,
     #[serde(default)]
@@ -1895,6 +1899,7 @@ impl From<NativeCreateSessionRequestWire> for RemoteSessionCreateRequest {
             command: wire.command,
             worktree_path: wire.worktree_path,
             worktree_branch: wire.worktree_branch,
+            folder_path: wire.folder_path,
             initial_text: wire.initial_text,
             initial_text_submit_mode: wire.initial_text_submit_mode.unwrap_or_default(),
         }
@@ -2042,6 +2047,11 @@ struct NativeProjectOrganizationWire {
     #[serde(rename = "dateSorted")]
     date_sorted: Option<bool>,
     pinned: Option<bool>,
+    /// `project.folders`: replaces the folder list wholesale; `[]` clears it.
+    folders: Option<Vec<RemoteProjectFolderEntry>>,
+    /// `project.folders`: the per-project agent folder access toggle.
+    #[serde(rename = "agentFolderAccess")]
+    agent_folder_access: Option<bool>,
 }
 
 /// Decoded `settings.presets.set` patch (camelCase wire keys, absent fields
@@ -2364,6 +2374,8 @@ fn set_remote_project_organization(
         color_id: wire.color_id,
         date_sorted: wire.date_sorted,
         pinned: wire.pinned,
+        folders: wire.folders,
+        agent_folder_access: wire.agent_folder_access,
     };
     let request_id = remote_backend(handle)
         .map_err(native_not_applied_effect_error("project organization"))?

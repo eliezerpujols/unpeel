@@ -155,6 +155,16 @@ def seed_conformance_home(root):
     # Nine stopped fixtures share one project: keep them all past the Host's
     # stopped-session retention (default keep limit 5 per group).
     state = home.state()
+    # A plain group: project-folder settings are refused on it.
+    state["projects"].append(
+        {
+            "id": "conformance-group",
+            "name": "Conformance Group",
+            "path": "/tmp",
+            "parent_project_id": "conformance-project",
+            "is_folder": True,
+        }
+    )
     state["sidebar_stopped_limit"] = 25
     with open(home.path("app-state.json"), "w") as handle:
         json.dump(state, handle, indent=2)

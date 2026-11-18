@@ -443,7 +443,7 @@ final class TransparencyModel: ObservableObject {
         // suite IS `.standard`, so the extra hop is a no-op.
         func stored(_ key: String) -> Double? {
             if let value = defaults.object(forKey: key) as? Double { return value }
-            return UserDefaults.standard.object(forKey: key) as? Double
+            return AppDefaults.machine.object(forKey: key) as? Double
         }
         func opacity(_ key: String, default fallback: Double) -> Double {
             guard let value = stored(key) else { return fallback }
@@ -744,7 +744,7 @@ final class TerminalFontModel: ObservableObject {
     ) -> (family: String?, size: Double, lineHeight: Double) {
         func stored<T>(_ key: String, as _: T.Type) -> T? {
             if let value = defaults.object(forKey: key) as? T { return value }
-            return UserDefaults.standard.object(forKey: key) as? T
+            return AppDefaults.machine.object(forKey: key) as? T
         }
         let family = normalize(stored(familyKey, as: String.self))
         let size = stored(sizeKey, as: Double.self).map(clamp) ?? defaultSize

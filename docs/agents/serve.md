@@ -255,6 +255,18 @@ auto-stop skips <id>: unread attention (waiting on the user; never
 auto-stopped unseen)` / `no resumable conversation …` / `idle for less than
 the cutoff` / `pinned` / …), so "why did this never stop" is one grep.
 
+### Multi-folder projects (protocol minor 25)
+
+A project may list several folders (`Project.folders`, first = primary =
+`path`). Bootstrap rows carry `folders`, create accepts `folderPath`,
+`project.add` accepts `name`/`folders`, and `project.organization.set`
+accepts `folders`; Hosts advertise `project.folders`. Sessions with two or
+more effective folders get `UNPEEL_PROJECT_FOLDERS`. A top-level project's
+opt-in `agentFolderAccess` (bootstrap, `project.add`,
+`project.organization.set`; groups inherit) appends the runtime's
+workspace-dir flags at exec time only. Full contract:
+`docs/agents/clients/project-folders.md`.
+
 ### Project display names (protocol minor 24)
 
 `project.organization.set` accepts `displayName` for a top-level project as

@@ -17,9 +17,10 @@ Unpeel Dev from that dist bundle, then `open -n`s
 
 Gotchas:
 
-- **Same bundle id everywhere**: `open` without `-n` re-focuses whichever
-  `com.unpeel.native` is already running (often `/Applications/Unpeel.app`).
-  The script uses `open -n` and only quits **Unpeel Dev**; NEVER quit the
+- **Separate bundle ids**: dev builds are `com.unpeel.native.dev`, release is
+  `com.unpeel.native` (an old release-flavored `dist/` bundle may still carry
+  the release id). The script launches the exact bundle with `open -n -a` and
+  only quits **Unpeel Dev**; NEVER quit the
   installed app without operator approval (AGENTS.md never-quit rule).
 - Confirm which binary is live: `pgrep -fl "Unpeel.app/Contents/MacOS/UnpeelNative"`
   (path shows dist vs /Applications).

@@ -88,7 +88,11 @@ extension Project {
             // contradict a drag persisted in project-order.json.
             sortOrder: displaySortOrder ?? sortOrder,
             dateSorted: dateSorted,
-            sessionOrder: sessionOrder
+            sessionOrder: sessionOrder,
+            folders: (folders?.isEmpty == false) ? folders?.map {
+                RemoteProjectFolder(path: $0.path, name: $0.name, icon: $0.icon)
+            } : nil,
+            agentFolderAccess: agentFolderAccess == true ? true : nil
         )
     }
 
