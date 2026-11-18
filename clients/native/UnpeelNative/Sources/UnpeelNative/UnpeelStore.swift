@@ -12633,6 +12633,30 @@ final class UnpeelStore: ObservableObject {
         }
     }
 
+    // MARK: Files panes
+
+    /// The picker offers "Files" only for a launcher in the main pane tree
+    /// of a scope whose folders are on THIS Mac (the tree reads the disk).
+    func canOpenFilesInPane(_ launcherPaneID: String) -> Bool {
+        selectedHostScope.isLocalMachine
+            && paneLayoutState.location(ofPane: launcherPaneID) != nil
+    }
+
+    /// Picker ▸ Files: the launcher becomes a file tree of the project's
+    /// primary folder.
+    func openFilesInPane(launcherPaneID: String, projectID: String) {
+        _ = mutatePaneLayout { state in
+            try state.bindLauncher(launcherPaneID, toFilesOf: projectID)
+        }
+    }
+
+    /// The Files pane's folder dropdown.
+    func setFilesPaneFolder(paneID: String, folderPath: String?) {
+        _ = mutatePaneLayout { state in
+            try state.setFilesFolder(paneID, folderPath: folderPath)
+        }
+    }
+
     /// A launcher is a transient interaction, not durable layout content.
     /// Leaving the group removes it; a one-Session remainder dissolves.
     private func dismissPaneLaunchers(containing sessionID: String) {
@@ -12827,7 +12851,7 @@ final class UnpeelStore: ObservableObject {
         var root: PaneNode? = group.root
         for pane in group.root.leaves {
             switch pane.content {
-            case .launcher:
+            case .launcher, .files:
                 continue
             case let .session(id):
                 let alive = displaySessionsByID[id].map { entry in
@@ -12842,7 +12866,7 @@ final class UnpeelStore: ObservableObject {
         guard let root else { return nil }
         let sessionLeaves = root.sessionLeaves
         guard sessionLeaves.count >= 2
-                || (sessionLeaves.count == 1 && root.containsLauncher)
+                || (sessionLeaves.count == 1 && root.containsCompanion)
         else { return nil }
 
         let representativePaneID = root.leaf(

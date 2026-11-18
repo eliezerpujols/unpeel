@@ -9,6 +9,11 @@ import Foundation
 enum PaneContent: Equatable, Sendable {
     case session(id: String)
     case launcher(projectID: String)
+    /// Native file tree of one of the project's folders. `folderPath` nil =
+    /// the project's primary folder. Mac view state only: like a launcher it
+    /// is never written to the shared durable layout (other readers of
+    /// pane-layouts.json don't know this leaf kind).
+    case files(projectID: String, folderPath: String?)
 
     var sessionID: String? {
         guard case let .session(id) = self else { return nil }
@@ -17,6 +22,11 @@ enum PaneContent: Equatable, Sendable {
 
     var isLauncher: Bool {
         if case .launcher = self { return true }
+        return false
+    }
+
+    var isFiles: Bool {
+        if case .files = self { return true }
         return false
     }
 }
@@ -126,6 +136,14 @@ extension PaneNode {
     var containsLauncher: Bool {
         leaves.contains { $0.content.isLauncher }
     }
+
+    var containsFiles: Bool {
+        leaves.contains { $0.content.isFiles }
+    }
+
+    /// A non-Session companion (launcher or Files) that lets one Session
+    /// stay grouped.
+    var containsCompanion: Bool { containsLauncher || containsFiles }
 
     func leaf(id paneID: String) -> Pane? {
         leaves.first { $0.id == paneID }
@@ -273,6 +291,8 @@ extension PaneNode {
                 hasher.combine(id)
             case let .launcher(projectID):
                 hasher.combine("launcher:\(projectID)")
+            case let .files(projectID, folderPath):
+                hasher.combine("files:\(projectID):\(folderPath ?? "")")
             }
         case let .split(split):
             hasher.combine(1)
@@ -733,6 +753,35 @@ struct PaneLayoutState: Equatable, Sendable {
         groups[groupIndex].preLauncherRoot = nil
     }
 
+    /// Turn the launcher into a Files pane (the "Files" row of the picker).
+    mutating func bindLauncher(_ paneID: String, toFilesOf projectID: String) throws {
+        guard let location = location(ofPane: paneID) else {
+            throw PaneLayoutError.paneNotFound(paneID)
+        }
+        let groupIndex = try index(ofGroup: location.groupID)
+        guard groups[groupIndex].root.leaf(id: paneID)?.content.isLauncher == true else {
+            throw PaneLayoutError.paneIsNotLauncher(paneID)
+        }
+        groups[groupIndex].root = groups[groupIndex].root.updatingLeaf(paneID) {
+            $0.content = .files(projectID: projectID, folderPath: nil)
+        }
+        groups[groupIndex].preLauncherRoot = nil
+    }
+
+    /// Point a Files pane at another of the project's folders.
+    mutating func setFilesFolder(_ paneID: String, folderPath: String?) throws {
+        guard let location = location(ofPane: paneID) else {
+            throw PaneLayoutError.paneNotFound(paneID)
+        }
+        let groupIndex = try index(ofGroup: location.groupID)
+        guard case let .files(projectID, _)? =
+                groups[groupIndex].root.leaf(id: paneID)?.content
+        else { throw PaneLayoutError.paneNotFound(paneID) }
+        groups[groupIndex].root = groups[groupIndex].root.updatingLeaf(paneID) {
+            $0.content = .files(projectID: projectID, folderPath: folderPath)
+        }
+    }
+
     @discardableResult
     mutating func removeLauncher(_ paneID: String) throws -> PaneLayoutChange {
         guard let location = location(ofPane: paneID) else {
@@ -771,7 +820,7 @@ struct PaneLayoutState: Equatable, Sendable {
 
         let sessionLeaves = newRoot.sessionLeaves
         let canRemainGrouped = sessionLeaves.count >= 2
-            || (sessionLeaves.count == 1 && newRoot.containsLauncher)
+            || (sessionLeaves.count == 1 && newRoot.containsCompanion)
         guard canRemainGrouped else {
             groups.remove(at: groupIndex)
             return PaneLayoutChange(
@@ -1006,6 +1055,8 @@ struct PaneLayoutState: Equatable, Sendable {
                     case .launcher:
                         keep = !hasLauncher
                         hasLauncher = hasLauncher || keep
+                    case .files:
+                        keep = true
                     }
                 }
                 if keep {
@@ -1176,7 +1227,8 @@ struct DurablePaneGroup: Codable, Equatable, Sendable {
             candidate = snapshot
         } else {
             candidate = group.root
-            for pane in group.root.leaves where pane.content.isLauncher {
+            for pane in group.root.leaves
+            where pane.content.isLauncher || pane.content.isFiles {
                 candidate = candidate?.removingLeaf(pane.id)
             }
         }

@@ -25,6 +25,9 @@ struct SessionLauncherView: View {
     var onLaunch: ((Preset) -> Void)? = nil
     /// Compact pane launcher only: Escape removes the still-empty pane.
     var onCancel: (() -> Void)? = nil
+    /// Pane launcher only: turn this pane into a Files tree. nil hides the
+    /// row (scopes whose folders aren't on this Mac).
+    var onOpenFiles: (() -> Void)? = nil
 
     @State private var query = ""
     @State private var selectedIndex = 0
@@ -50,6 +53,22 @@ struct SessionLauncherView: View {
             return words.allSatisfy { haystack.contains($0) }
         }
     }
+
+    /// The Files row leads the pane picker's list (index 0) while it matches
+    /// the search; presets follow.
+    private var showsFilesRow: Bool {
+        guard onOpenFiles != nil else { return false }
+        let words = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).localizedLowercase }
+        let haystack = "files file tree folder explorer"
+        return words.allSatisfy { haystack.contains($0) }
+    }
+
+    private var filesRowOffset: Int { showsFilesRow ? 1 : 0 }
+
+    private var choiceCount: Int { filteredPresets.count + filesRowOffset }
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 22) {
@@ -82,7 +101,7 @@ struct SessionLauncherView: View {
 
     @ViewBuilder
     private var presetList: some View {
-        if filteredPresets.isEmpty {
+        if choiceCount == 0 {
             Text("No matching presets")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.mutedForeground)
@@ -91,10 +110,26 @@ struct SessionLauncherView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 0) {
+                        if showsFilesRow, let onOpenFiles {
+                            LauncherChoiceRow(
+                                label: "Files",
+                                help: "Browse the project's folders",
+                                isSelected: compact && selectedIndex == 0,
+                                action: onOpenFiles,
+                                hoverChanged: { hovering in
+                                    if compact && hovering { selectedIndex = 0 }
+                                }
+                            ) {
+                                FilesAppMarkView(size: 16)
+                                    .foregroundStyle(Theme.foreground)
+                            }
+                            .id(Self.filesRowID)
+                        }
                         ForEach(
                             Array(filteredPresets.enumerated()),
                             id: \.element.id
-                        ) { index, preset in
+                        ) { offset, preset in
+                            let index = offset + filesRowOffset
                             LauncherRow(
                                 preset: preset,
                                 isSelected: compact && index == selectedIndex,
@@ -114,12 +149,19 @@ struct SessionLauncherView: View {
                 // Only explicit keyboard/search requests may move the list.
                 .onChange(of: selectionScrollRequest) { _ in
                     let index = selectedIndex
-                    guard filteredPresets.indices.contains(index) else { return }
-                    proxy.scrollTo(filteredPresets[index].id, anchor: .center)
+                    if showsFilesRow, index == 0 {
+                        proxy.scrollTo(Self.filesRowID, anchor: .center)
+                        return
+                    }
+                    let presetIndex = index - filesRowOffset
+                    guard filteredPresets.indices.contains(presetIndex) else { return }
+                    proxy.scrollTo(filteredPresets[presetIndex].id, anchor: .center)
                 }
             }
         }
     }
+
+    private static let filesRowID = "__launcher_files__"
 
     private var pagePresetListHeight: CGFloat {
         // Keep the page chooser content-sized so it centers as one block;
@@ -227,16 +269,61 @@ struct SessionLauncherView: View {
     }
 
     private func moveSelection(_ delta: Int) {
-        let count = filteredPresets.count
+        let count = choiceCount
         guard count > 0 else { return }
         selectedIndex = (selectedIndex + delta + count) % count
         selectionScrollRequest &+= 1
     }
 
     private func launchSelected() {
+        if showsFilesRow, selectedIndex == 0 {
+            onOpenFiles?()
+            return
+        }
         let choices = filteredPresets
-        guard choices.indices.contains(selectedIndex) else { return }
-        launch(choices[selectedIndex])
+        let presetIndex = selectedIndex - filesRowOffset
+        guard choices.indices.contains(presetIndex) else { return }
+        launch(choices[presetIndex])
+    }
+}
+
+/// A non-preset picker choice (Files) drawn exactly like `LauncherRow`.
+private struct LauncherChoiceRow<Icon: View>: View {
+    let label: String
+    let help: String
+    var isSelected = false
+    let action: () -> Void
+    var hoverChanged: (Bool) -> Void = { _ in }
+    @ViewBuilder let icon: () -> Icon
+
+    @State private var hovering = false
+
+    var body: some View {
+        let highlighted = hovering || isSelected
+        Button(action: action) {
+            HStack(spacing: 8) {
+                icon()
+                    .opacity(highlighted ? 1 : 0.85)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(highlighted ? Theme.foreground : Theme.mutedForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.foreground.opacity(highlighted ? 0.5 : 0.25))
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 32)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover {
+            hovering = $0
+            hoverChanged($0)
+        }
+        .help(help)
     }
 }
 

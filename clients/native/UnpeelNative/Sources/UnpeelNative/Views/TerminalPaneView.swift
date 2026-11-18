@@ -738,6 +738,8 @@ struct TerminalPaneContainer: View {
                 return "session:\(sessionID)"
             case .launcher:
                 return "launcher:\(paneID)"
+            case .files:
+                return "files:\(paneID)"
             }
         }
     }
@@ -1068,6 +1070,8 @@ struct TerminalPaneContainer: View {
             }
         case let .launcher(projectID):
             launcherPane(pane, projectID: projectID)
+        case let .files(projectID, folderPath):
+            filesPane(pane, projectID: projectID, folderPath: folderPath)
         }
     }
 
@@ -1331,9 +1335,45 @@ struct TerminalPaneContainer: View {
                         project: project,
                         compact: true,
                         onLaunch: { preset in launch(preset, into: pane) },
-                        onCancel: { detachPane(pane) }
+                        onCancel: { detachPane(pane) },
+                        onOpenFiles: !pane.isSynthetic
+                            && store.canOpenFilesInPane(pane.paneID)
+                            ? {
+                                store.openFilesInPane(
+                                    launcherPaneID: pane.paneID,
+                                    projectID: projectID
+                                )
+                            }
+                            : nil
                     )
                 }
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .modifier(paneCardChrome(background: background, paneID: pane.paneID))
+        .transition(.identity)
+    }
+
+    /// Picker ▸ Files: a native tree of one of the project's folders.
+    private func filesPane(
+        _ pane: PresentedPane,
+        projectID: String,
+        folderPath: String?
+    ) -> some View {
+        let background = frameBackground(representative)
+        return VStack(spacing: 0) {
+            paneHeader(pane: pane, entry: nil, title: "Files", background: background)
+            ZStack {
+                Color(nsColor: background)
+                    .opacity(transparency.surfaceOpacity)
+                FileTreePaneView(
+                    store: store,
+                    projectID: projectID,
+                    folderPath: folderPath,
+                    onChooseFolder: { path in
+                        store.setFilesPaneFolder(paneID: pane.paneID, folderPath: path)
+                    }
+                )
             }
             .frame(maxHeight: .infinity)
         }
