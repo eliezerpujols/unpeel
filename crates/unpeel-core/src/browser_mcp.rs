@@ -437,11 +437,19 @@ impl BrowserOptions {
     /// to their top-level parent, so every Session in that tree shares one
     /// window/profile while unrelated projects remain isolated.
     fn project_scope(&self, session_id: &str) -> Option<ProjectBrowserScope> {
-        if self.settings.profile_mode.trim() != "project" {
+        let mode = self.settings.profile_mode.trim();
+        if mode != "project" && mode != SHARED_PROFILE_MODE {
             return None;
         }
         let manifest = session_host::load_manifest(session_id)?;
-        let root = crate::state::project_tree_root(&self.projects, &manifest.session.project_id);
+        // "shared": every project in this workspace uses one window and
+        // profile — each Session still drives its own tab.
+        let shared = mode == SHARED_PROFILE_MODE;
+        let root = if shared {
+            SHARED_PROFILE_MODE.to_string()
+        } else {
+            crate::state::project_tree_root(&self.projects, &manifest.session.project_id)
+        };
         // Project ids are UUID-like, but sanitize defensively — this becomes
         // a directory name.
         let safe: String = root
@@ -456,6 +464,8 @@ impl BrowserOptions {
             .collect();
         let digest = format!("{:x}", Sha256::digest(root.as_bytes()));
         let key = digest.chars().take(16).collect::<String>();
+        // Per workspace home: engine sockets live there, so a window can only
+        // be shared by the Sessions of one workspace.
         let browser_root = crate::app_paths::unpeel_home().join("browser");
         Some(ProjectBrowserScope {
             root_id: root,
@@ -468,6 +478,9 @@ impl BrowserOptions {
         })
     }
 }
+
+/// `profile_mode` value: one window + profile for every project in the workspace.
+const SHARED_PROFILE_MODE: &str = "shared";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectBrowserScope {
@@ -1600,13 +1613,11 @@ fn exec_engine_with(
     // (init scripts are per CDP session), local Chrome only — a remote
     // provider's browser can't reach this Mac's loopback bridge.
     if !matches!(cdp_binding, Some(CdpBinding::Remote(_))) {
-        let scope = cdp_binding.as_ref().and_then(CdpBinding::project_scope);
-        let script_dir = scope
-            .map(|scope| scope.state_dir.clone())
-            .unwrap_or_else(|| browser_artifacts_dir(session_id));
-        let project_id = scope
-            .map(|scope| scope.root_id.clone())
-            .or_else(|| session_host::load_manifest(session_id).map(|m| m.session.project_id))
+        // Per-Session file: in a shared window each tab's overlay knows its
+        // own Session's project (the picker lists that project first).
+        let script_dir = browser_artifacts_dir(session_id);
+        let project_id = session_host::load_manifest(session_id)
+            .map(|m| m.session.project_id)
             .unwrap_or_default();
         if let Some(script) = crate::browser_bridge::write_init_script(&script_dir, &project_id) {
             command.env("AGENT_BROWSER_INIT_SCRIPTS", script);
@@ -2158,18 +2169,28 @@ profile and project isolation.",
             (Err(_), _) => lines.push(
                 "browsing data: unavailable until the remote CDP configuration is repaired.".into(),
             ),
+            (Ok(None), Some(scope)) if scope.root_id == SHARED_PROFILE_MODE => lines.push(format!(
+                "browsing data: one Unpeel-managed window and profile shared by every project in this workspace at {}. \
+Every session gets its own pinned tab; cookies and logins are shared across projects, never \
+with the user's personal browser.",
+                scope.profile_dir.display()
+            )),
             (Ok(None), Some(scope)) => lines.push(format!(
                 "browsing data: one Unpeel-managed window and profile per project tree at {}. \
 Every session gets its own pinned tab; cookies and logins are shared across the project, never \
 with the user's personal browser or another project.",
                 scope.profile_dir.display()
             )),
-            (Ok(None), None) if options.settings.profile_mode.trim() == "project" => lines.push(
+            (Ok(None), None)
+                if matches!(options.settings.profile_mode.trim(), "project" | SHARED_PROFILE_MODE) =>
+            {
+                lines.push(
                 "browsing data: configured as kept-per-project, but running fresh-per-session \
 right now because site access rules are set (current engine limitation — the two can't \
 combine)."
                     .into(),
-            ),
+                )
+            }
             (Ok(None), None) => lines.push(
                 "browsing data: fresh per session — cookies and logins vanish when the \
 browser closes."

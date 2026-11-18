@@ -701,7 +701,8 @@ fn default_browser_headed() -> bool {
 }
 
 fn default_browser_profile_mode() -> String {
-    "project".to_string()
+    // One browser window for every project; each Session gets its own tab.
+    "shared".to_string()
 }
 
 impl Default for BrowserSettings {

@@ -15,6 +15,20 @@ import SwiftUI
 struct BrowserAccessSections: View {
     @ObservedObject var store: UnpeelStore
 
+    private var browserScopeSummary: String {
+        switch store.browserSettings.profileMode {
+        case "project":
+            return "One window per project; every session gets its own tab and all share "
+                + "cookies and logins. Other projects stay separate."
+        case "session":
+            return "Each session gets a separate browser; its cookies and logins vanish "
+                + "when that browser closes."
+        default:
+            return "One window for every project in this workspace; each session gets its "
+                + "own tab, and all share cookies and logins."
+        }
+    }
+
     /// The Host's published engine state (`serve.json.browserEngine`,
     /// written by the workspace worker that installs and verifies the
     /// engine — see docs/agents/browser-mcp.md). nil until read.
@@ -101,16 +115,15 @@ struct BrowserAccessSections: View {
                 Picker(
                     "",
                     selection: Binding(
-                        get: { store.browserSettings.keepsProjectProfile },
-                        set: { keep in
-                            store.updateBrowserSettings {
-                                $0.profileMode = keep ? "project" : "session"
-                            }
+                        get: { store.browserSettings.profileMode },
+                        set: { mode in
+                            store.updateBrowserSettings { $0.profileMode = mode }
                         }
                     )
                 ) {
-                    Text("Separate per session").tag(false)
-                    Text("Shared project window").tag(true)
+                    Text("One window for all projects").tag("shared")
+                    Text("One window per project").tag("project")
+                    Text("Separate per session").tag("session")
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
@@ -120,11 +133,7 @@ struct BrowserAccessSections: View {
                     Text("Browser scope")
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.foreground)
-                    Text(store.browserSettings.keepsProjectProfile
-                        ? "One window per project; every session gets its own tab and all share "
-                            + "cookies and logins. Other projects stay separate."
-                        : "Each session gets a separate browser; its cookies and logins vanish "
-                            + "when that browser closes.")
+                    Text(browserScopeSummary)
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.mutedForeground)
                         .fixedSize(horizontal: false, vertical: true)

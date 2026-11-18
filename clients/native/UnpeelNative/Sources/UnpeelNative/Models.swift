@@ -774,10 +774,11 @@ struct BrowserSettings: Equatable, Codable {
     /// Comma-separated domain allowlist (wildcards like `*.example.com`),
     /// engine-enforced. Empty = all sites.
     var allowedDomains = ""
-    /// "project" (default) = one Unpeel-managed browser window/profile per
-    /// project tree with a pinned tab per Session; "session" = a separate
-    /// ephemeral browser per Session.
-    var profileMode = "project"
+    /// "shared" (default) = one Unpeel-managed window/profile for every
+    /// project in the workspace; "project" = one per project tree (both give
+    /// each Session its own pinned tab); "session" = a separate ephemeral
+    /// browser per Session.
+    var profileMode = "shared"
     /// Custom browser executable path; empty = auto-detect system Chrome.
     var executablePath = ""
     /// Animate a visible pointer to each element the agent clicks/fills.
@@ -802,7 +803,7 @@ struct BrowserSettings: Equatable, Codable {
         )) ?? nil) ?? ""
         profileMode = ((try? container.decodeIfPresent(
             String.self, forKey: .profileMode
-        )) ?? nil) ?? "project"
+        )) ?? nil) ?? "shared"
         executablePath = ((try? container.decodeIfPresent(
             String.self, forKey: .executablePath
         )) ?? nil) ?? ""
@@ -811,7 +812,8 @@ struct BrowserSettings: Equatable, Codable {
         )) ?? nil) ?? true
     }
 
-    var keepsProjectProfile: Bool { profileMode == "project" }
+    /// A kept (non-ephemeral) profile: shared window or one per project.
+    var keepsProjectProfile: Bool { profileMode == "project" || profileMode == "shared" }
 }
 
 /// Browser MCP access for one session (state.rs `BrowserAccess`): a single
