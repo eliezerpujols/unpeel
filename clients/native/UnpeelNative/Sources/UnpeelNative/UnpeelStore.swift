@@ -8396,9 +8396,13 @@ final class UnpeelStore: ObservableObject {
                 sessionOrderPreviews.removeValue(forKey: projectID)
                 return
             }
-            let orderedIDs = (renderedPinnedSessions(in: node)
-                + renderedDisplayedSessions(in: node))
-                .map(\.id)
+            // The MIXED visible order: child-group ids keep their slots
+            // between sessions, same as the local commit. Sending sessions
+            // only made the Host order folder-free, so the next bootstrap
+            // fell back to "groups first" and a session dropped above a
+            // group snapped back below it.
+            let orderedIDs = (renderedPinnedItems(in: node).map(\.id)
+                + renderedDisplayedItems(in: node).map(\.id))
             remoteSessionOrderByProject[projectID] = orderedIDs
             let workspaceKey = workspacePoolForegroundKey()
             remoteCommittedSessionOrderHolds[projectID] =
