@@ -299,12 +299,26 @@ pub fn paste(home: &Path, session_id: &str, text: &str) -> Result<(), String> {
     if sanitized.trim().is_empty() {
         return Err("nothing to send".into());
     }
-    let command = SessionHostCommand::Write {
-        data: session_input::encode_bracketed_paste(&sanitized),
-        write_id: None,
+    let socket = socket_path_at(home, session_id);
+    write_session(&socket, &session_input::encode_bracketed_paste(&sanitized))?;
+    // Submit like `deliver_prompt`: let the TUI settle the paste, press
+    // Enter, then once more in case the first was absorbed by the paste.
+    let settle = if session_input::looks_like_it_contains_a_path(&sanitized) {
+        session_input::TEXT_SETTLE_DELAY_PATH_MS
+    } else {
+        session_input::TEXT_SETTLE_DELAY_MS
     };
+    std::thread::sleep(Duration::from_millis(settle));
+    write_session(&socket, "\r")?;
+    std::thread::sleep(Duration::from_millis(session_input::ENTER_FOLLOWUP_DELAY_MS));
+    write_session(&socket, "\r")
+}
+
+/// One `Write` over a Session's control socket (path built for its own home).
+fn write_session(socket: &Path, data: &str) -> Result<(), String> {
+    let command = SessionHostCommand::Write { data: data.to_owned(), write_id: None };
     let line = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-    let mut stream = UnixStream::connect(socket_path_at(home, session_id))
+    let mut stream = UnixStream::connect(socket)
         .map_err(|_| "that session isn't running anymore".to_owned())?;
     let timeout = Some(Duration::from_secs(3));
     let _ = stream.set_read_timeout(timeout);
@@ -323,7 +337,7 @@ pub fn paste(home: &Path, session_id: &str, text: &str) -> Result<(), String> {
         Err(reply
             .get("error")
             .and_then(Value::as_str)
-            .unwrap_or("the session refused the paste")
+            .unwrap_or("the session refused the message")
             .to_owned())
     }
 }

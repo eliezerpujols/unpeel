@@ -131,7 +131,7 @@ function pickSession(sessions) {
     panel.setAttribute("data-unpeel-send", "");
     panel.setAttribute("data-feedback-toolbar", "");
     const head = el("div", "us-head");
-    head.append(el("span", "us-title", "Send to session"), el("span", "us-hint", "Pastes, no Enter"));
+    head.append(el("span", "us-title", "Send to session"), el("span", "us-hint", "Sends right away"));
     const searchBox = el("label", "us-search");
     const searchIcon = el("span");
     searchIcon.innerHTML = SEARCH_ICON;
@@ -140,7 +140,7 @@ function pickSession(sessions) {
     search.spellcheck = false;
     searchBox.append(searchIcon, search);
     const list = el("div", "us-list");
-    const foot = el("div", "us-foot", "↑↓ move · ↵ paste · esc close");
+    const foot = el("div", "us-foot", "↑↓ move · ↵ send · esc close");
     panel.append(head, searchBox, list, foot);
 
     const anchor = toolbarRect();
