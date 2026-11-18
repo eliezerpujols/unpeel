@@ -222,6 +222,13 @@ pub struct RemoteProjectSummary {
     /// get the project's folders as provider flags. A group inherits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_folder_access: Option<bool>,
+    /// The project's shared rank list when it mixes child-group ids in
+    /// with session ids (`attach_mixed_session_order_fields`). Absent when
+    /// the list is session-only. Must survive this typed round trip: the
+    /// Mac app reads the bootstrap re-encoded from this struct, and without
+    /// it a session dropped above a group fell back to groups-first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_order: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4152,6 +4159,27 @@ mod tests {
     use serde_json::json;
 
     use crate::host_connection::{DeliveryState, HostReply, PreparedHostCall, RequestSemantics};
+
+    #[test]
+    fn project_summary_keeps_mixed_session_order_through_typed_round_trip() {
+        let wire = json!({
+            "id": "p1", "name": "P", "path": "/p", "mcpBlocked": false,
+            "sessionOrder": ["s1", "s2", "g1"]
+        });
+        let summary: RemoteProjectSummary = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            summary.session_order.as_deref(),
+            Some(&["s1".to_string(), "s2".into(), "g1".into()][..])
+        );
+        let back = serde_json::to_value(&summary).unwrap();
+        assert_eq!(back["sessionOrder"], json!(["s1", "s2", "g1"]));
+
+        let plain: RemoteProjectSummary = serde_json::from_value(json!({
+            "id": "p2", "name": "Q", "path": "/q", "mcpBlocked": false
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(&plain).unwrap().get("sessionOrder").is_none());
+    }
 
     #[derive(Debug, Clone)]
     struct ExpectedCall {
