@@ -656,7 +656,7 @@ struct TitlebarWindowPinButton: View {
         Button {
             model.toggle()
         } label: {
-            ChromeIconView(icon: model.isPinned ? .windowPinFill : .windowPin, size: 16)
+            ChromeIconView(icon: model.isPinned ? .windowPinFill : .windowPin, size: 21)
                 .foregroundStyle(
                     model.isPinned || hovering ? Theme.foreground : Theme.mutedForeground
                 )
