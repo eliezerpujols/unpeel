@@ -205,4 +205,21 @@ final class FilesPaneTests: XCTestCase {
         let data = try JSONEncoder().encode(record)
         XCTAssertEqual(try JSONDecoder().decode(FilesPaneGroupRecord.self, from: data), record)
     }
+
+    func testSearchFindsNamesRanksBestFirstAndSkipsDependencies() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("files-search-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for dir in ["src/deep", "node_modules/router", ".git/router"] {
+            try fm.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+        try Data().write(to: root.appendingPathComponent("src/deep/app-router.ts"))
+        try Data().write(to: root.appendingPathComponent("src/Router.swift"))
+        try Data().write(to: root.appendingPathComponent("router"))
+
+        let names = FileTreeListing.search(root: root.path, query: "router").map(\.name)
+        XCTAssertEqual(names, ["router", "Router.swift", "app-router.ts"])
+        XCTAssertTrue(FileTreeListing.search(root: root.path, query: "  ").isEmpty)
+    }
 }

@@ -86,6 +86,60 @@ enum FileTreeListing {
             }
     }
 
+    /// Dependency / build output folders the name search never walks into
+    /// (the tree still browses them).
+    static let searchSkipped: Set<String> = [
+        ".git", "node_modules", ".build", "DerivedData", "Pods", ".next", ".turbo",
+    ]
+
+    /// Case-insensitive name search under `root`. Best matches first (exact,
+    /// then prefix, then substring; shallower paths first), capped at
+    /// `limit`. `isCancelled` is polled so a newer query can stop it.
+    static func search(
+        root: String,
+        query: String,
+        limit: Int = 300,
+        isCancelled: () -> Bool = { false }
+    ) -> [FileTreeEntry] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty,
+              let enumerator = FileManager.default.enumerator(
+                  at: URL(fileURLWithPath: root, isDirectory: true),
+                  includingPropertiesForKeys: [.isDirectoryKey],
+                  options: []
+              )
+        else { return [] }
+        var scored: [(rank: Int, depth: Int, entry: FileTreeEntry)] = []
+        var visited = 0
+        for case let url as URL in enumerator {
+            visited += 1
+            if visited % 256 == 0, isCancelled() { return [] }
+            let name = url.lastPathComponent
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?
+                .isDirectory ?? false
+            if isDirectory, searchSkipped.contains(name) {
+                enumerator.skipDescendants()
+                continue
+            }
+            if skipped.contains(name) { continue }
+            guard let range = name.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive])
+            else { continue }
+            let rank = name.count == needle.count ? 0 : (range.lowerBound == name.startIndex ? 1 : 2)
+            scored.append((rank, enumerator.level,
+                           FileTreeEntry(path: url.path, name: name, isDirectory: isDirectory)))
+            // Enough strong candidates collected: stop walking.
+            if scored.count >= limit * 4 { break }
+        }
+        return scored
+            .sorted {
+                if $0.rank != $1.rank { return $0.rank < $1.rank }
+                if $0.depth != $1.depth { return $0.depth < $1.depth }
+                return $0.entry.name.localizedStandardCompare($1.entry.name) == .orderedAscending
+            }
+            .prefix(limit)
+            .map(\.entry)
+    }
+
     /// SF Symbol per row: folders open/closed, files by kind.
     static func symbol(for entry: FileTreeEntry, expanded: Bool) -> String {
         if entry.isDirectory { return expanded ? "folder.fill" : "folder" }
@@ -135,6 +189,11 @@ struct FileTreePaneView: View {
     /// Folder path → current git branch (multi-folder projects only; nil
     /// entry = resolved, not a git checkout / detached).
     @State private var branchesByFolder: [String: String?] = [:]
+    @State private var query = ""
+    /// nil while no search has finished for the current query.
+    @State private var results: [FileTreeEntry]?
+    @State private var searchGeneration = 0
+    @State private var searchGate = FileSearchGate()
 
     private var folders: [ProjectFolder] {
         store.effectiveProjectFolders(projectID)
@@ -154,10 +213,13 @@ struct FileTreePaneView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+            searchField
             Rectangle()
                 .fill(Theme.foreground.opacity(0.07))
                 .frame(height: 1)
-            if let rootPath {
+            if let rootPath, isSearching {
+                searchResults(rootPath: rootPath)
+            } else if let rootPath {
                 tree(rootPath: rootPath)
             } else {
                 placeholder("This project has no folder")
@@ -168,14 +230,19 @@ struct FileTreePaneView: View {
             resolveBranches()
         }
         .onChange(of: folders.map(\.path)) { _ in resolveBranches() }
-        .onChange(of: refreshCount) { _ in reload() }
+        .onChange(of: refreshCount) { _ in
+            reload()
+            runSearch()
+        }
         .onChange(of: rootPath) { newRoot in
             expanded = []
             childrenByPath = [:]
             unreadable = []
             selectedPath = nil
             if let newRoot { load(newRoot) }
+            runSearch()
         }
+        .onChange(of: query) { _ in runSearch() }
     }
 
     // MARK: Toolbar
@@ -255,6 +322,161 @@ struct FileTreePaneView: View {
         .padding(.horizontal, 6)
         .frame(height: 24)
         .contentShape(Rectangle())
+    }
+
+    // MARK: Search
+
+    private var isSearching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Same look as Settings ▸ Agents' search bar, sized for a pane.
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Theme.mutedForeground)
+            TextField("Search files", text: $query)
+                .textFieldStyle(.plain)
+                .onExitCommand { query = "" }
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.mutedForeground)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Theme.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
+    }
+
+    /// Debounced background search; a newer keystroke cancels the older walk.
+    private func runSearch() {
+        searchGeneration += 1
+        let generation = searchGeneration
+        results = nil
+        guard isSearching, let rootPath else { return }
+        let needle = query
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard generation == searchGeneration else { return }
+            let gate = searchGate
+            gate.latest = generation
+            DispatchQueue.global(qos: .userInitiated).async {
+                let found = FileTreeListing.search(
+                    root: rootPath,
+                    query: needle,
+                    isCancelled: { gate.latest != generation }
+                )
+                DispatchQueue.main.async {
+                    guard generation == searchGeneration else { return }
+                    results = found
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func searchResults(rootPath: String) -> some View {
+        if let results {
+            if results.isEmpty {
+                placeholder("No matches")
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(results) { entry in
+                            resultRow(entry, rootPath: rootPath)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 6)
+                }
+            }
+        } else {
+            ProgressView()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func resultRow(_ entry: FileTreeEntry, rootPath: String) -> some View {
+        let isSelected = selectedPath == entry.path
+        let isHovered = hoveredPath == entry.path
+        let parent = (entry.path as NSString).deletingLastPathComponent
+        let relativeParent = parent == rootPath
+            ? ""
+            : String(parent.dropFirst(rootPath.count + 1))
+        return HStack(spacing: 5) {
+            Image(systemName: FileTreeListing.symbol(for: entry, expanded: false))
+                .font(.system(size: 11))
+                .foregroundStyle(entry.isDirectory ? Theme.foreground.opacity(0.75) : Theme.mutedForeground)
+                .frame(width: 16)
+            Text(entry.name)
+                .font(.system(size: 12))
+                .foregroundStyle(isSelected ? Theme.foreground : Theme.foreground.opacity(0.85))
+                .lineLimit(1)
+                .layoutPriority(1)
+            if !relativeParent.isEmpty {
+                Text(relativeParent)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.mutedForeground)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            Spacer(minLength: 0)
+        }
+        .opacity(entry.isHidden ? 0.55 : 1)
+        .padding(.horizontal, 6)
+        .frame(height: 24)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Theme.foreground.opacity(isSelected ? 0.1 : (isHovered ? 0.05 : 0)))
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering { hoveredPath = entry.path }
+            else if hoveredPath == entry.path { hoveredPath = nil }
+        }
+        .onTapGesture {
+            // Selecting a result reveals it in the tree.
+            reveal(entry, under: rootPath)
+            query = ""
+        }
+        .help(entry.path)
+        .contextMenu { entryMenu(entry) }
+    }
+
+    /// Expand every ancestor (and a folder itself) and select the entry.
+    private func reveal(_ entry: FileTreeEntry, under rootPath: String) {
+        var ancestors: [String] = []
+        var path = (entry.path as NSString).deletingLastPathComponent
+        while path.count > rootPath.count, path.hasPrefix(rootPath) {
+            ancestors.insert(path, at: 0)
+            path = (path as NSString).deletingLastPathComponent
+        }
+        if entry.isDirectory { ancestors.append(entry.path) }
+        for ancestor in ancestors {
+            load(ancestor)
+            expanded.insert(ancestor)
+        }
+        selectedPath = entry.path
+    }
+
+    @ViewBuilder
+    private func entryMenu(_ entry: FileTreeEntry) -> some View {
+        Button("Reveal in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
+        }
+        Button("Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(entry.path, forType: .string)
+        }
     }
 
     // MARK: Tree
@@ -345,15 +567,7 @@ struct FileTreePaneView: View {
             // Files: selection only for now.
         }
         .help(entry.path)
-        .contextMenu {
-            Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
-            }
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.path, forType: .string)
-            }
-        }
+        .contextMenu { entryMenu(entry) }
     }
 
     private func placeholder(_ text: String) -> some View {
@@ -417,4 +631,11 @@ struct FileTreePaneView: View {
             }
         }
     }
+}
+
+/// This pane's latest search generation, read by the background walk so a
+/// newer query stops an older one early. Main-thread writes; a racy read
+/// only lets an old walk run a little longer.
+final class FileSearchGate: @unchecked Sendable {
+    var latest = 0
 }
