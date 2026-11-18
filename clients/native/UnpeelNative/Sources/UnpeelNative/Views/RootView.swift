@@ -360,6 +360,8 @@ struct RootView: View {
                 onMarkAllRead: { store.markActivityItemsRead($0) }
             )
 
+            TitlebarWindowPinButton(model: WindowPinModel.shared)
+
             if store.selectedHostScope == .local {
                 // ⇧⌘R jumps straight to the Local recent-activity page.
                 Button("") { store.toggleRecentActivity() }
@@ -640,6 +642,37 @@ struct TitlebarIconButton: View {
         .compatFocusEffectDisabled()
         .onHover { hovering = $0 }
         .help(help)
+        .animation(.easeInOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// Keep on Top toggle, right after the bell: outline pin when off, the same
+/// pin filled when on. Same 28×28 chip and hover as the other titlebar icons.
+struct TitlebarWindowPinButton: View {
+    @ObservedObject var model: WindowPinModel
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            model.toggle()
+        } label: {
+            ChromeIconView(icon: model.isPinned ? .windowPinFill : .windowPin, size: 16)
+                .foregroundStyle(
+                    model.isPinned || hovering ? Theme.foreground : Theme.mutedForeground
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hovering ? Theme.hoverRow : .clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .compatFocusEffectDisabled()
+        .onHover { hovering = $0 }
+        .help(model.isPinned
+            ? "Unpin window (⌥⌘P)"
+            : "Keep window on top & on every Desktop (⌥⌘P)")
+        .accessibilityLabel(model.isPinned ? "Unpin window" : "Keep window on top")
         .animation(.easeInOut(duration: 0.12), value: hovering)
     }
 }

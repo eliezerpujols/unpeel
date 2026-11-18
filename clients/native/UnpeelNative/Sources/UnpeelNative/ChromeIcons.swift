@@ -28,6 +28,9 @@ enum ChromeIcon: String, CaseIterable {
     /// Detach a companion from the terminal split.
     case paneUnpin
     case pushPin
+    /// Titlebar Keep on Top: Phosphor "push-pin" outline (off) / fill (on).
+    case windowPin
+    case windowPinFill
     case settings
     case addProjectPlus
     case plus
@@ -121,6 +124,10 @@ enum ChromeIcon: String, CaseIterable {
         // the row is NOT yet pinned (the "click to pin" affordance).
         case .pushPin:
             return ##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="#FFFFFF" viewBox="0 0 256 256"><path d="M216,168h-9.29L185.54,48H192a8,8,0,0,0,0-16H64a8,8,0,0,0,0,16h6.46L49.29,168H40a8,8,0,0,0,0,16h80v56a8,8,0,0,0,16,0V184h80a8,8,0,0,0,0-16ZM86.71,48h82.58l21.17,120H65.54Z"></path></svg>"##
+        case .windowPin:
+            return Self.pin.svg(inverted: inverted)
+        case .windowPinFill:
+            return ##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="#FFFFFF" viewBox="0 0 256 256"><path d="M235.32,81.37,174.63,20.69a16,16,0,0,0-22.63,0L98.37,74.49c-10.66-3.34-35-7.37-60.4,13.14a16,16,0,0,0-1.29,23.78L85,159.71,42.34,202.34a8,8,0,0,0,11.32,11.32L96.29,171l48.29,48.29A16,16,0,0,0,155.9,224c.38,0,.75,0,1.13,0a15.93,15.93,0,0,0,11.64-6.33c19.64-26.1,17.75-47.32,13.19-60L235.33,104A16,16,0,0,0,235.32,81.37Z"></path></svg>"##
         // Footer settings gear.
         case .settings:
             return Self.glassSVG(
@@ -372,6 +379,8 @@ struct ChromeIconView: View {
         case .pinSlash: return "pin.slash"
         case .paneUnpin: return "rectangle.portrait.and.arrow.right"
         case .pushPin: return "pin"
+        case .windowPin: return "pin"
+        case .windowPinFill: return "pin.fill"
         case .settings: return "gearshape"
         case .addProjectPlus, .plus, .plusBold: return "plus"
         case .collapseAll: return "chevron.up.chevron.down"

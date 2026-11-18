@@ -242,6 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         // saved ThemePreference to NSApp.appearance (nil = follow macOS),
         // and the window inherits it.
         window.delegate = self
+        // Keep on Top survives relaunch (and a window rebuilt after close).
+        WindowPinModel.shared.apply(to: window)
 
         // The terminal pane rounds its leading corners to match the window
         // radius (Theme.windowCornerRadius). The system radius is not public
@@ -575,6 +577,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
             action: #selector(NSWindow.performZoom(_:)),
             keyEquivalent: ""
         ))
+        let keepOnTopItem = NSMenuItem(
+            title: "Keep on Top",
+            action: #selector(toggleKeepOnTopFromMenu),
+            keyEquivalent: "p"
+        )
+        keepOnTopItem.keyEquivalentModifierMask = [.command, .option]
+        keepOnTopItem.target = self
+        windowMenu.addItem(keepOnTopItem)
         windowMenu.addItem(.separator())
         windowMenu.addItem(NSMenuItem(
             title: "Bring All to Front",
@@ -632,6 +642,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         store?.openLauncher(forFolder: folder.path)
+    }
+
+    @objc private func toggleKeepOnTopFromMenu() {
+        WindowPinModel.shared.toggle()
     }
 
     @objc private func openSettingsFromMenu() {
@@ -732,6 +746,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
     /// disabled (Appearance ▸ "Session gallery") — the gallery chip owns the
     /// capture flow, so with no chip mounted the notification goes nowhere.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleKeepOnTopFromMenu) {
+            menuItem.state = WindowPinModel.shared.isPinned ? .on : .off
+            return true
+        }
         if menuItem.action == #selector(closePaneOrWindowFromMenu) {
             menuItem.title = store?.canCloseActiveTerminalPane == true
                 ? "Close Pane"
