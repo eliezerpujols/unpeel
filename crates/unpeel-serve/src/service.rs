@@ -492,9 +492,9 @@ pub fn run_service(mut report: impl FnMut(ServiceEvent)) -> Result<(), String> {
     let lease = ServiceLease::acquire(&real_home)?;
     // The Agentation overlay in project browsers reaches every workspace's
     // open Sessions through this one loopback endpoint.
-    if let Err(error) = crate::browser_bridge_listener::spawn(|| {
-        SHUTDOWN_REQUESTED.load(Ordering::Acquire)
-    }) {
+    if let Err(error) =
+        crate::browser_bridge_listener::spawn(|| SHUTDOWN_REQUESTED.load(Ordering::Acquire))
+    {
         report(ServiceEvent::Warning(error));
     }
     let executable = std::env::current_exe()

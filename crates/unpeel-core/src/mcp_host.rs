@@ -761,6 +761,7 @@ const BROWSER_ACTIONS: &[&str] = &[
     "wait",
     "scroll",
     "console",
+    "tab",
     "close",
     "context",
 ];
@@ -1876,7 +1877,8 @@ fn browser_tool_definition() -> Value {
     `open`, Safari, or another browser app: this is the window the user reviews and annotates \
     (its Agentation toolbar sends feedback to a session). Core loop: action \
     'open' a URL, 'snapshot' for element refs like @e1, act by ref ('click'/'fill'), then \
-    re-snapshot after navigation — refs go stale. 'screenshot' saves into this session's \
+    re-snapshot after navigation — refs go stale. A session can keep several tabs: action 'tab' \
+    (op new with url+label, list, select, close), or pass tab:<label> to any action. 'screenshot' saves into this session's \
     artifacts and returns the file path. {\"action\":\"help\"} returns full per-action docs; \
     {\"action\":\"context\"} explains configuration if tools seem unavailable.",
         "inputSchema": {
@@ -1887,7 +1889,10 @@ fn browser_tool_definition() -> Value {
                     "enum": browser_action_names(),
                     "description": "What to do; see the tool description and help"
                 },
-                "url": { "type": "string", "description": "open: URL to open" },
+                "url": { "type": "string", "description": "open: URL to open (in the current tab); tab op new: URL for the new tab" },
+                "op": { "type": "string", "enum": ["list", "new", "select", "close"], "description": "tab: list (default), new, select, or close this session's tabs" },
+                "label": { "type": "string", "description": "tab op new: short name for the tab (e.g. bartender)" },
+                "tab": { "type": "string", "description": "tab op select/close: label or id; on any page action: switch to this tab first" },
                 "target": { "type": "string", "description": "click/fill/type/get: snapshot ref (@e1) or CSS selector" },
                 "text": { "type": "string", "description": "fill/type: text to enter" },
                 "key": { "type": "string", "description": "press: key or combination (Enter, Tab, Control+a)" },

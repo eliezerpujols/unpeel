@@ -221,7 +221,16 @@ pub(crate) fn tools_call(params: &Value) -> Result<Value, Value> {
 }
 
 pub(crate) fn run_tool(name: &str, arguments: &Value) -> Result<String, String> {
+    // `tab` on any page action: switch to that one of this session's tabs
+    // first (the switch sticks, like `tab select`).
+    if !matches!(name, "browser_tab" | "browser_close" | "browser_context") {
+        if let Some(tab) = optional_str(arguments, "tab") {
+            let session_id = caller_session_id()?;
+            tabs::select(&session_id, tab)?;
+        }
+    }
     match name {
+        "browser_tab" => tabs::tool_tab(arguments),
         "browser_open" => tool_open(arguments),
         "browser_snapshot" => tool_snapshot(arguments),
         "browser_click" => tool_click(arguments),
@@ -985,7 +994,8 @@ fn project_owner_command(
         command.env("AGENT_BROWSER_COLOR_SCHEME", theme);
     }
     // Agentation on every page of the project browser (Send to session).
-    if let Some(script) = crate::browser_bridge::write_init_script(&scope.state_dir, &scope.root_id) {
+    if let Some(script) = crate::browser_bridge::write_init_script(&scope.state_dir, &scope.root_id)
+    {
         command.env("AGENT_BROWSER_INIT_SCRIPTS", script);
         command.env("AGENT_BROWSER_ARGS", crate::browser_bridge::CHROME_ARGS);
     }
@@ -1506,7 +1516,18 @@ fn browser_artifacts_dir(session_id: &str) -> PathBuf {
 fn exec_engine(args: &[String], timeout_ms: u64) -> Result<String, String> {
     let session_id = caller_session_id()?;
     let binary = resolve_engine_binary()?;
-    exec_engine_with(&binary, &session_id, args, timeout_ms)
+    match exec_engine_with(&binary, &session_id, args, timeout_ms) {
+        // The session's bound tab was closed (by the user, or the shared
+        // window restarted): move to another of its tabs — or reopen the last
+        // address in a new one — and retry once instead of failing.
+        Err(error)
+            if tabs::is_tab_gone(&error) && args.first().map(String::as_str) != Some("tab") =>
+        {
+            tabs::recover(&session_id)?;
+            exec_engine_with(&binary, &session_id, args, timeout_ms)
+        }
+        result => result,
+    }
 }
 
 fn exec_engine_with(
@@ -2032,6 +2053,7 @@ fn tool_console(args: &Value) -> Result<String, String> {
 fn tool_close(_args: &Value) -> Result<String, String> {
     let session_id = caller_session_id()?;
     let binary = resolve_engine_binary()?;
+    tabs::close_extra_tabs(&session_id);
     close_session_browser(&binary, &session_id)
 }
 
@@ -2361,6 +2383,24 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             },
         }),
         json!({
+            "name": "browser_tab",
+            "description": "Manage this session's own tabs (it never sees other sessions' tabs in a \
+        shared window). op 'list' shows them; 'new' opens one (optional url and label, e.g. \
+        label 'bartender') and makes it current; 'select' switches to a tab by label or id; \
+        'close' closes one (the current tab if omitted). Every tab gets the Agentation toolbar. \
+        Other actions act on the current tab, or pass tab:<label|id> to any action to switch first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["list", "new", "select", "close"], "description": "Tab operation (default list)" },
+                    "url": { "type": "string", "description": "new: URL to open in the new tab" },
+                    "label": { "type": "string", "description": "new: short name to refer to the tab by (letters, digits, - and _)" },
+                    "tab": { "type": "string", "description": "select/close: label, id (t1), or target id" },
+                },
+                "additionalProperties": false,
+            },
+        }),
+        json!({
             "name": "browser_close",
             "description": "Close this session's browser tab and its control daemon. Other \
         sessions' tabs in a shared project browser stay open; the project window closes after its \
@@ -2520,7 +2560,7 @@ mod tests {
     #[test]
     fn tool_definitions_have_valid_schemas() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         for tool in &tools {
             assert!(tool.get("name").and_then(Value::as_str).is_some());
             assert!(tool.get("description").and_then(Value::as_str).is_some());
@@ -2783,5 +2823,443 @@ mod tests {
         remove_singleton_files(&dir);
         assert_eq!(singleton_lock_pid(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Several tabs per Session. The engine drives one current tab per daemon
+/// (strictly pinned in a shared window, where its tab list also shows other
+/// Sessions' tabs), so Unpeel records which targets this Session opened and
+/// only ever lists, selects, or closes those. The engine registers init
+/// scripts on its first tab only; every other tab gets the Agentation overlay
+/// here, over the daemon's socket.
+mod tabs {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixStream;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    struct OwnedTab {
+        target_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct OwnedTabs {
+        #[serde(default)]
+        tabs: Vec<OwnedTab>,
+        /// target id → daemon pid that registered the overlay on it
+        /// (registrations die with the daemon's CDP session).
+        #[serde(default)]
+        overlay: HashMap<String, i32>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct LiveTab {
+        target_id: String,
+        tab_id: String,
+        title: String,
+        url: String,
+        active: bool,
+    }
+
+    fn state_path(session_id: &str) -> PathBuf {
+        browser_artifacts_dir(session_id).join("browser-tabs.json")
+    }
+
+    fn load(session_id: &str) -> OwnedTabs {
+        std::fs::read_to_string(state_path(session_id))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(session_id: &str, state: &OwnedTabs) -> Result<(), String> {
+        let value = serde_json::to_value(state).map_err(|e| e.to_string())?;
+        write_owner_only_json(&state_path(session_id), &value)
+    }
+
+    /// The daemon's bound tab (`<key>.target`): target id and last address.
+    fn bound_target(session_id: &str) -> Option<(String, Option<String>)> {
+        let key = engine_session_key(session_id);
+        let raw =
+            std::fs::read_to_string(engine_socket_dir().join(format!("{key}.target"))).ok()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        let target = value.get("targetId")?.as_str()?.to_string();
+        let url = value.get("url").and_then(Value::as_str).map(str::to_string);
+        Some((target, url))
+    }
+
+    pub(super) fn is_tab_gone(error: &str) -> bool {
+        error.contains("tab_gone") || error.contains("bound tab is gone")
+    }
+
+    fn engine_json(session_id: &str, args: &[&str]) -> Result<Value, String> {
+        let binary = resolve_engine_binary()?;
+        let mut argv = vec!["--json".to_string()];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        let output =
+            exec_engine_with(&binary, session_id, &argv, ENGINE_TIMEOUT_MS).or_else(|error| {
+                if error.trim_start().starts_with('{') {
+                    Ok(error)
+                } else {
+                    Err(error)
+                }
+            })?;
+        let value: Value = serde_json::from_str(output.trim()).map_err(|_| {
+            format!(
+                "Unexpected browser engine output: {}",
+                compact_one_line(&output)
+            )
+        })?;
+        if value.get("success").and_then(Value::as_bool) == Some(false) {
+            let error = value.get("error");
+            let message = error
+                .and_then(|e| {
+                    e.get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| e.as_str())
+                })
+                .unwrap_or("the browser engine refused the tab command");
+            return Err(message.to_string());
+        }
+        Ok(value.get("data").cloned().unwrap_or(Value::Null))
+    }
+
+    /// This Session's tabs that are still open, in the engine's order. Adopts
+    /// the daemon's bound tab (the original pinned tab is always this
+    /// Session's) and forgets tabs that were closed elsewhere.
+    fn live_tabs(session_id: &str) -> Result<(OwnedTabs, Vec<LiveTab>), String> {
+        let mut state = load(session_id);
+        if let Some((bound, _)) = bound_target(session_id) {
+            if !state.tabs.iter().any(|t| t.target_id == bound) {
+                state.tabs.insert(
+                    0,
+                    OwnedTab {
+                        target_id: bound,
+                        label: None,
+                    },
+                );
+            }
+        }
+        let data = engine_json(session_id, &["tab", "list"])?;
+        let all: Vec<LiveTab> = data
+            .get("tabs")
+            .and_then(Value::as_array)
+            .map(|tabs| {
+                tabs.iter()
+                    .filter_map(|tab| {
+                        Some(LiveTab {
+                            target_id: tab.get("targetId")?.as_str()?.to_string(),
+                            tab_id: tab
+                                .get("tabId")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            title: tab
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            url: tab
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            active: tab.get("active").and_then(Value::as_bool).unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        state
+            .tabs
+            .retain(|owned| all.iter().any(|live| live.target_id == owned.target_id));
+        state
+            .overlay
+            .retain(|target, _| state.tabs.iter().any(|t| &t.target_id == target));
+        let live = all
+            .into_iter()
+            .filter(|live| {
+                state
+                    .tabs
+                    .iter()
+                    .any(|owned| owned.target_id == live.target_id)
+            })
+            .collect();
+        save(session_id, &state)?;
+        Ok((state, live))
+    }
+
+    fn label_of<'a>(state: &'a OwnedTabs, target_id: &str) -> Option<&'a str> {
+        state
+            .tabs
+            .iter()
+            .find(|t| t.target_id == target_id)
+            .and_then(|t| t.label.as_deref())
+    }
+
+    fn resolve(state: &OwnedTabs, live: &[LiveTab], wanted: &str) -> Result<LiveTab, String> {
+        let wanted = wanted.trim();
+        live.iter()
+            .find(|tab| {
+                label_of(state, &tab.target_id)
+                    .is_some_and(|label| label.eq_ignore_ascii_case(wanted))
+                    || tab.tab_id == wanted
+                    || tab.target_id == wanted
+            })
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "No tab '{wanted}' in this session. {}",
+                    describe(state, live)
+                )
+            })
+    }
+
+    fn describe(state: &OwnedTabs, live: &[LiveTab]) -> String {
+        if live.is_empty() {
+            return "This session has no open tabs; open a URL or use tab op 'new'.".into();
+        }
+        let lines: Vec<String> = live
+            .iter()
+            .map(|tab| {
+                let name = label_of(state, &tab.target_id)
+                    .map(|label| format!("{label} ({})", tab.tab_id))
+                    .unwrap_or_else(|| tab.tab_id.clone());
+                let title = if tab.title.is_empty() || tab.url.contains(tab.title.as_str()) {
+                    String::new()
+                } else {
+                    format!("{} — ", tab.title)
+                };
+                format!(
+                    "{} {name}: {title}{}",
+                    if tab.active { "→" } else { " " },
+                    tab.url
+                )
+            })
+            .collect();
+        format!("This session's tabs:\n{}", lines.join("\n"))
+    }
+
+    /// Register the Agentation overlay on the daemon's current tab once per
+    /// daemon, and mount it now when the page already loaded without it.
+    fn ensure_overlay(session_id: &str, target_id: &str) {
+        if matches!(load_remote_cdp_binding(), Ok(Some(_))) {
+            return;
+        }
+        let key = engine_session_key(session_id);
+        let Some(pid) = live_engine_daemon_pid(&key) else {
+            return;
+        };
+        let mut state = load(session_id);
+        if state.overlay.get(target_id) == Some(&pid) {
+            return;
+        }
+        let project_id = session_host::load_manifest(session_id)
+            .map(|m| m.session.project_id)
+            .unwrap_or_default();
+        let Some(path) = crate::browser_bridge::write_init_script(
+            &browser_artifacts_dir(session_id),
+            &project_id,
+        ) else {
+            return;
+        };
+        let Ok(script) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let socket = engine_socket_dir().join(format!("{key}.sock"));
+        let request =
+            json!({ "id": "unpeel-overlay", "action": "addinitscript", "script": script });
+        if daemon_call(&socket, &request).is_err() {
+            return;
+        }
+        state.overlay.insert(target_id.to_string(), pid);
+        let _ = save(session_id, &state);
+        // A page that loaded before the registration has no toolbar yet.
+        if let Ok(binary) = resolve_engine_binary() {
+            let probe = [
+                "eval".to_string(),
+                "!!window.__unpeelAgentationMounted".to_string(),
+            ];
+            let mounted = exec_engine_with(&binary, session_id, &probe, ENGINE_TIMEOUT_MS)
+                .is_ok_and(|out| out.contains("true"));
+            let blank = bound_target(session_id)
+                .and_then(|(_, url)| url)
+                .is_none_or(|url| url.is_empty() || url == "about:blank");
+            if !mounted && !blank {
+                let _ = exec_engine_with(
+                    &binary,
+                    session_id,
+                    &["reload".to_string()],
+                    ENGINE_TIMEOUT_MS,
+                );
+            }
+        }
+    }
+
+    fn daemon_call(socket: &Path, request: &Value) -> Result<Value, String> {
+        let mut stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+        let timeout = Some(Duration::from_secs(10));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let reply: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+        if reply.get("success").and_then(Value::as_bool) == Some(true) {
+            Ok(reply)
+        } else {
+            Err(compact_one_line(&line))
+        }
+    }
+
+    fn switch_to(session_id: &str, tab: &LiveTab) -> Result<(), String> {
+        engine_json(session_id, &["tab", &tab.target_id])?;
+        ensure_overlay(session_id, &tab.target_id);
+        Ok(())
+    }
+
+    pub(super) fn select(session_id: &str, wanted: &str) -> Result<String, String> {
+        let (state, live) = live_tabs(session_id)?;
+        let tab = resolve(&state, &live, wanted)?;
+        if !tab.active {
+            switch_to(session_id, &tab)?;
+        }
+        let (state, live) = live_tabs(session_id)?;
+        Ok(describe(&state, &live))
+    }
+
+    fn valid_label(label: &str) -> bool {
+        !label.is_empty()
+            && label.len() <= 40
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !(label.starts_with('t')
+                && label[1..].chars().all(|c| c.is_ascii_digit())
+                && label.len() > 1)
+    }
+
+    fn new_tab(session_id: &str, url: Option<&str>, label: Option<&str>) -> Result<String, String> {
+        let (mut state, live) = live_tabs(session_id)?;
+        if let Some(label) = label {
+            if !valid_label(label) {
+                return Err(
+                    "A tab label uses letters, digits, - and _ (and isn't like t3).".into(),
+                );
+            }
+            if live.iter().any(|tab| {
+                label_of(&state, &tab.target_id).is_some_and(|l| l.eq_ignore_ascii_case(label))
+            }) {
+                return Err(format!("This session already has a tab labeled '{label}'."));
+            }
+        }
+        let mut args = vec!["tab", "new"];
+        if let Some(label) = label {
+            args.extend(["--label", label]);
+        }
+        let data = engine_json(session_id, &args)?;
+        let target_id = data
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or("The browser engine did not report the new tab")?
+            .to_string();
+        state.tabs.push(OwnedTab {
+            target_id: target_id.clone(),
+            label: label.map(str::to_string),
+        });
+        save(session_id, &state)?;
+        ensure_overlay(session_id, &target_id);
+        if let Some(url) = url {
+            let binary = resolve_engine_binary()?;
+            exec_engine_with(
+                &binary,
+                session_id,
+                &["open".to_string(), url.to_string()],
+                ENGINE_TIMEOUT_MS,
+            )?;
+        }
+        let (state, live) = live_tabs(session_id)?;
+        Ok(describe(&state, &live))
+    }
+
+    fn close_tab(session_id: &str, wanted: Option<&str>) -> Result<String, String> {
+        let (mut state, live) = live_tabs(session_id)?;
+        let tab = match wanted {
+            Some(wanted) => resolve(&state, &live, wanted)?,
+            None => live
+                .iter()
+                .find(|tab| tab.active)
+                .cloned()
+                .ok_or("No current tab to close")?,
+        };
+        engine_json(session_id, &["tab", "close", &tab.target_id])?;
+        state.tabs.retain(|owned| owned.target_id != tab.target_id);
+        state.overlay.remove(&tab.target_id);
+        save(session_id, &state)?;
+        // Keep a current tab: the engine pins the session to the one it
+        // closed, so move to the last remaining tab of this session.
+        let remaining: Vec<&LiveTab> = live
+            .iter()
+            .filter(|t| t.target_id != tab.target_id)
+            .collect();
+        if tab.active {
+            if let Some(next) = remaining.last() {
+                switch_to(session_id, next)?;
+            }
+        }
+        if remaining.is_empty() {
+            return Ok("Closed the session's last tab. Opening a URL starts a new one.".into());
+        }
+        let (state, live) = live_tabs(session_id)?;
+        Ok(describe(&state, &live))
+    }
+
+    /// After `tab_gone`: switch to another live tab of this Session, else open
+    /// a fresh tab at the bound tab's last address.
+    pub(super) fn recover(session_id: &str) -> Result<(), String> {
+        let last_url = bound_target(session_id).and_then(|(_, url)| url);
+        let (_, live) = live_tabs(session_id)?;
+        if let Some(tab) = live.last() {
+            return switch_to(session_id, tab);
+        }
+        let url = last_url.filter(|url| !url.is_empty() && url != "about:blank");
+        new_tab(session_id, url.as_deref(), None).map(|_| ())
+    }
+
+    /// `browser_close` closes the bound tab; close this Session's others first.
+    pub(super) fn close_extra_tabs(session_id: &str) {
+        if let Ok((_, live)) = live_tabs(session_id) {
+            for tab in live.iter().filter(|tab| !tab.active) {
+                let _ = engine_json(session_id, &["tab", "close", &tab.target_id]);
+            }
+        }
+        let _ = std::fs::remove_file(state_path(session_id));
+    }
+
+    pub(super) fn tool_tab(args: &Value) -> Result<String, String> {
+        let session_id = caller_session_id()?;
+        match optional_str(args, "op").unwrap_or("list") {
+            "list" => {
+                let (state, live) = live_tabs(&session_id)?;
+                Ok(describe(&state, &live))
+            }
+            "new" => new_tab(
+                &session_id,
+                optional_str(args, "url"),
+                optional_str(args, "label"),
+            ),
+            "select" => select(&session_id, required_str(args, "tab")?),
+            "close" => close_tab(&session_id, optional_str(args, "tab")),
+            other => Err(format!(
+                "Unknown tab op '{other}': use list, new, select, or close."
+            )),
+        }
     }
 }

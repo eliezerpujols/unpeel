@@ -4178,7 +4178,10 @@ mod tests {
             "id": "p2", "name": "Q", "path": "/q", "mcpBlocked": false
         }))
         .unwrap();
-        assert!(serde_json::to_value(&plain).unwrap().get("sessionOrder").is_none());
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("sessionOrder")
+            .is_none());
     }
 
     #[derive(Debug, Clone)]
