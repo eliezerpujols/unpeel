@@ -586,6 +586,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         keepOnTopItem.target = self
         windowMenu.addItem(keepOnTopItem)
         windowMenu.addItem(.separator())
+        // ⌘{ / ⌘} (⇧⌘[ / ⇧⌘]): move between workspaces, left / right.
+        for (title, key, action) in [
+            ("Previous Workspace", "{", #selector(previousWorkspaceFromMenu)),
+            ("Next Workspace", "}", #selector(nextWorkspaceFromMenu)),
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = [.command]
+            item.target = self
+            windowMenu.addItem(item)
+        }
+        windowMenu.addItem(.separator())
         windowMenu.addItem(NSMenuItem(
             title: "Bring All to Front",
             action: #selector(NSApplication.arrangeInFront(_:)),
@@ -642,6 +653,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         store?.openLauncher(forFolder: folder.path)
+    }
+
+    @objc private func previousWorkspaceFromMenu() {
+        guard let store else { return }
+        WorkspaceSwitching.cycleSliding(by: -1, store: store)
+    }
+
+    @objc private func nextWorkspaceFromMenu() {
+        guard let store else { return }
+        WorkspaceSwitching.cycleSliding(by: 1, store: store)
     }
 
     @objc private func toggleKeepOnTopFromMenu() {
@@ -746,6 +767,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
     /// disabled (Appearance ▸ "Session gallery") — the gallery chip owns the
     /// capture flow, so with no chip mounted the notification goes nowhere.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(previousWorkspaceFromMenu)
+            || menuItem.action == #selector(nextWorkspaceFromMenu) {
+            guard let store else { return false }
+            return WorkspaceSwitching.orderedRows(store: store).count > 1
+        }
         if menuItem.action == #selector(toggleKeepOnTopFromMenu) {
             menuItem.state = WindowPinModel.shared.isPinned ? .on : .off
             return true

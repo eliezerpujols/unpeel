@@ -176,6 +176,20 @@ enum WorkspaceSwitching {
     /// order, wrapping at both ends. Rows are built fresh here — this runs
     /// at most once per completed swipe gesture (the monitor's one-shot
     /// latch), never per scroll event.
+    /// ⌘{ / ⌘}: step to the previous / next workspace with the same
+    /// direction-aware slide a dot click uses (instant under Reduce Motion
+    /// or while Settings covers the sidebar). Wraps at both ends.
+    static func cycleSliding(by delta: Int, store: UnpeelStore) {
+        store.workspacePagerAnimator?.settle()
+        let rows = orderedRows(store: store)
+        guard rows.count > 1 else { return }
+        let current = rows.firstIndex { isScoped($0, store: store) } ?? 0
+        let count = rows.count
+        let next = ((current + delta) % count + count) % count
+        guard next != current else { return }
+        selectSliding(rows[next], store: store)
+    }
+
     static func cycle(by delta: Int, store: UnpeelStore) {
         let rows = orderedRows(store: store)
         guard rows.count > 1 else { return }
