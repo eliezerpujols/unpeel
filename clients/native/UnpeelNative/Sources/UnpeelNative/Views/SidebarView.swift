@@ -1159,6 +1159,7 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.projectFolders == rhs.projectFolders
             && lhs.canEditFolders == rhs.canEditFolders
             && lhs.agentFolderAccess == rhs.agentFolderAccess
+            && lhs.foldersUnavailableReason == rhs.foldersUnavailableReason
     }
 }
 
@@ -1450,6 +1451,9 @@ struct ProjectNodeView: View {
                 node.project.parentProjectID == nil ? node.id : (node.project.parentProjectID ?? node.id)
             ),
             agentFolderAccess: store.projectAgentFolderAccess(node.id),
+            foldersUnavailableReason: node.project.parentProjectID == nil
+                ? store.projectFoldersUnavailableReason(node.id)
+                : nil,
             onFolderAction: { action in
                 store.performProjectFolderAction(node.id, action)
             }
@@ -2018,6 +2022,9 @@ struct ProjectRowView: View {
     /// Folder rename/icon/add/remove allowed in this scope.
     var canEditFolders = false
     var agentFolderAccess = false
+    /// Set when this scope's Host can't edit folders: a disabled row says
+    /// why instead of the verbs silently disappearing.
+    var foldersUnavailableReason: String?
     var onFolderAction: (ProjectFolderAction) -> Void = { _ in }
 
     /// Worktree children get "Remove worktree" instead of the plain
@@ -2296,6 +2303,10 @@ struct ProjectRowView: View {
                 )
             } else if node.project.parentProjectID == nil, canEditFolders {
                 Button("Add folder to project…") { onFolderAction(.add) }
+            } else if let reason = foldersUnavailableReason {
+                Button("Add folder to project…") {}
+                    .disabled(true)
+                Text(reason)
             }
             // Folder color is a MAIN-project verb: groups and worktrees stay
             // neutral so nesting reads by indent, not tint (decided

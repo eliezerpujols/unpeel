@@ -4036,6 +4036,9 @@ final class UnpeelStore: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.title = "Select project folder"
+        if selectedHostScope.isLocalMachine, !canCreateMultiFolderProject {
+            panel.message = "This workspace's Host doesn't support projects with multiple folders yet."
+        }
         panel.prompt = "Add Project"
         panel.begin { [weak self] response in
             Task { @MainActor in
@@ -6814,6 +6817,15 @@ final class UnpeelStore: ObservableObject {
             }
         }
         topLevel.sort { ($0.sortOrder ?? 0) < ($1.sortOrder ?? 0) }
+        // Without a manual order from any source, the Host ranks projects by
+        // their newest session (`unpeel-serve` sessions.rs, "most recently
+        // active group first"). Apply the same rule here so this disk-scan
+        // seed never draws file order for a frame and then jumps to the
+        // Host's order when a scope switch hands over to the Host.
+        let rankByActivity = !hasManualProjectOrder
+        if rankByActivity {
+            topLevel = Self.sortedByNewestSession(topLevel, sessionsByProject: byProject)
+        }
         // Native drag-reorder overlay over the file's sort_order: overlay ids
         // first (in overlay order), unknown/new projects appended in file
         // order — matching reorder_projects/add_project in project.rs, where
@@ -6824,9 +6836,14 @@ final class UnpeelStore: ObservableObject {
             // Worktree checkouts AND plain groups (organizational child
             // folders, isFolder + parent, no branch) render as inline
             // folder rows.
-            let childProjects = (childrenOf[project.id] ?? [])
+            var childProjects = (childrenOf[project.id] ?? [])
                 .filter { $0.worktreeBranch != nil || $0.isFolder == true }
                 .sorted { ($0.sortOrder ?? 0) < ($1.sortOrder ?? 0) }
+            if rankByActivity {
+                childProjects = Self.sortedByNewestSession(
+                    childProjects, sessionsByProject: byProject
+                )
+            }
             let kids = applyProjectOrderOverlay(childProjects, parentID: project.id)
                 .map { node(for: $0) }
             return ProjectNode(
@@ -7724,6 +7741,33 @@ final class UnpeelStore: ObservableObject {
         } ?? false
         sharedProjectOrderCache = nil
         return wrote
+    }
+
+    /// Whether the user ordered projects by hand anywhere the Host also
+    /// reads: the shared `project-order.json` or the top-level overlay. Same
+    /// condition as the Host's activity fallback in `unpeel-serve`.
+    private var hasManualProjectOrder: Bool {
+        if projectOrderPreview != nil { return true }
+        if Self.sharedProjectOrder()?.isEmpty == false { return true }
+        return AppDefaults.shared.stringArray(
+            forKey: Self.projectOrderKey(forParent: nil)
+        )?.isEmpty == false
+    }
+
+    /// Newest session first; projects without sessions keep their relative
+    /// order after the active ones (a stable sort, like Rust's sort_by_key).
+    nonisolated static func sortedByNewestSession(
+        _ projects: [Project], sessionsByProject: [String: [SessionEntry]]
+    ) -> [Project] {
+        let newest = { (project: Project) -> Int64 in
+            Int64((sessionsByProject[project.id] ?? []).map(\.createdAt).max() ?? 0)
+        }
+        return projects.enumerated()
+            .sorted { lhs, rhs in
+                let (left, right) = (newest(lhs.element), newest(rhs.element))
+                return left != right ? left > right : lhs.offset < rhs.offset
+            }
+            .map(\.element)
     }
 
     private func applyProjectOrderOverlay(_ base: [Project], parentID: String?) -> [Project] {
@@ -11660,17 +11704,48 @@ final class UnpeelStore: ObservableObject {
               project.parentProjectID == nil, project.worktreeBranch == nil
         else { return false }
         if routesProjectVerbThroughHost(projectID) {
-            return remoteHostRuntime.supportsHostOperation(
+            return remoteHostRuntime.currentHostSupports(
                 RemoteHostRuntime.HostOperation.projectFolders
             )
         }
-        return selectedHostScope == .local
+        return selectedHostScope == .local && hostSupportsProjectFoldersIfHostServed
     }
 
-    /// The New Project dialog builds multi-folder projects from local
-    /// folders, so it is offered on this Mac's default scope only; other
-    /// scopes keep the single-folder picker.
-    var canCreateMultiFolderProject: Bool { selectedHostScope == .local }
+    /// A Host-served Local scope (the normal case once the app is a client
+    /// of its workspace worker) must have a Host that understands folders:
+    /// an older Host would ignore `folderPath` and drop the folder list on
+    /// its next app-state write. Only the launch-time local fallback (no
+    /// Host client yet) edits local records unconditionally.
+    private var hostSupportsProjectFoldersIfHostServed: Bool {
+        guard localScopeIsHostServed else { return true }
+        return remoteHostRuntime.currentHostSupports(
+            RemoteHostRuntime.HostOperation.projectFolders
+        )
+    }
+
+    /// Why folders can't be edited for this top-level project here, or nil.
+    /// Shown as a disabled menu row instead of silently hiding the verbs.
+    func projectFoldersUnavailableReason(_ projectID: String) -> String? {
+        guard let project = displayProjectsByID[projectID] ?? projectsByID[projectID],
+              project.parentProjectID == nil, project.worktreeBranch == nil,
+              selectedHostScope.isLocalMachine,
+              !canEditProjectFolders(projectID)
+        else { return nil }
+        return "This workspace's Host doesn't support multiple folders yet"
+    }
+
+    /// The New Project dialog picks folders on THIS Mac, so it is offered in
+    /// this Mac's scopes: the default scope (local records), and another
+    /// local workspace whose Host supports `project.folders` (created through
+    /// the Host's `project.add`). Other scopes keep the single-folder picker.
+    var canCreateMultiFolderProject: Bool {
+        if selectedHostScope == .local { return hostSupportsProjectFoldersIfHostServed }
+        return selectedHostScope.isLocalMachine
+            && remoteHostRuntime.currentHostSupports(
+                RemoteHostRuntime.HostOperation.projectFolders
+            )
+            && remoteHostRuntime.currentHostSupports("project.add")
+    }
 
     /// Sanitized folder list: absolute, de-duplicated, trimmed names, max 32.
     nonisolated static func sanitizedProjectFolders(_ folders: [ProjectFolder]) -> [ProjectFolder] {
@@ -11843,6 +11918,16 @@ final class UnpeelStore: ObservableObject {
         let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmedName.isEmpty ? Self.projectFolderName(primary.path) : trimmedName
 
+        // Another local workspace: its Host owns the records.
+        if selectedHostScope != .local {
+            createProjectThroughHost(
+                name: name,
+                folders: stored.isEmpty ? [primary] : stored,
+                agentFolderAccess: agentFolderAccess
+            )
+            return nil
+        }
+
         let projectID: String
         let existingID = projectsByID.values.first(where: {
             $0.parentProjectID == nil
@@ -11873,6 +11958,49 @@ final class UnpeelStore: ObservableObject {
         expandedProjectIDs.insert(projectID)
         launcherProjectID = projectID
         return projectID
+    }
+
+    /// `project.add` with the folder list (Host-owned scopes). The Host
+    /// dedupes by primary path and returns the record it kept.
+    private func createProjectThroughHost(
+        name: String, folders: [ProjectFolder], agentFolderAccess: Bool
+    ) {
+        guard let primary = folders.first else { return }
+        let wire = folders.map {
+            RemoteProjectFolder(path: $0.path, name: $0.name, icon: $0.icon)
+        }
+        guard let foldersJSON = try? String(
+            decoding: JSONEncoder().encode(wire), as: UTF8.self
+        ) else { return }
+        let scope = selectedHostScope
+        Task {
+            do {
+                let data = try await remoteHostRuntime.resourceRequest(
+                    operation: "addProject",
+                    capability: "project.add",
+                    parameters: [
+                        "path": primary.path,
+                        "name": name,
+                        "folders": foldersJSON,
+                        "agentFolderAccess": agentFolderAccess ? "true" : "false",
+                    ]
+                )
+                guard selectedHostScope == scope else { return }
+                struct ProjectReceipt: Decodable { let id: String }
+                let project = try JSONDecoder().decode(ProjectReceipt.self, from: data)
+                settingsVisible = false
+                selectedSessionID = nil
+                expandedProjectIDs.insert(project.id)
+                launcherProjectID = project.id
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t create the project"
+                alert.informativeText = error.localizedDescription
+                if let window = NSApp.keyWindow {
+                    alert.beginSheetModal(for: window, completionHandler: nil)
+                }
+            }
+        }
     }
 
     /// The dialog's request: nil `projectID` = New Project.
@@ -11952,7 +12080,16 @@ final class UnpeelStore: ObservableObject {
                 let added = panel.urls.map { ProjectFolder(path: $0.path) }
                 Task { @MainActor in
                     guard let self else { return }
-                    self.setProjectFolders(root, folders: self.effectiveProjectFolders(root) + added)
+                    let current = self.effectiveProjectFolders(root)
+                    // A project growing from one folder to several turns on
+                    // agent access, same default as the New Project dialog —
+                    // otherwise agents silently see only the primary folder.
+                    let becomesMulti = current.count < 2 && current.count + added.count >= 2
+                    self.setProjectFolders(
+                        root,
+                        folders: current + added,
+                        agentFolderAccess: becomesMulti ? true : nil
+                    )
                 }
             }
         case .rename(let path):
@@ -14362,6 +14499,9 @@ final class UnpeelStore: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.title = "Select project folder"
+        if selectedHostScope.isLocalMachine, !canCreateMultiFolderProject {
+            panel.message = "This workspace's Host doesn't support projects with multiple folders yet."
+        }
         panel.prompt = "Add Project"
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }

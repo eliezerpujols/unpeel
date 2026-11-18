@@ -3506,6 +3506,14 @@ extension RemoteHostRuntime {
         snapshot?.hostProtocol?.supports(operation) == true
     }
 
+    /// Like `supportsHostOperation`, but only once the CURRENT connection has
+    /// bootstrapped. Right after a scope switch the visible snapshot can
+    /// still be the previous Host's (kept to avoid a flash), which made
+    /// capability-gated UI flip between two answers for the same workspace.
+    func currentHostSupports(_ operation: String) -> Bool {
+        connectionBootstrapped && supportsHostOperation(operation)
+    }
+
     func resourceRequest(operation: String, capability: String, parameters: [String: String], bytes: Data = Data()) async throws -> Data {
         let (connection, _) = try requireConnection(capability: capability, operation: operation)
         await connection.effectStartBarrier?.value

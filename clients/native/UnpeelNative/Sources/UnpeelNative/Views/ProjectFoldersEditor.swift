@@ -305,6 +305,12 @@ struct ProjectFoldersEditorSheet: View {
     }
 
     private func append(_ urls: [URL]) {
+        let wasMulti = folders.count > 1
+        defer {
+            // Growing an existing single-folder project to several folders
+            // turns agent access on (new projects already default to on).
+            if !wasMulti && folders.count > 1 { agentAccess = true }
+        }
         for url in urls {
             let path = url.standardizedFileURL.resolvingSymlinksInPath().path
             guard !folders.contains(where: { $0.path == path }), folders.count < 32 else { continue }
