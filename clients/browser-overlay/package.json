@@ -1,0 +1,16 @@
+{
+  "name": "unpeel-browser-overlay",
+  "private": true,
+  "description": "Agentation on every page of the Unpeel project browser, with Send to session",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "agentation": "3.1.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}
