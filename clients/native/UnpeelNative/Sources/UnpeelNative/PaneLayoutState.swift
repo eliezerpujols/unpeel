@@ -969,9 +969,9 @@ struct PaneLayoutState: Equatable, Sendable {
             }
 
             let sessionLeaves = newRoot?.sessionLeaves ?? []
-            let hasLauncher = newRoot?.containsLauncher ?? false
+            let hasCompanion = newRoot?.containsCompanion ?? false
             let canRemainGrouped = sessionLeaves.count >= 2
-                || (sessionLeaves.count == 1 && hasLauncher)
+                || (sessionLeaves.count == 1 && hasCompanion)
 
             guard let newRoot, canRemainGrouped else {
                 changes.append(PaneLayoutChange(
@@ -989,7 +989,7 @@ struct PaneLayoutState: Equatable, Sendable {
             if updated.root.leaf(id: updated.representativePaneID)?.content.sessionID == nil {
                 updated.representativePaneID = sessionLeaves[0].id
             }
-            if let snapshot = updated.preLauncherRoot, hasLauncher {
+            if let snapshot = updated.preLauncherRoot, newRoot.containsLauncher {
                 var pruned: PaneNode? = snapshot
                 for pane in ineligible {
                     pruned = pruned?.removingLeaf(pane.id)
@@ -1082,7 +1082,7 @@ struct PaneLayoutState: Equatable, Sendable {
             guard let root else { continue }
             let sessionLeaves = root.sessionLeaves
             let canRemainGrouped = sessionLeaves.count >= 2
-                || (sessionLeaves.count == 1 && hasLauncher)
+                || (sessionLeaves.count == 1 && (hasLauncher || root.containsFiles))
             guard canRemainGrouped else { continue }
 
             usedGroupIDs.insert(groupID)
@@ -1442,5 +1442,50 @@ enum PaneStableID {
 
     static func canonical(_ value: String) -> String? {
         UUID(uuidString: value)?.uuidString.lowercased()
+    }
+}
+
+// MARK: - Files pane restore (see FilesPanePersistence.swift)
+
+extension PaneLayoutState {
+    /// Put recorded Files panes back onto a layout restored from the shared
+    /// file. See the file header for the matching rules.
+    func overlayingFilesPanes(_ records: [FilesPaneGroupRecord]) -> PaneLayoutState {
+        var state = self
+        for record in records {
+            let tree = record.root.paneNode
+            let recordSessions = Set(tree.sessionLeaves.compactMap(\.content.sessionID))
+            let recordPaneIDs = Set(tree.leaves.map(\.id))
+            guard !recordSessions.isEmpty,
+                  tree.leaf(id: record.representativePaneID)?.content.sessionID != nil
+            else { continue }
+
+            if let index = state.groups.firstIndex(where: { $0.id == record.id }) {
+                let shared = state.groups[index].root
+                let sharedSessions = Set(shared.sessionLeaves.compactMap(\.content.sessionID))
+                let sharedPaneIDs = Set(shared.leaves.map(\.id))
+                guard sharedSessions == recordSessions,
+                      sharedPaneIDs.isSubset(of: recordPaneIDs),
+                      !shared.containsLauncher
+                else { continue }
+                state.groups[index].root = tree
+                state.groups[index].representativePaneID = record.representativePaneID
+                continue
+            }
+
+            // Not in the shared file (one Session + Files): recreate it only
+            // when nothing else claims its Sessions, pane ids or group id.
+            let usedPaneIDs = Set(state.groups.flatMap { $0.root.leaves.map(\.id) })
+            guard recordSessions.allSatisfy({ state.location(ofSession: $0) == nil }),
+                  usedPaneIDs.isDisjoint(with: recordPaneIDs),
+                  tree.sessionLeaves.count <= Self.maximumSessionLeafCount
+            else { continue }
+            state.groups.append(PaneGroup(
+                id: record.id,
+                representativePaneID: record.representativePaneID,
+                root: tree
+            ))
+        }
+        return state
     }
 }

@@ -81,7 +81,11 @@ final class PaneLayoutController: ObservableObject {
             from: fileURL,
             windowID: windowID,
             scopeID: scopeID
-        )
+        ).overlayingFilesPanes(FilesPanePersistence.load(
+            FilesPanePersistence.url(nextTo: fileURL),
+            windowID: windowID,
+            scopeID: scopeID
+        ))
         state = restored
         inMemoryStates[scopeID] = restored
         sidebarProjection = Self.loadStorage(from: fileURL)?
@@ -136,7 +140,11 @@ final class PaneLayoutController: ObservableObject {
             from: fileURL,
             windowID: windowID,
             scopeID: scopeID
-        )
+        ).overlayingFilesPanes(FilesPanePersistence.load(
+            FilesPanePersistence.url(nextTo: fileURL),
+            windowID: windowID,
+            scopeID: scopeID
+        ))
         let liveDurable = DurablePaneLayout(state: state)
         let diskDurable = DurablePaneLayout(state: disk)
         guard liveDurable != diskDurable else {
@@ -160,7 +168,11 @@ final class PaneLayoutController: ObservableObject {
             from: fileURL,
             windowID: windowID,
             scopeID: scopeID
-        )
+        ).overlayingFilesPanes(FilesPanePersistence.load(
+            FilesPanePersistence.url(nextTo: fileURL),
+            windowID: windowID,
+            scopeID: scopeID
+        ))
         inMemoryStates[scopeID] = restored
         if state != restored {
             state = restored
@@ -179,7 +191,11 @@ final class PaneLayoutController: ObservableObject {
             from: fileURL,
             windowID: windowID,
             scopeID: scopeID
-        )
+        ).overlayingFilesPanes(FilesPanePersistence.load(
+            FilesPanePersistence.url(nextTo: fileURL),
+            windowID: windowID,
+            scopeID: scopeID
+        ))
     }
 
     func setDropTarget(_ target: PaneDropTarget?) {
@@ -286,6 +302,13 @@ final class PaneLayoutController: ObservableObject {
         )
         _ = PresetStateFile.withExclusiveLock(on: fileURL) {
             persistLocked(state)
+            // Mac-only companion: the Files panes the shared file can't hold.
+            FilesPanePersistence.save(
+                FilesPanePersistence.records(in: state),
+                to: FilesPanePersistence.url(nextTo: fileURL),
+                windowID: windowID,
+                scopeID: scopeID
+            )
         }
     }
 

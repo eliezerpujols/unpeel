@@ -107,4 +107,102 @@ final class FilesPaneTests: XCTestCase {
         XCTAssertEqual(FileTreeListing.symbol(for: entries[1], expanded: false), "doc.plaintext")
         XCTAssertEqual(FileTreeListing.symbol(for: entries[2], expanded: false), "swift")
     }
+
+    // MARK: - Persistence (Mac-only companion file)
+
+    private func soloFilesGroup(folder: String? = "/work/api") -> PaneGroup {
+        PaneGroup(
+            id: groupID,
+            representativePaneID: paneA,
+            root: .split(PaneSplit(
+                direction: .horizontal,
+                ratio: 0.6,
+                left: .leaf(Pane(id: paneA, content: .session(id: "s1"))),
+                right: .leaf(Pane(id: paneL, content: .files(projectID: "p1", folderPath: folder)))
+            ))
+        )
+    }
+
+    @MainActor
+    func testFilesPaneSurvivesRelaunch() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fp-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let layoutURL = dir.appendingPathComponent(PaneLayoutController.storageFileName)
+
+        let first = PaneLayoutController(fileURL: layoutURL)
+        try first.mutate { state in
+            try state.insertLauncher(
+                projectID: "p1", beside: "s1", at: .right,
+                newGroupID: groupID, newRepresentativePaneID: paneA, newPaneID: paneL
+            )
+            try state.bindLauncher(paneL, toFilesOf: "p1")
+            try state.setFilesFolder(paneL, folderPath: "/work/api")
+        }
+
+        // The shared file stays free of Files leaves …
+        let shared = try String(contentsOf: layoutURL, encoding: .utf8)
+        XCTAssertFalse(shared.contains("files"))
+
+        // … and a fresh controller (relaunch) restores the pane and folder.
+        let second = PaneLayoutController(fileURL: layoutURL)
+        XCTAssertEqual(
+            second.state.groups.first?.root.leaf(id: paneL)?.content,
+            .files(projectID: "p1", folderPath: "/work/api")
+        )
+        XCTAssertEqual(second.state.groups.first?.root.sessionLeaves.map(\.id), [paneA])
+
+        // Closing the Files pane forgets it.
+        try second.mutate { state in state = PaneLayoutState() }
+        XCTAssertTrue(PaneLayoutController(fileURL: layoutURL).state.groups.isEmpty)
+    }
+
+    func testOverlayRestoresFilesIntoMatchingSharedGroup() throws {
+        let full = PaneGroup(
+            id: groupID,
+            representativePaneID: paneA,
+            root: .split(PaneSplit(
+                direction: .horizontal, ratio: 0.5,
+                left: .split(PaneSplit(
+                    direction: .vertical, ratio: 0.5,
+                    left: .leaf(Pane(id: paneA, content: .session(id: "s1"))),
+                    right: .leaf(Pane(id: paneB, content: .session(id: "s2")))
+                )),
+                right: .leaf(Pane(id: paneL, content: .files(projectID: "p1", folderPath: nil)))
+            ))
+        )
+        let record = try XCTUnwrap(FilesPaneGroupRecord(group: full))
+        let durable = try XCTUnwrap(DurablePaneGroup(group: full))
+        let base = PaneLayoutState(groups: [PaneGroup(
+            id: groupID, representativePaneID: paneA, root: durable.root.paneNode()
+        )])
+        XCTAssertEqual(base.overlayingFilesPanes([record]).groups.first?.root, full.root)
+    }
+
+    func testOverlayNeverOverridesAnotherFrontendsChange() throws {
+        let record = try XCTUnwrap(FilesPaneGroupRecord(group: soloFilesGroup()))
+        // s1 got grouped with s2 elsewhere since: the Files record is dropped.
+        let other = PaneGroup(
+            id: "other",
+            representativePaneID: paneB,
+            root: .split(PaneSplit(
+                direction: .horizontal, ratio: 0.5,
+                left: .leaf(Pane(id: paneB, content: .session(id: "s1"))),
+                right: .leaf(Pane(id: "pz", content: .session(id: "s2")))
+            ))
+        )
+        let base = PaneLayoutState(groups: [other])
+        XCTAssertEqual(base.overlayingFilesPanes([record]), base)
+        // Nothing grouped: the one-Session + Files group comes back.
+        XCTAssertEqual(
+            PaneLayoutState().overlayingFilesPanes([record]).groups.first?.root,
+            soloFilesGroup().root
+        )
+    }
+
+    func testRecordCodableRoundTrip() throws {
+        let record = try XCTUnwrap(FilesPaneGroupRecord(group: soloFilesGroup(folder: nil)))
+        let data = try JSONEncoder().encode(record)
+        XCTAssertEqual(try JSONDecoder().decode(FilesPaneGroupRecord.self, from: data), record)
+    }
 }
