@@ -179,11 +179,35 @@ pub(crate) fn reconcile_codex_config_toml(
     shim: &Path,
 ) -> Result<String, String> {
     let with_hooks = enable_codex_hooks_feature_in_toml(raw)?;
-    let with_server = upsert_codex_mcp_server_table(&with_hooks, shim);
+    let with_daemon = disable_codex_daemon_auto_start_in_toml(&with_hooks)?;
+    let with_server = upsert_codex_mcp_server_table(&with_daemon, shim);
     let updated = ensure_codex_notify(&with_server, notify_script_path);
     updated
         .parse::<toml::Value>()
         .map_err(|e| format!("Failed to reconcile Codex config.toml: {e}"))?;
+    Ok(updated)
+}
+
+pub(crate) const CODEX_DAEMON_AUTO_START_FEATURE_FLAG: &str = "daemon_auto_start";
+
+/// Codex 0.170+ auto-starts a shared app-server daemon and runs every
+/// thread's MCP servers and hooks from it — outside the Unpeel Session's
+/// process tree and with a stripped environment, so neither the hooks nor the
+/// `unpeel` MCP server can tell which Session they belong to (the server then
+/// serves no tools). Turning the auto-start off keeps each `codex` in its own
+/// terminal, as before. A value the user set themselves is left alone.
+pub(crate) fn disable_codex_daemon_auto_start_in_toml(raw: &str) -> Result<String, String> {
+    if codex_feature_is_present(raw, CODEX_DAEMON_AUTO_START_FEATURE_FLAG)? {
+        return Ok(raw.to_string());
+    }
+    let mut lines = raw.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let header = lines
+        .iter()
+        .position(|line| line.split('#').next().unwrap_or("").trim() == "[features]")
+        .ok_or("Codex config.toml has no [features] table")?;
+    lines.insert(header + 1, format!("{CODEX_DAEMON_AUTO_START_FEATURE_FLAG} = false"));
+    let mut updated = lines.join("\n");
+    updated.push('\n');
     Ok(updated)
 }
 

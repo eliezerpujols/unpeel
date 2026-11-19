@@ -586,9 +586,10 @@ pub(crate) use crate::integrations::{
     },
     cline::setup::{write_cline_event_hook, CLINE_HOOK_SCRIPT},
     codex::setup::{
-        build_codex_hook_command, build_codex_hook_entry, codex_hooks_feature_is_enabled,
-        enable_codex_hooks_feature_in_toml, parse_managed_codex_hook_command,
-        reconcile_codex_hooks_json, CODEX_MANAGED_HOOK_SUFFIX, CODEX_NOTIFY_NORMALIZER_SCRIPT,
+        build_codex_hook_command, build_codex_hook_entry, codex_feature_bool,
+        codex_hooks_feature_is_enabled, enable_codex_hooks_feature_in_toml,
+        parse_managed_codex_hook_command, reconcile_codex_config_toml, reconcile_codex_hooks_json,
+        CODEX_MANAGED_HOOK_SUFFIX, CODEX_NOTIFY_NORMALIZER_SCRIPT,
     },
     copilot::setup::COPILOT_HOOK_SCRIPT,
     cursor_agent::setup::{merge_cursor_mcp_servers_at, CURSOR_HOOK_SCRIPT},

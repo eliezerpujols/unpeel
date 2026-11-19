@@ -274,3 +274,23 @@ fn codex_hooks_prune_only_stale_unpeel_entries() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn reconcile_turns_off_the_shared_daemon_unless_the_user_chose() {
+    let shim = std::path::Path::new("/tmp/unpeel-mcp");
+    let notify = std::path::Path::new("/tmp/notify.sh");
+    let updated = crate::hook_assets::reconcile_codex_config_toml("model = \"x\"\n", notify, shim)
+        .expect("reconcile");
+    assert_eq!(
+        crate::hook_assets::codex_feature_bool(&updated, "daemon_auto_start").unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        crate::hook_assets::reconcile_codex_config_toml(&updated, notify, shim).unwrap(),
+        updated,
+        "idempotent"
+    );
+    let chosen = "[features]\nhooks = true\ndaemon_auto_start = true\n";
+    let kept = crate::hook_assets::reconcile_codex_config_toml(chosen, notify, shim).unwrap();
+    assert_eq!(crate::hook_assets::codex_feature_bool(&kept, "daemon_auto_start").unwrap(), Some(true));
+}
