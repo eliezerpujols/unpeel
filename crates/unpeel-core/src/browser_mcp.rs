@@ -1861,10 +1861,20 @@ fn tool_open(args: &Value) -> Result<String, String> {
             if let Some(target) = tabs::bound_target_id(&session_id) {
                 await_user_chrome_csp(&target);
             }
+        } else {
+            let opened = exec_engine(&["open".into(), url.into()], ENGINE_TIMEOUT_MS)?;
+            return Ok(format!("{opened}\n{USER_CHROME_FALLBACK_NOTE}"));
         }
     }
     exec_engine(&["open".into(), url.into()], ENGINE_TIMEOUT_MS)
 }
+
+/// Told to the agent (and through it the user) whenever "Use my Chrome" mode
+/// opens in the Unpeel window instead, so the fallback is never silent.
+const USER_CHROME_FALLBACK_NOTE: &str = "Note for the user: this opened in the Unpeel \
+browser window, not their own Chrome, because their Chrome isn't open or doesn't allow \
+remote debugging. To use their Chrome: open chrome://inspect/#remote-debugging in Chrome, \
+turn on remote debugging, then close this browser (browser close) and open again.";
 
 fn tool_snapshot(args: &Value) -> Result<String, String> {
     let mut argv = vec!["snapshot".to_string()];
