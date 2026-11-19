@@ -563,8 +563,9 @@ fn initialize_result(params: &Value) -> Value {
     worktrees; 'artifacts' publishes review artifacts such as gallery images. \
     'browser' (when present) operates a real browser isolated to this session (own profile and \
     window, closed with the session). When the user asks to open, show, preview, or check a web \
-    page, site, or localhost URL, use 'browser' open — never the `open` command, Safari, or \
-    another browser app: the Unpeel browser is where the user reviews pages and sends Agentation \
+    page, site, or localhost URL, use 'browser' open — never the `open` command, Safari, \
+    another browser app, or an agent's own built-in browser / Chrome / computer-use tools (they \
+    fail inside an Unpeel terminal, e.g. \"browser access host is unavailable\"): the Unpeel browser is where the user reviews pages and sends Agentation \
     feedback to a session. Core loop: open a URL, snapshot for element refs like \
     @e1, act by ref (click/fill), re-snapshot after navigation or DOM changes — refs go stale. \
     Prefer refs over CSS selectors. Use wait after actions that trigger loads; screenshot saves \
@@ -1874,7 +1875,8 @@ fn browser_tool_definition() -> Value {
         "name": BROWSER_TOOL,
         "description": "Operate a real browser isolated to this session. Whenever the user asks \
     to open, show, preview, or check a web page, site, or localhost URL, use this tool — never \
-    `open`, Safari, or another browser app: this is the window the user reviews and annotates \
+    `open`, Safari, another browser app, or your own built-in browser / Chrome / computer-use \
+    tools (they are unavailable inside an Unpeel terminal): this is the window the user reviews and annotates \
     (its Agentation toolbar sends feedback to a session). Core loop: action \
     'open' a URL, 'snapshot' for element refs like @e1, act by ref ('click'/'fill'), then \
     re-snapshot after navigation — refs go stale. A session can keep several tabs: action 'tab' \
