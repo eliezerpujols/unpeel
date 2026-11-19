@@ -414,9 +414,14 @@ fn load_options() -> BrowserOptions {
         .ok()
         .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
         .unwrap_or(Value::Null);
-    let settings = value
-        .get("browser_settings")
-        .cloned()
+    // Browser settings are machine-wide: Settings writes them to the machine
+    // home, and every workspace's sessions follow that one choice.
+    let machine_settings = std::fs::read(crate::app_paths::machine_home().join("app-state.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|machine| machine.get("browser_settings").cloned());
+    let settings = machine_settings
+        .or_else(|| value.get("browser_settings").cloned())
         .and_then(|raw| serde_json::from_value::<crate::state::BrowserSettings>(raw).ok())
         .unwrap_or_default();
     let auto_add_screenshots_to_gallery = value

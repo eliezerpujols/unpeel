@@ -33,15 +33,20 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// (`browser.json`), unless one is already running for that endpoint.
 pub fn ensure_running(state_dir: &Path, endpoint: &str) {
     if crate::browser_bridge::overlay_enabled() {
-        spawn_unless_running(state_dir, endpoint);
+        spawn_unless_running(state_dir, endpoint, KEEPER_KIND);
     }
 }
 
 /// Start the shared connection to the user's Chrome (`browser_cdp_broker`;
 /// `browser.json` already says so), needed even without the overlay.
 pub fn ensure_broker_running(state_dir: &Path, endpoint: &str) {
-    spawn_unless_running(state_dir, endpoint);
+    spawn_unless_running(state_dir, endpoint, BROKER_KIND);
 }
+
+/// Recorded in the pid file, so a helper of another kind (or from a build
+/// that predates the broker) is replaced rather than trusted.
+const KEEPER_KIND: &str = "keeper";
+const BROKER_KIND: &str = "broker";
 
 /// Whether the helper recorded in `state_dir` is alive.
 pub fn is_running(state_dir: &Path) -> bool {
@@ -55,16 +60,20 @@ pub fn is_running(state_dir: &Path) -> bool {
         .is_some_and(|pid| keeper_is_alive(pid, state_dir))
 }
 
-fn spawn_unless_running(state_dir: &Path, endpoint: &str) {
+fn spawn_unless_running(state_dir: &Path, endpoint: &str, kind: &str) {
     let pid_file = state_dir.join(PID_FILE);
     if let Ok(raw) = std::fs::read_to_string(&pid_file) {
         let mut lines = raw.lines();
         let pid = lines.next().and_then(|p| p.trim().parse::<i32>().ok());
         let recorded = lines.next().unwrap_or("").trim();
-        if let Some(pid) = pid {
-            if recorded == endpoint && keeper_is_alive(pid, state_dir) {
+        let recorded_kind = lines.next().unwrap_or(KEEPER_KIND).trim();
+        if let Some(pid) = pid.filter(|pid| keeper_is_alive(*pid, state_dir)) {
+            if recorded == endpoint && recorded_kind == kind {
                 return;
             }
+            // Ours (identity checked) but stale: never leave two helpers
+            // holding connections to the same browser.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
         }
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -84,7 +93,7 @@ fn spawn_unless_running(state_dir: &Path, endpoint: &str) {
         command.process_group(0);
     }
     if let Ok(child) = command.spawn() {
-        let _ = std::fs::write(&pid_file, format!("{}\n{endpoint}\n", child.id()));
+        let _ = std::fs::write(&pid_file, format!("{}\n{endpoint}\n{kind}\n", child.id()));
     }
 }
 
