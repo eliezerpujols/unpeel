@@ -12,8 +12,9 @@
 //! (`unpeel-host __browser_csp_keeper__ <state-dir>`) attaches to the
 //! browser's DevTools endpoint, auto-attaches to every page (paused until the
 //! bypass is set, so the first load is covered too), and exits when the
-//! browser goes away. It only ever runs against Unpeel's own Chrome, never the
-//! user's personal browser.
+//! browser goes away. Against the user's own Chrome ("Use my Chrome" mode)
+//! the same helper runs `browser_cdp_broker` instead, which only touches the
+//! tabs Unpeel opened.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -31,9 +32,30 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// Start the keeper for the browser whose record lives in `state_dir`
 /// (`browser.json`), unless one is already running for that endpoint.
 pub fn ensure_running(state_dir: &Path, endpoint: &str) {
-    if !crate::browser_bridge::overlay_enabled() {
-        return;
+    if crate::browser_bridge::overlay_enabled() {
+        spawn_unless_running(state_dir, endpoint);
     }
+}
+
+/// Start the shared connection to the user's Chrome (`browser_cdp_broker`;
+/// `browser.json` already says so), needed even without the overlay.
+pub fn ensure_broker_running(state_dir: &Path, endpoint: &str) {
+    spawn_unless_running(state_dir, endpoint);
+}
+
+/// Whether the helper recorded in `state_dir` is alive.
+pub fn is_running(state_dir: &Path) -> bool {
+    std::fs::read_to_string(state_dir.join(PID_FILE))
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .next()
+                .and_then(|p| p.trim().parse::<i32>().ok())
+        })
+        .is_some_and(|pid| keeper_is_alive(pid, state_dir))
+}
+
+fn spawn_unless_running(state_dir: &Path, endpoint: &str) {
     let pid_file = state_dir.join(PID_FILE);
     if let Ok(raw) = std::fs::read_to_string(&pid_file) {
         let mut lines = raw.lines();
@@ -101,7 +123,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .to_string();
     let owned_only = record.get("ownedOnly").and_then(Value::as_bool) == Some(true);
     let result = if owned_only {
-        keep_owned(&endpoint, &state_dir)
+        crate::browser_cdp_broker::run(&endpoint, &state_dir)
     } else {
         keep(&endpoint)
     };
@@ -205,86 +227,6 @@ fn keep(endpoint: &str) -> Result<(), String> {
     }
 }
 
-/// The user's own Chrome: touch only the tabs Unpeel Sessions opened, never
-/// the user's. Polls the Sessions' tab records, attaches to new ones, and
-/// publishes which targets carry the bypass (`csp-attached`) so a navigation
-/// can wait for it. Leaves the user's browser alone (exits) once no Unpeel
-/// tab has been open for a while.
-fn keep_owned(endpoint: &str, state_dir: &Path) -> Result<(), String> {
-    let mut ws = CdpSocket::connect(endpoint)?;
-    ws.stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .ok();
-    let mut next_id = 0u64;
-    let mut requested: std::collections::HashSet<String> = Default::default();
-    let mut bypassed: std::collections::HashSet<String> = Default::default();
-    let mut idle_since = std::time::Instant::now();
-    let published = state_dir.join("csp-attached");
-    let _ = std::fs::remove_file(&published);
-    loop {
-        let owned = crate::browser_mcp::user_chrome_owned_targets();
-        if owned.is_empty() {
-            if idle_since.elapsed() > Duration::from_secs(30) {
-                let _ = std::fs::remove_file(&published);
-                return Ok(());
-            }
-        } else {
-            idle_since = std::time::Instant::now();
-        }
-        requested.retain(|t| owned.contains(t));
-        let before = bypassed.len();
-        bypassed.retain(|t| owned.contains(t));
-        let mut changed = before != bypassed.len();
-        let fresh: Vec<String> = owned
-            .iter()
-            .filter(|t| !requested.contains(*t))
-            .cloned()
-            .collect();
-        for target in fresh {
-            next_id += 1;
-            ws.send_text(
-                &json!({ "id": next_id, "method": "Target.attachToTarget",
-                    "params": { "targetId": target, "flatten": true } })
-                .to_string(),
-            )?;
-            requested.insert(target);
-        }
-        while let Some(text) = ws.read_text_timeout()? {
-            let Ok(message) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
-            match message.get("method").and_then(Value::as_str) {
-                Some("Target.attachedToTarget") => {
-                    let params = &message["params"];
-                    let session = params["sessionId"].as_str().unwrap_or("");
-                    let target = params["targetInfo"]["targetId"].as_str().unwrap_or("");
-                    if !owned.contains(target) {
-                        continue;
-                    }
-                    next_id += 1;
-                    ws.send_text(
-                        &json!({ "id": next_id, "sessionId": session,
-                            "method": "Page.setBypassCSP", "params": { "enabled": true } })
-                        .to_string(),
-                    )?;
-                    changed |= bypassed.insert(target.to_string());
-                }
-                Some("Target.detachedFromTarget") => {
-                    if let Some(target) = message["params"]["targetId"].as_str() {
-                        requested.remove(target);
-                        changed |= bypassed.remove(target);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if changed {
-            let list: Vec<&str> = bypassed.iter().map(String::as_str).collect();
-            let _ = std::fs::write(&published, list.join("\n") + "\n");
-        }
-    }
-}
-
 fn attach_existing(
     ws: &mut CdpSocket,
     send: &mut impl FnMut(&mut CdpSocket, &str, Value, Option<&str>) -> Result<(), String>,
@@ -308,16 +250,41 @@ fn attach_existing(
     Ok(())
 }
 
-/// Minimal blocking WebSocket client for Chrome's loopback DevTools endpoint.
-struct CdpSocket {
+/// Minimal blocking WebSocket for loopback DevTools traffic: the client side
+/// toward Chrome, and (`accept`) the server side the broker offers engines.
+pub(crate) struct CdpSocket {
     stream: TcpStream,
     buffer: Vec<u8>,
-    /// A fragmented message in progress (kept across read timeouts).
-    partial: Vec<u8>,
+    /// Clients mask their frames; servers must not.
+    masked: bool,
 }
 
 impl CdpSocket {
     fn connect(endpoint: &str) -> Result<Self, String> {
+        Self::connect_with_timeout(endpoint, Duration::from_secs(10))
+    }
+
+    /// Accept one engine connection (see `browser_cdp_broker`).
+    pub(crate) fn accept(mut stream: TcpStream, path: &str) -> Result<Self, String> {
+        stream.set_nodelay(true).ok();
+        let buffer = crate::browser_cdp_broker::accept_handshake(&mut stream, path)?;
+        Ok(Self {
+            stream,
+            buffer,
+            masked: false,
+        })
+    }
+
+    /// A second handle on the same connection for writing from another thread.
+    pub(crate) fn writer(&self) -> Result<Self, String> {
+        Ok(Self {
+            stream: self.stream.try_clone().map_err(|e| e.to_string())?,
+            buffer: Vec::new(),
+            masked: self.masked,
+        })
+    }
+
+    pub(crate) fn connect_with_timeout(endpoint: &str, timeout: Duration) -> Result<Self, String> {
         let rest = endpoint
             .strip_prefix("ws://")
             .ok_or("only a ws:// loopback endpoint is supported")?;
@@ -342,7 +309,7 @@ impl CdpSocket {
             .map_err(|e| e.to_string())?;
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 4096];
-        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        stream.set_read_timeout(Some(timeout)).ok();
         let head_end = loop {
             if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
                 break pos + 4;
@@ -368,35 +335,40 @@ impl CdpSocket {
         Ok(Self {
             stream,
             buffer,
-            partial: Vec::new(),
+            masked: true,
         })
     }
 
-    fn send_text(&mut self, text: &str) -> Result<(), String> {
+    pub(crate) fn send_text(&mut self, text: &str) -> Result<(), String> {
         let payload = text.as_bytes();
         let mut frame = vec![0x81u8];
         let len = payload.len();
+        let mask_bit = if self.masked { 0x80 } else { 0 };
         if len < 126 {
-            frame.push(0x80 | len as u8);
+            frame.push(mask_bit | len as u8);
         } else if len < 65_536 {
-            frame.push(0x80 | 126);
+            frame.push(mask_bit | 126);
             frame.extend_from_slice(&(len as u16).to_be_bytes());
         } else {
-            frame.push(0x80 | 127);
+            frame.push(mask_bit | 127);
             frame.extend_from_slice(&(len as u64).to_be_bytes());
         }
-        let mask: [u8; 4] = crate::relay_crypto::random_bytes(4)
-            .try_into()
-            .map_err(|_| "mask")?;
-        frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        if self.masked {
+            let mask: [u8; 4] = crate::relay_crypto::random_bytes(4)
+                .try_into()
+                .map_err(|_| "mask")?;
+            frame.extend_from_slice(&mask);
+            frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        } else {
+            frame.extend_from_slice(payload);
+        }
         self.stream
             .write_all(&frame)
             .map_err(|e| format!("write: {e}"))
     }
 
     /// The next complete text message (fragments joined; pings answered).
-    fn read_text(&mut self) -> Result<String, String> {
+    pub(crate) fn read_text(&mut self) -> Result<String, String> {
         let mut message = Vec::new();
         loop {
             let (fin, opcode, payload) = self.read_frame()?;
@@ -417,66 +389,19 @@ impl CdpSocket {
         }
     }
 
-    /// Like `read_text`, but `None` when the read timeout passes first.
-    fn read_text_timeout(&mut self) -> Result<Option<String>, String> {
-        loop {
-            let Some((fin, opcode, payload)) = self.try_read_frame()? else {
-                return Ok(None);
-            };
-            match opcode {
-                0x0..=0x2 => {
-                    self.partial.extend_from_slice(&payload);
-                    if self.partial.len() > MAX_FRAME {
-                        return Err("oversized DevTools message".into());
-                    }
-                    if fin {
-                        let message = std::mem::take(&mut self.partial);
-                        return Ok(Some(String::from_utf8_lossy(&message).into_owned()));
-                    }
-                }
-                0x8 => return Err("DevTools closed".into()),
-                0x9 => self.send_pong(&payload)?,
-                _ => {}
-            }
-        }
-    }
-
-    fn try_read_frame(&mut self) -> Result<Option<(bool, u8, Vec<u8>)>, String> {
-        loop {
-            if let Some((fin, opcode, payload, used)) = parse_frame(&self.buffer)? {
-                self.buffer.drain(..used);
-                return Ok(Some((fin, opcode, payload)));
-            }
-            let mut chunk = [0u8; 65536];
-            match self.stream.read(&mut chunk) {
-                Ok(0) => return Err("DevTools connection closed".into()),
-                Ok(n) => self.buffer.extend_from_slice(&chunk[..n]),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Ok(None)
-                }
-                Err(e) => return Err(format!("read: {e}")),
-            }
-        }
-    }
-
     fn send_pong(&mut self, payload: &[u8]) -> Result<(), String> {
         let mask: [u8; 4] = crate::relay_crypto::random_bytes(4)
             .try_into()
             .map_err(|_| "mask")?;
-        let mut frame = vec![0x8A, 0x80 | payload.len().min(125) as u8];
+        let payload = &payload[..payload.len().min(125)];
+        if !self.masked {
+            let mut frame = vec![0x8A, payload.len() as u8];
+            frame.extend_from_slice(payload);
+            return self.stream.write_all(&frame).map_err(|e| e.to_string());
+        }
+        let mut frame = vec![0x8A, 0x80 | payload.len() as u8];
         frame.extend_from_slice(&mask);
-        frame.extend(
-            payload
-                .iter()
-                .take(125)
-                .enumerate()
-                .map(|(i, b)| b ^ mask[i % 4]),
-        );
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
         self.stream.write_all(&frame).map_err(|e| e.to_string())
     }
 

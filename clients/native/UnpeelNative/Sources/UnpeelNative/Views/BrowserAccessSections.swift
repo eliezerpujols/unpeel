@@ -24,7 +24,7 @@ struct BrowserAccessSections: View {
             return "Each session gets a separate browser; its cookies and logins vanish "
                 + "when that browser closes."
         case "chrome":
-            return "Agents open their tabs in your own Chrome, with your logins, while it's open "
+            return "Agents open background tabs in your own Chrome, with your logins, while it's open "
                 + "and allows remote debugging (chrome://inspect/#remote-debugging). They only "
                 + "touch their own tabs. Otherwise they use one Unpeel window."
         default:

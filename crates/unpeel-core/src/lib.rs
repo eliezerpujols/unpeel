@@ -29,6 +29,8 @@ pub mod apps_mcp;
 #[cfg(feature = "native-host")]
 pub mod browser_bridge;
 #[cfg(feature = "native-host")]
+pub mod browser_cdp_broker;
+#[cfg(feature = "native-host")]
 pub mod browser_csp_keeper;
 #[cfg(feature = "native-host")]
 pub mod browser_engine;
