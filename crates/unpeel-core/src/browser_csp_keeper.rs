@@ -99,7 +99,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or("browser record has no endpoint")?
         .to_string();
-    let result = keep(&endpoint);
+    let owned_only = record.get("ownedOnly").and_then(Value::as_bool) == Some(true);
+    let result = if owned_only {
+        keep_owned(&endpoint, &state_dir)
+    } else {
+        keep(&endpoint)
+    };
     // Leave the pid file only if it still names us.
     let pid_file = state_dir.join(PID_FILE);
     if std::fs::read_to_string(&pid_file)
@@ -200,6 +205,86 @@ fn keep(endpoint: &str) -> Result<(), String> {
     }
 }
 
+/// The user's own Chrome: touch only the tabs Unpeel Sessions opened, never
+/// the user's. Polls the Sessions' tab records, attaches to new ones, and
+/// publishes which targets carry the bypass (`csp-attached`) so a navigation
+/// can wait for it. Leaves the user's browser alone (exits) once no Unpeel
+/// tab has been open for a while.
+fn keep_owned(endpoint: &str, state_dir: &Path) -> Result<(), String> {
+    let mut ws = CdpSocket::connect(endpoint)?;
+    ws.stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .ok();
+    let mut next_id = 0u64;
+    let mut requested: std::collections::HashSet<String> = Default::default();
+    let mut bypassed: std::collections::HashSet<String> = Default::default();
+    let mut idle_since = std::time::Instant::now();
+    let published = state_dir.join("csp-attached");
+    let _ = std::fs::remove_file(&published);
+    loop {
+        let owned = crate::browser_mcp::user_chrome_owned_targets();
+        if owned.is_empty() {
+            if idle_since.elapsed() > Duration::from_secs(30) {
+                let _ = std::fs::remove_file(&published);
+                return Ok(());
+            }
+        } else {
+            idle_since = std::time::Instant::now();
+        }
+        requested.retain(|t| owned.contains(t));
+        let before = bypassed.len();
+        bypassed.retain(|t| owned.contains(t));
+        let mut changed = before != bypassed.len();
+        let fresh: Vec<String> = owned
+            .iter()
+            .filter(|t| !requested.contains(*t))
+            .cloned()
+            .collect();
+        for target in fresh {
+            next_id += 1;
+            ws.send_text(
+                &json!({ "id": next_id, "method": "Target.attachToTarget",
+                    "params": { "targetId": target, "flatten": true } })
+                .to_string(),
+            )?;
+            requested.insert(target);
+        }
+        while let Some(text) = ws.read_text_timeout()? {
+            let Ok(message) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            match message.get("method").and_then(Value::as_str) {
+                Some("Target.attachedToTarget") => {
+                    let params = &message["params"];
+                    let session = params["sessionId"].as_str().unwrap_or("");
+                    let target = params["targetInfo"]["targetId"].as_str().unwrap_or("");
+                    if !owned.contains(target) {
+                        continue;
+                    }
+                    next_id += 1;
+                    ws.send_text(
+                        &json!({ "id": next_id, "sessionId": session,
+                            "method": "Page.setBypassCSP", "params": { "enabled": true } })
+                        .to_string(),
+                    )?;
+                    changed |= bypassed.insert(target.to_string());
+                }
+                Some("Target.detachedFromTarget") => {
+                    if let Some(target) = message["params"]["targetId"].as_str() {
+                        requested.remove(target);
+                        changed |= bypassed.remove(target);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            let list: Vec<&str> = bypassed.iter().map(String::as_str).collect();
+            let _ = std::fs::write(&published, list.join("\n") + "\n");
+        }
+    }
+}
+
 fn attach_existing(
     ws: &mut CdpSocket,
     send: &mut impl FnMut(&mut CdpSocket, &str, Value, Option<&str>) -> Result<(), String>,
@@ -227,6 +312,8 @@ fn attach_existing(
 struct CdpSocket {
     stream: TcpStream,
     buffer: Vec<u8>,
+    /// A fragmented message in progress (kept across read timeouts).
+    partial: Vec<u8>,
 }
 
 impl CdpSocket {
@@ -278,7 +365,11 @@ impl CdpSocket {
         buffer.drain(..head_end);
         // Block indefinitely between events; the socket closing ends the keeper.
         stream.set_read_timeout(None).ok();
-        Ok(Self { stream, buffer })
+        Ok(Self {
+            stream,
+            buffer,
+            partial: Vec::new(),
+        })
     }
 
     fn send_text(&mut self, text: &str) -> Result<(), String> {
@@ -322,6 +413,53 @@ impl CdpSocket {
                 0x8 => return Err("DevTools closed".into()),
                 0x9 => self.send_pong(&payload)?,
                 _ => {}
+            }
+        }
+    }
+
+    /// Like `read_text`, but `None` when the read timeout passes first.
+    fn read_text_timeout(&mut self) -> Result<Option<String>, String> {
+        loop {
+            let Some((fin, opcode, payload)) = self.try_read_frame()? else {
+                return Ok(None);
+            };
+            match opcode {
+                0x0..=0x2 => {
+                    self.partial.extend_from_slice(&payload);
+                    if self.partial.len() > MAX_FRAME {
+                        return Err("oversized DevTools message".into());
+                    }
+                    if fin {
+                        let message = std::mem::take(&mut self.partial);
+                        return Ok(Some(String::from_utf8_lossy(&message).into_owned()));
+                    }
+                }
+                0x8 => return Err("DevTools closed".into()),
+                0x9 => self.send_pong(&payload)?,
+                _ => {}
+            }
+        }
+    }
+
+    fn try_read_frame(&mut self) -> Result<Option<(bool, u8, Vec<u8>)>, String> {
+        loop {
+            if let Some((fin, opcode, payload, used)) = parse_frame(&self.buffer)? {
+                self.buffer.drain(..used);
+                return Ok(Some((fin, opcode, payload)));
+            }
+            let mut chunk = [0u8; 65536];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err("DevTools connection closed".into()),
+                Ok(n) => self.buffer.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None)
+                }
+                Err(e) => return Err(format!("read: {e}")),
             }
         }
     }

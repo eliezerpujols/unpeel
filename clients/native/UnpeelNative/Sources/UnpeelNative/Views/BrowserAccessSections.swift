@@ -23,6 +23,10 @@ struct BrowserAccessSections: View {
         case "session":
             return "Each session gets a separate browser; its cookies and logins vanish "
                 + "when that browser closes."
+        case "chrome":
+            return "Agents open their tabs in your own Chrome, with your logins, while it's open "
+                + "and allows remote debugging (chrome://inspect/#remote-debugging). They only "
+                + "touch their own tabs. Otherwise they use one Unpeel window."
         default:
             return "One window for every project in this workspace; each session gets its "
                 + "own tab, and all share cookies and logins."
@@ -121,6 +125,7 @@ struct BrowserAccessSections: View {
                         }
                     )
                 ) {
+                    Text("Use my Chrome when it's open").tag("chrome")
                     Text("One window for all projects").tag("shared")
                     Text("One window per project").tag("project")
                     Text("Separate per session").tag("session")

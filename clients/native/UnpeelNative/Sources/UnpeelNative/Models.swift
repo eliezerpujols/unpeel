@@ -813,7 +813,9 @@ struct BrowserSettings: Equatable, Codable {
     }
 
     /// A kept (non-ephemeral) profile: shared window or one per project.
-    var keepsProjectProfile: Bool { profileMode == "project" || profileMode == "shared" }
+    var keepsProjectProfile: Bool {
+        profileMode == "project" || profileMode == "shared" || profileMode == "chrome"
+    }
 }
 
 /// Browser MCP access for one session (state.rs `BrowserAccess`): a single

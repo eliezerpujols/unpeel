@@ -447,13 +447,13 @@ impl BrowserOptions {
     /// window/profile while unrelated projects remain isolated.
     fn project_scope(&self, session_id: &str) -> Option<ProjectBrowserScope> {
         let mode = self.settings.profile_mode.trim();
-        if mode != "project" && mode != SHARED_PROFILE_MODE {
+        if mode != "project" && mode != SHARED_PROFILE_MODE && mode != USER_CHROME_PROFILE_MODE {
             return None;
         }
         let manifest = session_host::load_manifest(session_id)?;
         // "shared": every project in this workspace uses one window and
         // profile — each Session still drives its own tab.
-        let shared = mode == SHARED_PROFILE_MODE;
+        let shared = mode == SHARED_PROFILE_MODE || mode == USER_CHROME_PROFILE_MODE;
         let root = if shared {
             SHARED_PROFILE_MODE.to_string()
         } else {
@@ -490,6 +490,9 @@ impl BrowserOptions {
 
 /// `profile_mode` value: one window + profile for every project in the workspace.
 const SHARED_PROFILE_MODE: &str = "shared";
+/// `profile_mode` value: use the user's own Chrome when it is open and allows
+/// remote debugging; otherwise fall back to the shared Unpeel window.
+const USER_CHROME_PROFILE_MODE: &str = "chrome";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectBrowserScope {
@@ -725,6 +728,9 @@ struct ProjectCdpBinding {
 enum CdpBinding {
     Remote(RemoteCdpBinding),
     Project(ProjectCdpBinding),
+    /// The user's own running Chrome (loopback DevTools). Sessions open and
+    /// close only their own tabs; Unpeel never closes that browser.
+    UserChrome(String),
 }
 
 impl CdpBinding {
@@ -732,13 +738,14 @@ impl CdpBinding {
         match self {
             CdpBinding::Remote(binding) => &binding.endpoint,
             CdpBinding::Project(binding) => &binding.endpoint,
+            CdpBinding::UserChrome(endpoint) => endpoint,
         }
     }
 
     fn project_scope(&self) -> Option<&ProjectBrowserScope> {
         match self {
             CdpBinding::Project(binding) => Some(&binding.scope),
-            CdpBinding::Remote(_) => None,
+            CdpBinding::Remote(_) | CdpBinding::UserChrome(_) => None,
         }
     }
 }
@@ -754,6 +761,12 @@ fn engine_binding_fingerprint(binding: Option<&CdpBinding>) -> String {
             binding.scope.key,
             Sha256::digest(binding.endpoint.as_bytes())
         ),
+        Some(CdpBinding::UserChrome(endpoint)) => {
+            format!(
+                "{USER_CHROME_MARKER}{:x}",
+                Sha256::digest(endpoint.as_bytes())
+            )
+        }
     }
 }
 
@@ -1064,6 +1077,21 @@ remote browser binding."
         return Ok(Some(CdpBinding::Remote(remote)));
     }
     if options.settings.allowed_domains.trim().is_empty() {
+        if options.settings.profile_mode.trim() == USER_CHROME_PROFILE_MODE {
+            if let Some(endpoint) = user_chrome_endpoint() {
+                // Don't yank a session that is live in the fallback window
+                // over to Chrome mid-task; it moves on its next browser start.
+                let marker = std::fs::read_to_string(engine_binding_marker_path(session_id))
+                    .unwrap_or_default();
+                let live_in_fallback = project_key_from_binding_fingerprint(marker.trim())
+                    .is_some()
+                    && live_daemon_pid(session_id).is_some();
+                if !live_in_fallback {
+                    user_chrome_keeper(&endpoint);
+                    return Ok(Some(CdpBinding::UserChrome(endpoint)));
+                }
+            }
+        }
         if let Some(scope) = options.project_scope(session_id) {
             return ensure_project_browser(binary, session_id, scope, options)
                 .map(CdpBinding::Project)
@@ -1175,6 +1203,10 @@ fn binding_from_existing_marker(marker: &str) -> Option<CdpBinding> {
     }
     if marker.starts_with("remote:") {
         let binding = CdpBinding::Remote(load_remote_cdp_binding().ok()??);
+        return (engine_binding_fingerprint(Some(&binding)) == marker).then_some(binding);
+    }
+    if marker.starts_with(USER_CHROME_MARKER) {
+        let binding = CdpBinding::UserChrome(user_chrome_endpoint()?);
         return (engine_binding_fingerprint(Some(&binding)) == marker).then_some(binding);
     }
     None
@@ -1306,7 +1338,7 @@ fn close_session_browser(binary: &Path, session_id: &str) -> Result<String, Stri
                 CLEANUP_TIMEOUT_MS,
                 binding.as_ref().and_then(|binding| match binding {
                     CdpBinding::Remote(remote) => Some(remote.endpoint.as_str()),
-                    CdpBinding::Project(_) => None,
+                    CdpBinding::Project(_) | CdpBinding::UserChrome(_) => None,
                 }),
             );
             trace(&format!(
@@ -1327,7 +1359,7 @@ fn close_session_browser(binary: &Path, session_id: &str) -> Result<String, Stri
             CLEANUP_TIMEOUT_MS,
             binding.as_ref().and_then(|binding| match binding {
                 CdpBinding::Remote(remote) => Some(remote.endpoint.as_str()),
-                CdpBinding::Project(_) => None,
+                CdpBinding::Project(_) | CdpBinding::UserChrome(_) => None,
             }),
         );
     }
@@ -1656,7 +1688,7 @@ fn exec_engine_with(
         timeout_ms,
         cdp_binding.as_ref().and_then(|binding| match binding {
             CdpBinding::Remote(remote) => Some(remote.endpoint.as_str()),
-            CdpBinding::Project(_) => None,
+            CdpBinding::Project(_) | CdpBinding::UserChrome(_) => None,
         }),
     )
 }
@@ -1817,6 +1849,20 @@ fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
 
 fn tool_open(args: &Value) -> Result<String, String> {
     let url = required_str(args, "url")?;
+    let session_id = caller_session_id()?;
+    let options = load_options();
+    if options.settings.profile_mode.trim() == USER_CHROME_PROFILE_MODE {
+        // Make sure this session has its tab first, so the CSP keeper can
+        // attach to it before the real page loads.
+        if tabs::bound_target_id(&session_id).is_none() {
+            exec_engine(&["open".into(), "about:blank".into()], ENGINE_TIMEOUT_MS)?;
+        }
+        if session_uses_user_chrome(&session_id) {
+            if let Some(target) = tabs::bound_target_id(&session_id) {
+                await_user_chrome_csp(&target);
+            }
+        }
+    }
     exec_engine(&["open".into(), url.into()], ENGINE_TIMEOUT_MS)
 }
 
@@ -2093,6 +2139,19 @@ pub(crate) fn tool_browser_context() -> Result<String, String> {
         (Some(id), Ok(None)) if allowed.is_empty() => options.project_scope(id),
         _ => None,
     };
+    if options.settings.profile_mode.trim() == USER_CHROME_PROFILE_MODE {
+        lines.push(
+            if user_chrome_endpoint().is_some() {
+                "user_chrome: the user's own Chrome is open and allows remote debugging — new \
+browser use opens this session's tabs there (with the user's logins). Only this session's tabs \
+are touched; never close or navigate the user's own tabs."
+            } else {
+                "user_chrome: the user's Chrome is closed or doesn't allow remote debugging \
+(chrome://inspect/#remote-debugging), so this session uses the shared Unpeel window instead."
+            }
+            .into(),
+        );
+    }
     match (&remote_cdp, &project_scope) {
         (Ok(Some(binding)), _) => lines.push(format!(
             "engine_mode: native agent-browser daemon attached to the {} provider-owned browser \
@@ -2828,6 +2887,99 @@ mod tests {
     }
 }
 
+const USER_CHROME_MARKER: &str = "user-chrome:";
+
+/// The user's running Chrome, when it allows remote debugging
+/// (chrome://inspect/#remote-debugging): Chrome writes `DevToolsActivePort`
+/// (port, then browser path) into its user data dir. Verified live with a
+/// quick loopback connect so a stale file after a crash is ignored.
+fn user_chrome_endpoint() -> Option<String> {
+    // Tests point this at a throwaway Chrome; never the user's real one.
+    let data_dir = match std::env::var_os("UNPEEL_TEST_USER_CHROME_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => dirs::home_dir()?.join("Library/Application Support/Google/Chrome"),
+    };
+    let raw = std::fs::read_to_string(data_dir.join("DevToolsActivePort")).ok()?;
+    let mut lines = raw.lines();
+    let port: u16 = lines.next()?.trim().parse().ok().filter(|p| *p != 0)?;
+    let path = lines.next()?.trim();
+    if !path.starts_with("/devtools/browser/") || path.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+    Some(format!("ws://127.0.0.1:{port}{path}"))
+}
+
+fn user_chrome_state_dir() -> PathBuf {
+    crate::app_paths::unpeel_home()
+        .join("browser")
+        .join("user-chrome")
+}
+
+/// Start the CSP keeper for the user's Chrome in owned-tabs-only mode: it
+/// never touches tabs the user opened.
+fn user_chrome_keeper(endpoint: &str) {
+    let dir = user_chrome_state_dir();
+    let record = json!({ "endpoint": endpoint, "ownedOnly": true });
+    if write_owner_only_json(&dir.join("browser.json"), &record).is_ok() {
+        crate::browser_csp_keeper::ensure_running(&dir, endpoint);
+    }
+}
+
+/// Target ids of every tab Unpeel Sessions opened in the user's Chrome:
+/// each attached daemon's bound tab plus the Sessions' other tabs.
+pub(crate) fn user_chrome_owned_targets() -> std::collections::HashSet<String> {
+    let mut owned = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(engine_socket_dir()) else {
+        return owned;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(key) = name.strip_suffix(".binding") else {
+            continue;
+        };
+        let marker = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        if !marker.trim().starts_with(USER_CHROME_MARKER) {
+            continue;
+        }
+        let dir = engine_socket_dir();
+        if let Some(target) = std::fs::read_to_string(dir.join(format!("{key}.target")))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|v| {
+                v.get("targetId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        {
+            owned.insert(target);
+        }
+        if let Some(session_id) = key.strip_prefix("unpeel-") {
+            owned.extend(tabs::owned_target_ids(session_id));
+        }
+    }
+    owned
+}
+
+/// Before navigating a tab in the user's Chrome, give the keeper a moment to
+/// attach so the strict-CSP bypass covers this load too.
+fn await_user_chrome_csp(target_id: &str) {
+    let attached = user_chrome_state_dir().join("csp-attached");
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(&attached).is_ok_and(|raw| raw.lines().any(|l| l == target_id)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn session_uses_user_chrome(session_id: &str) -> bool {
+    std::fs::read_to_string(engine_binding_marker_path(session_id))
+        .is_ok_and(|marker| marker.trim().starts_with(USER_CHROME_MARKER))
+}
+
 /// Several tabs per Session. The engine drives one current tab per daemon
 /// (strictly pinned in a shared window, where its tab list also shows other
 /// Sessions' tabs), so Unpeel records which targets this Session opened and
@@ -2891,6 +3043,18 @@ mod tabs {
         let target = value.get("targetId")?.as_str()?.to_string();
         let url = value.get("url").and_then(Value::as_str).map(str::to_string);
         Some((target, url))
+    }
+
+    pub(super) fn bound_target_id(session_id: &str) -> Option<String> {
+        bound_target(session_id).map(|(target, _)| target)
+    }
+
+    pub(super) fn owned_target_ids(session_id: &str) -> Vec<String> {
+        load(session_id)
+            .tabs
+            .into_iter()
+            .map(|t| t.target_id)
+            .collect()
     }
 
     pub(super) fn is_tab_gone(error: &str) -> bool {
@@ -3178,6 +3342,9 @@ mod tabs {
         });
         save(session_id, &state)?;
         ensure_overlay(session_id, &target_id);
+        if session_uses_user_chrome(session_id) {
+            await_user_chrome_csp(&target_id);
+        }
         if let Some(url) = url {
             let binary = resolve_engine_binary()?;
             exec_engine_with(
