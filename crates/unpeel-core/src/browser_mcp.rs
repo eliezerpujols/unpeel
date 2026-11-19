@@ -1042,6 +1042,8 @@ fn ensure_project_browser(
         &project_browser_record(&scope, &endpoint),
     )?;
     mark_project_browser_member(&scope, session_id)?;
+    // Strict-CSP sites would block the Agentation overlay's bridge calls.
+    crate::browser_csp_keeper::ensure_running(&scope.state_dir, &endpoint);
     Ok(ProjectCdpBinding { endpoint, scope })
 }
 
