@@ -5374,6 +5374,7 @@ final class UnpeelStore: ObservableObject {
         }
         observedHostUnreadReceiptIDs.remove(sessionID)
         markUnread(sessionID)
+        showUnreadNow(sessionID, true)
         let ownPort = hookServer?.port
         Self.readReceiptQueue.async {
             if Self.writeSharedMarker(
@@ -5392,6 +5393,30 @@ final class UnpeelStore: ObservableObject {
             manualUnreadHoldID = nil
         }
         removeUnread(sessionID, forceReceipt: true)
+        showUnreadNow(sessionID, false)
+    }
+
+    /// The Host's next projection confirms it; until then show the
+    /// requested state instead of the Host's previous one.
+    private func showUnreadNow(_ sessionID: String, _ unread: Bool) {
+        guard let summary = remoteSummariesByID[sessionID], summary.unread != unread else {
+            unreadOverrides.removeValue(forKey: sessionID)
+            return
+        }
+        objectWillChange.send()
+        unreadOverrides[sessionID] = (unread, Date())
+        invalidateSidebarLists()
+    }
+
+    /// Requested read/unread states the Host hasn't projected yet.
+    private var unreadOverrides: [String: (unread: Bool, at: Date)] = [:]
+
+    /// Drop overrides the Host now confirms (or that it never confirmed).
+    private func settleUnreadOverrides(_ summaries: [String: RemoteSessionSummary]) {
+        unreadOverrides = unreadOverrides.filter { id, override in
+            summaries[id].map { $0.unread != override.unread } == true
+                && Date().timeIntervalSince(override.at) < 5
+        }
     }
 
     private func markUnread(_ sessionID: String) {
@@ -16055,6 +16080,23 @@ extension UnpeelStore {
         selectedHostScope != .local || localHostClientStarted
     }
 
+    nonisolated static func summaryBadgesDiffer(
+        _ old: [String: RemoteSessionSummary],
+        _ new: [String: RemoteSessionSummary]
+    ) -> Bool {
+        guard old.count == new.count else { return true }
+        for (id, next) in new {
+            guard let previous = old[id] else { return true }
+            if previous.unread != next.unread
+                || previous.activity != next.activity
+                || previous.pinned != next.pinned
+                || previous.notifyWhenDone != next.notifyWhenDone {
+                return true
+            }
+        }
+        return false
+    }
+
     private func remoteSummary(for sessionID: String) -> RemoteSessionSummary? {
         remoteSummariesByID[sessionID]
     }
@@ -16140,6 +16182,7 @@ extension UnpeelStore {
 
     /// Unread badge for one row, whichever Host owns it.
     func sessionIsUnread(_ sessionID: String) -> Bool {
+        if let override = unreadOverrides[sessionID] { return override.unread }
         if let summary = remoteSummary(for: sessionID) { return summary.unread }
         return unreadSessionIDs.contains(sessionID)
     }
@@ -16389,6 +16432,14 @@ extension UnpeelStore {
         }
 
         remoteProjectSummariesByID = projectSummaries
+        // Summaries aren't @Published, and a change that touches only their
+        // row badges (unread dot, activity, pin, notify) leaves every
+        // published value equal — so the sidebar kept the old dot until an
+        // unrelated publish (clicking another session). Announce those.
+        if Self.summaryBadgesDiffer(previousSummaries, summaries) {
+            objectWillChange.send()
+        }
+        settleUnreadOverrides(summaries)
         remoteSummariesByID = summaries
         remoteSessionOrderByProject = orderByProject
         remotePresetSummaries = snapshot.presets.filter { $0.projectID == nil }
