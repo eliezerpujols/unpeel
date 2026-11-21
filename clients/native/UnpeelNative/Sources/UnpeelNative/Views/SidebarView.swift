@@ -1118,6 +1118,7 @@ extension SessionRowView: @MainActor Equatable {
             && lhs.canStop == rhs.canStop
             && lhs.canNotifyWhenDone == rhs.canNotifyWhenDone
             && lhs.canClearAttention == rhs.canClearAttention
+            && lhs.canToggleUnread == rhs.canToggleUnread
             && lhs.paneItems == rhs.paneItems
             && lhs.ageTimestampMs == rhs.ageTimestampMs
             && lhs.moveTargets == rhs.moveTargets
@@ -1708,6 +1709,7 @@ struct ProjectNodeView: View {
             canStop: store.sessionCanStop(session.id),
             canNotifyWhenDone: store.sessionCanNotifyWhenDone(session.id),
             canClearAttention: store.sessionCanClearAttention(session.id),
+            canToggleUnread: store.sessionCanToggleUnread(session.id),
             paneItems: store.paneSidebarItems(
                 forRepresentative: session.id
             ),
@@ -1732,6 +1734,13 @@ struct ProjectNodeView: View {
                 ? { store.restartApp(session.id) }
                 : nil,
             onClearAttention: { store.clearAttention(session.id) },
+            onSetUnread: { unread in
+                if unread {
+                    store.markSessionUnread(session.id)
+                } else {
+                    store.markSessionRead(session.id)
+                }
+            },
             onSetPinned: { pinned in
                 if pinned {
                     store.pinSession(projectID: node.id, sessionID: session.id)
@@ -2995,6 +3004,8 @@ struct SessionRowView: View {
     /// Whether "Clear attention" applies — the Controller-local activity
     /// engine's escape hatch, hidden for remote Hosts.
     var canClearAttention = true
+    /// Whether "Mark as Read/Unread" applies (this instance's own Host).
+    var canToggleUnread = false
     /// This row represents an open pane group. Its participating runtime
     /// marks replace the single CLI logo as a bordered, overlapping stack.
     var paneItems: [UnpeelStore.PaneSidebarItem] = []
@@ -3017,6 +3028,7 @@ struct SessionRowView: View {
     /// Force-clear a stuck/false attention badge (offered only while the
     /// row shows one).
     var onClearAttention: () -> Void = {}
+    var onSetUnread: (Bool) -> Void = { _ in }
     var onSetPinned: (Bool) -> Void = { _ in }
     var onRequestRemove: () -> Void = {}
     var onConfirmRemove: () -> Void = {}
@@ -3237,6 +3249,11 @@ struct SessionRowView: View {
         if canPin {
             Button(isPinned ? "Unpin" : "Pin") {
                 onSetPinned(!isPinned)
+            }
+        }
+        if canToggleUnread {
+            Button(isUnread ? "Mark as Read" : "Mark as Unread") {
+                onSetUnread(!isUnread)
             }
         }
         // Files the session into the project's pinned "Sidebar" group — the

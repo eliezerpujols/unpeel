@@ -2064,23 +2064,24 @@ fn session_summary_with_menu_attention(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let head = crate::integrations::command_head(&manifest.session.command);
-    let unread = claimed_unread
-        && match crate::session_ops::read_marker(&manifest.session.id) {
-            Some(read_at) => {
-                let settled_at = crate::session_ops::last_activity_ms(
-                    &manifest.session.id,
-                    &manifest.session.command,
-                );
-                let alert_at = latest_alert.map(|entry| entry.at);
-                match (settled_at, alert_at) {
-                    (Some(settled), Some(alert)) => settled.max(alert) > read_at,
-                    (Some(settled), None) => settled > read_at,
-                    (None, Some(alert)) => alert > read_at,
-                    (None, None) => false,
+    let unread = crate::session_ops::marked_unread(&manifest.session.id)
+        || claimed_unread
+            && match crate::session_ops::read_marker(&manifest.session.id) {
+                Some(read_at) => {
+                    let settled_at = crate::session_ops::last_activity_ms(
+                        &manifest.session.id,
+                        &manifest.session.command,
+                    );
+                    let alert_at = latest_alert.map(|entry| entry.at);
+                    match (settled_at, alert_at) {
+                        (Some(settled), Some(alert)) => settled.max(alert) > read_at,
+                        (Some(settled), None) => settled > read_at,
+                        (None, Some(alert)) => alert > read_at,
+                        (None, None) => false,
+                    }
                 }
-            }
-            None => true,
-        };
+                None => true,
+            };
     let persisted_activity = activity
         .and_then(|value| value.get("activity_status"))
         .or_else(|| activity.and_then(|value| value.get("activityStatus")))

@@ -5261,7 +5261,8 @@ final class UnpeelStore: ObservableObject {
     private func clearObservedHostUnreadIfNeeded() {
         guard displaysHostProjection,
               let sessionID = observedSessionID,
-              remoteSummary(for: sessionID)?.unread == true
+              remoteSummary(for: sessionID)?.unread == true,
+              !isHeldUnread(sessionID)
         else { return }
         if selectedHostScope == .local {
             guard observedHostUnreadReceiptIDs.insert(sessionID).inserted else { return }
@@ -5339,9 +5340,58 @@ final class UnpeelStore: ObservableObject {
             currentObservedSessionID: observedSessionID
         )
         pendingUnreadSessions = result.pendingUnreadSessions
-        for sessionID in result.unreadToClear { removeUnread(sessionID) }
+        for sessionID in result.unreadToClear where !isHeldUnread(sessionID) {
+            removeUnread(sessionID)
+        }
         for sessionID in result.unreadToMark { markUnread(sessionID) }
         previousObservedSessionID = observedSessionID
+    }
+
+    /// A session the user marked unread while looking at it stays unread
+    /// until they look away (otherwise observing it clears the dot at once).
+    private var manualUnreadHoldID: String?
+
+    private func isHeldUnread(_ sessionID: String) -> Bool {
+        guard let hold = manualUnreadHoldID else { return false }
+        if observedSessionID != hold {
+            manualUnreadHoldID = nil
+            return false
+        }
+        return hold == sessionID
+    }
+
+    func sessionCanToggleUnread(_ sessionID: String) -> Bool {
+        selectedHostScope == .local
+    }
+
+    /// Sidebar "Mark as Unread": a shared `read.json` receipt flagged
+    /// `"unread": true`, which every frontend and the Host treat as unread
+    /// until the session is shown again (that writes a plain receipt).
+    func markSessionUnread(_ sessionID: String) {
+        guard selectedHostScope == .local else { return }
+        if observedSessionID == sessionID {
+            manualUnreadHoldID = sessionID
+        }
+        observedHostUnreadReceiptIDs.remove(sessionID)
+        markUnread(sessionID)
+        let ownPort = hookServer?.port
+        Self.readReceiptQueue.async {
+            if Self.writeSharedMarker(
+                sessionID,
+                .read,
+                ["read_at": Int64(Date().timeIntervalSince1970 * 1000), "unread": true]
+            ) {
+                Self.announceStateChange("session-markers", ownPort: ownPort)
+            }
+        }
+    }
+
+    /// Sidebar "Mark as Read".
+    func markSessionRead(_ sessionID: String) {
+        if manualUnreadHoldID == sessionID {
+            manualUnreadHoldID = nil
+        }
+        removeUnread(sessionID, forceReceipt: true)
     }
 
     private func markUnread(_ sessionID: String) {
@@ -5672,9 +5722,9 @@ final class UnpeelStore: ObservableObject {
         let alertAt = latestAlertAtMs(for: sessionID)
         let ownPort = hookServer?.port
         Self.readReceiptQueue.async {
-            let readAt = (
-                Self.readSharedMarker(sessionID, .read)?["read_at"] as? NSNumber
-            )?.int64Value
+            let receipt = Self.readSharedMarker(sessionID, .read)
+            let readAt = (receipt?["read_at"] as? NSNumber)?.int64Value
+            let markedUnread = (receipt?["unread"] as? Bool) == true
             let settledAt = Self.latestUnreadActivityAt(
                 lifecycleAt: Self.sessionLastRealActivityAtMs(
                     sessionID,
@@ -5682,7 +5732,7 @@ final class UnpeelStore: ObservableObject {
                 ),
                 alertAt: alertAt
             )
-            if forceReceipt
+            if forceReceipt || markedUnread
                 || Self.sharedReadReceiptNeedsRefresh(readAt: readAt, settledAt: settledAt),
                Self.writeSharedMarker(
                    sessionID,
@@ -5934,7 +5984,9 @@ final class UnpeelStore: ObservableObject {
         // Another frontend showed the session to the user: a receipt newer
         // than the last settle clears our dot too.
         for sessionID in unreadSessionIDs.intersection(liveIDs) {
-            guard let receipt = Self.readSharedMarker(sessionID, .read)?["read_at"] as? Int64
+            let marker = Self.readSharedMarker(sessionID, .read)
+            guard (marker?["unread"] as? Bool) != true,
+                  let receipt = marker?["read_at"] as? Int64
             else { continue }
             let command = sessionsByID[sessionID]?.command ?? ""
             let settled = Self.latestUnreadActivityAt(

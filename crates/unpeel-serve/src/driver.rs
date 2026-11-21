@@ -2180,6 +2180,9 @@ fn derive_unread(
         .rows
         .iter()
         .filter(|row| {
+            if unpeel_core::session_ops::marked_unread(&row.id) {
+                return true;
+            }
             let claimed = row.unread || local_claims.contains(&row.id);
             if !claimed {
                 return false;

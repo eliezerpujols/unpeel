@@ -1431,6 +1431,17 @@ pub fn mark_read(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The user marked this session unread by hand (`read.json` carries
+/// `"unread": true`). It stays unread until a frontend shows it again and
+/// writes a plain receipt.
+pub fn marked_unread(session_id: &str) -> bool {
+    std::fs::read(session_dir(session_id).join("read.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value.get("unread")?.as_bool())
+        == Some(true)
+}
+
 pub fn read_marker(session_id: &str) -> Option<u64> {
     let raw = std::fs::read(session_dir(session_id).join("read.json")).ok()?;
     serde_json::from_slice::<serde_json::Value>(&raw)
