@@ -28,6 +28,13 @@ struct RootView: View {
     @State private var dragStartWidth: Double?
     /// Hover state for the sidebar resizer's grip capsule.
     @State private var resizerHovering = false
+    /// Collapsed-sidebar peek: hovering the sidebar toggle floats the sidebar
+    /// over the content as a rounded card; it stays while the pointer is on
+    /// the toggle or the card and hides shortly after it leaves both.
+    @State private var sidebarPeekShown = false
+    @State private var sidebarPeekToggleHovered = false
+    @State private var sidebarPeekCardHovered = false
+    @State private var sidebarPeekHideTask: Task<Void, Never>?
 
     /// Right project panel width — same resize/persist mechanics as the left
     /// sidebar (mirrored drag math in `projectSidebarResizer`), but PER ROOT
@@ -230,11 +237,16 @@ struct RootView: View {
                 // Inner content keeps its layout width; the outer frame clips
                 // so the sidebar slides out behind the content pane.
                 ZStack(alignment: .trailing) {
-                    SidebarView(
-                        store: store,
-                        sessionDragController: sessionDragController
-                    )
-                    .frame(width: CGFloat(sidebarWidth))
+                    // One SidebarView at a time: while peeking, it renders in
+                    // the floating card instead (it registers itself on the
+                    // store, so two live copies would fight).
+                    if !sidebarPeeking {
+                        SidebarView(
+                            store: store,
+                            sessionDragController: sessionDragController
+                        )
+                        .frame(width: CGFloat(sidebarWidth))
+                    }
                 }
                 .frame(width: shownSidebarWidth, alignment: .trailing)
                 .clipped()
@@ -326,7 +338,75 @@ struct RootView: View {
                 projectSidebarResizer
             }
         }
+        .overlay(alignment: .topLeading) {
+            if sidebarPeeking {
+                sidebarPeekCard
+                    .transition(
+                        .move(edge: .leading).combined(with: .opacity)
+                    )
+            }
+        }
+        .animation(.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.16), value: sidebarPeeking)
+        .onChange(of: store.sidebarCollapsed) { collapsed in
+            if !collapsed { endSidebarPeek() }
+        }
         .overlay(alignment: .topLeading) { titlebarButtons }
+    }
+
+    // MARK: - Collapsed sidebar peek
+
+    private var sidebarPeeking: Bool {
+        store.sidebarCollapsed && sidebarPeekShown && !store.settingsVisible
+    }
+
+    /// The sidebar floating above the content: same width and contents as
+    /// the docked one, framed like the content surface (inset, rounded,
+    /// hairline, soft shadow). Its own top spacer leaves room for the
+    /// titlebar buttons, which stay drawn above it.
+    private var sidebarPeekCard: some View {
+        SidebarView(store: store, sessionDragController: sessionDragController)
+            .frame(width: CGFloat(sidebarWidth))
+            .frame(maxHeight: .infinity)
+            .background(FrameBackdrop())
+            .clipShape(RoundedRectangle(cornerRadius: Theme.contentCornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.contentCornerRadius, style: .continuous)
+                    .strokeBorder(Theme.contentHairline, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 6)
+            .padding(surfaceInset)
+            .onHover { hovering in
+                sidebarPeekCardHovered = hovering
+                updateSidebarPeek()
+            }
+    }
+
+    private func updateSidebarPeek() {
+        sidebarPeekHideTask?.cancel()
+        sidebarPeekHideTask = nil
+        guard store.sidebarCollapsed else {
+            sidebarPeekShown = false
+            return
+        }
+        if sidebarPeekToggleHovered || sidebarPeekCardHovered {
+            sidebarPeekShown = true
+            return
+        }
+        // A short grace period so moving from the toggle onto the card (or a
+        // brief exit past its edge) doesn't flicker it away.
+        sidebarPeekHideTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            sidebarPeekShown = false
+        }
+    }
+
+    private func endSidebarPeek() {
+        sidebarPeekHideTask?.cancel()
+        sidebarPeekHideTask = nil
+        sidebarPeekShown = false
+        sidebarPeekToggleHovered = false
+        sidebarPeekCardHovered = false
     }
 
     // MARK: - Titlebar buttons (sidebar toggle + collapsed new-session)
@@ -337,9 +417,14 @@ struct RootView: View {
                 icon: .sidebarToggle,
                 help: store.sidebarCollapsed ? "Show sidebar (⌘B)" : "Hide sidebar (⌘B)"
             ) {
+                endSidebarPeek()
                 store.sidebarCollapsed.toggle()
             }
             .keyboardShortcut("b", modifiers: .command)
+            .onHover { hovering in
+                sidebarPeekToggleHovered = hovering
+                updateSidebarPeek()
+            }
 
             // Global across every cached workspace. Remote project trees are
             // indexed when their bootstrap changes, not during this render.
