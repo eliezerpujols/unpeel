@@ -361,12 +361,14 @@ struct RootView: View {
 
     /// The sidebar floating above the content: same width and contents as
     /// the docked one, framed like the content surface (inset, rounded,
-    /// hairline, soft shadow). Its own top spacer leaves room for the
-    /// titlebar buttons, which stay drawn above it.
+    /// hairline, soft shadow), starting below the titlebar so the traffic
+    /// lights and titlebar buttons never sit on it. The sidebar's own
+    /// titlebar-height top spacer is pulled up out of the card and clipped.
     private var sidebarPeekCard: some View {
         SidebarView(store: store, sessionDragController: sessionDragController)
             .frame(width: CGFloat(sidebarWidth))
-            .frame(maxHeight: .infinity)
+            .padding(.top, -Theme.titlebarHeight)
+            .frame(maxHeight: .infinity, alignment: .top)
             .background(FrameBackdrop())
             .clipShape(RoundedRectangle(cornerRadius: Theme.contentCornerRadius, style: .continuous))
             .overlay(
@@ -374,7 +376,8 @@ struct RootView: View {
                     .strokeBorder(Theme.contentHairline, lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 6)
-            .padding(surfaceInset)
+            .padding(.top, Theme.titlebarHeight)
+            .padding([.leading, .bottom], surfaceInset)
             .onHover { hovering in
                 sidebarPeekCardHovered = hovering
                 updateSidebarPeek()
