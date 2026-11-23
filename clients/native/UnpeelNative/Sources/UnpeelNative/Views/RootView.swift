@@ -34,6 +34,7 @@ struct RootView: View {
     @State private var sidebarPeekShown = false
     @State private var sidebarPeekToggleHovered = false
     @State private var sidebarPeekCardHovered = false
+    @State private var sidebarPeekEdgeHovered = false
     @State private var sidebarPeekHideTask: Task<Void, Never>?
 
     /// Right project panel width — same resize/persist mechanics as the left
@@ -338,6 +339,21 @@ struct RootView: View {
                 projectSidebarResizer
             }
         }
+        // Collapsed: the window's left edge (the frame gap beside the content
+        // surface) is a peek trigger too, like the toggle.
+        .overlay(alignment: .leading) {
+            if store.sidebarCollapsed && !store.settingsVisible {
+                Color.clear
+                    .frame(width: surfaceInset)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        sidebarPeekEdgeHovered = hovering
+                        updateSidebarPeek()
+                    }
+                    .padding(.top, Theme.titlebarHeight)
+            }
+        }
         .overlay(alignment: .topLeading) {
             if sidebarPeeking {
                 sidebarPeekCard
@@ -391,7 +407,7 @@ struct RootView: View {
             sidebarPeekShown = false
             return
         }
-        if sidebarPeekToggleHovered || sidebarPeekCardHovered {
+        if sidebarPeekToggleHovered || sidebarPeekCardHovered || sidebarPeekEdgeHovered {
             sidebarPeekShown = true
             return
         }
@@ -410,6 +426,7 @@ struct RootView: View {
         sidebarPeekShown = false
         sidebarPeekToggleHovered = false
         sidebarPeekCardHovered = false
+        sidebarPeekEdgeHovered = false
     }
 
     // MARK: - Titlebar buttons (sidebar toggle + collapsed new-session)
