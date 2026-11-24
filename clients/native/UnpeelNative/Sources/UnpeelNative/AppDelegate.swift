@@ -114,6 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         // the hints). Installed here, not in UnpeelStore.init, so the
         // self-tests' throwaway stores never register event monitors.
         store.installSessionShortcutMonitors()
+        // System-wide palette shortcut (Settings ▸ Appearance ▸ Global shortcut).
+        GlobalPaletteController.shared.start(store: store) { [weak self] in
+            self?.showMainWindow()
+        }
 
         // Menu-bar presence: keeps the activity dropdown (and live spinner) one
         // click away while the window is closed, and reopens to the session.

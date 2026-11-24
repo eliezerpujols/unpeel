@@ -2698,6 +2698,10 @@ struct AppearanceSettingsPanel: View {
                             + "the terminal view."
                     )
                 }
+
+                if GlobalPaletteController.isAvailable {
+                    GlobalPaletteShortcutSection()
+                }
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)

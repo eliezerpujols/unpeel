@@ -143,6 +143,12 @@ struct PaletteItem: Identifiable {
 
 struct CommandPaletteOverlay: View {
     @ObservedObject var store: UnpeelStore
+    /// Hosted in the global-shortcut panel (GlobalPalette.swift): no scrim,
+    /// fixed card width, and closing hides the panel instead.
+    var floating = false
+    var onClose: (() -> Void)?
+    /// Called after a row's action ran (the panel brings Unpeel forward).
+    var onRan: (() -> Void)?
     /// The cross-workspace activity model behind the Recent-activity dropdown;
     /// the palette's top tiers mirror it so ⌘K lists what is spinning or done
     /// across every workspace, not only the one it opened in.
@@ -157,8 +163,16 @@ struct CommandPaletteOverlay: View {
     /// order (no reorder flash after onAppear).
     @State private var recencyByID: [String: Int64]
 
-    init(store: UnpeelStore) {
+    init(
+        store: UnpeelStore,
+        floating: Bool = false,
+        onClose: (() -> Void)? = nil,
+        onRan: (() -> Void)? = nil
+    ) {
         self.store = store
+        self.floating = floating
+        self.onClose = onClose
+        self.onRan = onRan
         self.activityMenu = store.globalActivityMenu
         _recencyByID = State(initialValue: store.paletteRecencySnapshot())
     }
@@ -171,6 +185,28 @@ struct CommandPaletteOverlay: View {
     private static let maxResults = 40
 
     var body: some View {
+        Group {
+            if floating {
+                palette(listMaxHeight: 360)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+            } else {
+                windowBody
+            }
+        }
+        .onAppear {
+            installKeyMonitor()
+            // Seed with the cursor's current position so the row that
+            // happens to sit under it when the palette opens doesn't steal
+            // the selection from the top item.
+            lastHoverMouseLocation = NSEvent.mouseLocation
+            // Focus lands after the field mounts.
+            DispatchQueue.main.async { searchFocused = true }
+        }
+        .onDisappear { removeKeyMonitor() }
+    }
+
+    private var windowBody: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
                 // Click-away scrim. Kept light: the palette should feel like
@@ -189,16 +225,6 @@ struct CommandPaletteOverlay: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        .onAppear {
-            installKeyMonitor()
-            // Seed with the cursor's current position so the row that
-            // happens to sit under it when the palette opens doesn't steal
-            // the selection from the top item.
-            lastHoverMouseLocation = NSEvent.mouseLocation
-            // Focus lands after the field mounts.
-            DispatchQueue.main.async { searchFocused = true }
-        }
-        .onDisappear { removeKeyMonitor() }
     }
 
     private func palette(listMaxHeight: CGFloat) -> some View {
@@ -644,10 +670,15 @@ struct CommandPaletteOverlay: View {
     private func run(_ item: PaletteItem) {
         close()
         item.action()
+        onRan?()
     }
 
     private func close() {
-        store.commandPaletteVisible = false
+        if let onClose {
+            onClose()
+        } else {
+            store.commandPaletteVisible = false
+        }
     }
 }
 
