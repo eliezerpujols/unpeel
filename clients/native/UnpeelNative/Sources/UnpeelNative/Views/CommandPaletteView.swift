@@ -561,7 +561,8 @@ struct CommandPaletteOverlay: View {
             keywords: [item.session.command, item.workspaceName].joined(separator: " "),
             indicator: indicator,
             unread: unread,
-            trailingLabel: item.session.status,
+            // The leading spinner / dot already says Working or Done.
+            trailingLabel: "",
             action: { [key = item.workspaceKey, id = item.session.sessionID] in
                 store.revealGlobalActivitySession(workspaceKey: key, sessionID: id)
             }
@@ -924,10 +925,13 @@ private struct PaletteRowView: View {
 
             Spacer(minLength: 8)
 
-            Text(item.trailingLabel ?? item.kind.rawValue)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(Theme.mutedForeground)
-                .opacity(0.7)
+            // "" = no label (activity rows: the indicator says it).
+            if item.trailingLabel != "" {
+                Text(item.trailingLabel ?? item.kind.rawValue)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.mutedForeground)
+                    .opacity(0.7)
+            }
 
             if let subtitle = item.subtitle, item.trailingLabel != nil {
                 Text(subtitle)
