@@ -156,6 +156,11 @@ struct CommandPaletteOverlay: View {
 
     @State private var query = ""
     @State private var selectedIndex = 0
+    /// Workspace chip filter: nil = All (the default), else a
+    /// workspace-order key (`WorkspaceListRowModel.id`).
+    @State private var scopeKey: String?
+    /// The workspace list, captured when the palette opens.
+    @State private var workspaces: [WorkspaceListRowModel]
     @State private var keyMonitor: Any?
     /// Shared-recency snapshot (UnpeelStore.sessionRecencyMs), taken once
     /// when the palette opens: ordering must not stat session dirs on every
@@ -175,6 +180,7 @@ struct CommandPaletteOverlay: View {
         self.onRan = onRan
         self.activityMenu = store.globalActivityMenu
         _recencyByID = State(initialValue: store.paletteRecencySnapshot())
+        _workspaces = State(initialValue: WorkspaceSwitching.orderedRows(store: store))
     }
     /// Last mouse position (screen coords) that drove a hover-selection.
     /// Rows appearing or scrolling under a stationary cursor re-fire hover
@@ -239,6 +245,12 @@ struct CommandPaletteOverlay: View {
                 // Enter in the field is a fallback for the key monitor.
                 .onSubmit { runSelected() }
 
+            if showsWorkspaceChips {
+                workspaceChips
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            }
+
             Divider()
 
             if results.isEmpty {
@@ -279,6 +291,167 @@ struct CommandPaletteOverlay: View {
             }
         }
         .overlayCardGlass()
+    }
+
+    // MARK: Workspace chips
+
+    private var showsWorkspaceChips: Bool { workspaces.count > 1 }
+
+    private var workspaceChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                chip(title: "All", tint: nil, key: nil)
+                ForEach(workspaces) { row in
+                    chip(title: row.name, tint: row.tint, key: row.id)
+                }
+            }
+        }
+    }
+
+    private func chip(title: String, tint: AppTint?, key: String?) -> some View {
+        let selected = scopeKey == key
+        return Button {
+            selectScope(key)
+        } label: {
+            HStack(spacing: 6) {
+                if let tint, tint != .none {
+                    Circle().fill(tint.swatch).frame(width: 7, height: 7)
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .foregroundStyle(selected ? Theme.foreground : Theme.mutedForeground)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Theme.foreground.opacity(selected ? 0.14 : 0.06))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func selectScope(_ key: String?) {
+        scopeKey = key
+        selectedIndex = 0
+        searchFocused = true
+    }
+
+    /// Tab / ⇧Tab steps through the chips (All first).
+    private func cycleScope(_ delta: Int) {
+        guard showsWorkspaceChips else { return }
+        let keys: [String?] = [nil] + workspaces.map { Optional($0.id) }
+        let index = keys.firstIndex(where: { $0 == scopeKey }) ?? 0
+        selectScope(keys[(index + delta + keys.count) % keys.count])
+    }
+
+    private func inScope(_ workspaceKey: String) -> Bool {
+        scopeKey == nil || scopeKey == workspaceKey
+    }
+
+    /// The workspace this window shows; its rows come from the live sidebar
+    /// projection, every other workspace's from the pool's cached snapshot.
+    private var foregroundKey: String { store.currentScopeWorkspaceKey }
+
+    private var foregroundInScope: Bool { inScope(foregroundKey) }
+
+    private var foregroundName: String? {
+        workspaces.first { $0.id == foregroundKey }?.name
+    }
+
+    // MARK: Other workspaces (pool snapshots)
+
+    private struct OtherWorkspaceRows {
+        var sessions: [(item: PaletteItem, id: String, recency: Int64, active: Bool)] = []
+        var projects: [PaletteItem] = []
+    }
+
+    private func otherWorkspaceRows(_ row: WorkspaceListRowModel) -> OtherWorkspaceRows {
+        var result = OtherWorkspaceRows()
+        guard let snapshot = store.workspacePool.snapshot(forKey: row.id) else { return result }
+        let key = row.id
+        let projectsByID = Dictionary(
+            snapshot.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        var newestSessionByProject: [String: (id: String, recency: Int64)] = [:]
+        var seen = Set<String>()
+        for summary in snapshot.sessions where seen.insert(summary.id).inserted {
+            let recency = max(summary.updatedAtUnixMs ?? 0, summary.createdAtUnixMs)
+            let running = summary.status == .running
+            let working = running && (summary.activity == .starting || summary.activity == .working)
+            let blocked = running && summary.activity == .blocked
+            let indicator: PaletteItem.Indicator? = if working {
+                .spinner(Theme.toolSpinnerColor(forCommand: summary.command))
+            } else if blocked {
+                .attention
+            } else if summary.unread {
+                .done
+            } else {
+                nil
+            }
+            let title = summary.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let projectName = projectsByID[summary.projectID]?.name ?? ""
+            let age = Date().timeIntervalSince1970 * 1000 - Double(recency)
+            result.sessions.append((
+                item: PaletteItem(
+                    id: "ws:\(key):session:\(summary.id)",
+                    kind: .session,
+                    title: title.isEmpty ? (summary.command.isEmpty ? "Untitled session" : summary.command) : title,
+                    subtitle: projectName.isEmpty ? row.name : "\(row.name) · \(projectName)",
+                    keywords: [summary.command, row.name].joined(separator: " "),
+                    indicator: indicator,
+                    unread: summary.unread,
+                    trailingLabel: Self.shortAge(ms: age),
+                    action: { [id = summary.id] in
+                        store.revealGlobalActivitySession(workspaceKey: key, sessionID: id)
+                    }
+                ),
+                id: summary.id,
+                recency: recency,
+                active: working || blocked || summary.unread
+            ))
+            if recency >= (newestSessionByProject[summary.projectID]?.recency ?? .min) {
+                newestSessionByProject[summary.projectID] = (summary.id, recency)
+            }
+        }
+        result.sessions.sort { $0.recency > $1.recency }
+        for project in snapshot.projects where project.isGroup != true {
+            let newest = newestSessionByProject[project.id]?.id
+            result.projects.append(PaletteItem(
+                id: "ws:\(key):project:\(project.id)",
+                kind: .project,
+                title: project.name,
+                subtitle: [row.name, project.worktreeBranch].compactMap { $0 }.joined(separator: " · "),
+                keywords: project.path + " " + row.name,
+                action: { [row] in
+                    if let newest {
+                        store.revealGlobalActivitySession(workspaceKey: key, sessionID: newest)
+                    } else {
+                        WorkspaceSwitching.select(row, store: store)
+                    }
+                }
+            ))
+        }
+        return result
+    }
+
+    /// Rows for every non-foreground workspace the chip filter includes.
+    private var otherWorkspaces: [(row: WorkspaceListRowModel, rows: OtherWorkspaceRows)] {
+        workspaces
+            .filter { $0.id != foregroundKey && inScope($0.id) }
+            .map { ($0, otherWorkspaceRows($0)) }
+    }
+
+    private static func shortAge(ms: Double) -> String {
+        let seconds = max(0, ms / 1000)
+        if seconds < 60 { return "now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
     }
 
     // MARK: Items
@@ -328,8 +501,9 @@ struct CommandPaletteOverlay: View {
                         id: "session:\(session.id)",
                         kind: .session,
                         title: session.label,
-                        subtitle: node.project.name,
-                        keywords: session.command,
+                        subtitle: foregroundName.map { "\($0) · \(node.project.name)" }
+                            ?? node.project.name,
+                        keywords: [session.command, foregroundName ?? ""].joined(separator: " "),
                         indicator: indicator,
                         unread: unread,
                         trailingLabel: session.ageString(since: recency),
@@ -395,11 +569,12 @@ struct CommandPaletteOverlay: View {
     }
 
     private var globalBlockedItems: [PaletteItem] {
-        activityMenu.activity.blockers.map { globalActivityItem($0, indicator: .attention, unread: false) }
+        activityMenu.activity.blockers.filter { inScope($0.workspaceKey) }
+            .map { globalActivityItem($0, indicator: .attention, unread: false) }
     }
 
     private var globalActiveItems: [PaletteItem] {
-        activityMenu.activity.jobs.map {
+        activityMenu.activity.jobs.filter { inScope($0.workspaceKey) }.map {
             globalActivityItem(
                 $0,
                 indicator: .spinner(Theme.toolSpinnerColor(forCommand: $0.session.command)),
@@ -409,30 +584,8 @@ struct CommandPaletteOverlay: View {
     }
 
     private var globalDoneItems: [PaletteItem] {
-        activityMenu.activity.finished.map { globalActivityItem($0, indicator: .done, unread: true) }
-    }
-
-    /// Activity rows for workspaces other than the one the palette opened in —
-    /// added to search so a query finds a spinning or finished session
-    /// anywhere, without duplicating the current scope's own session rows.
-    private var otherWorkspaceActivityItems: [PaletteItem] {
-        let current = store.currentScopeWorkspaceKey
-        let blocked = activityMenu.activity.blockers
-            .filter { $0.workspaceKey != current }
-            .map { globalActivityItem($0, indicator: .attention, unread: false) }
-        let active = activityMenu.activity.jobs
-            .filter { $0.workspaceKey != current }
-            .map {
-                globalActivityItem(
-                    $0,
-                    indicator: .spinner(Theme.toolSpinnerColor(forCommand: $0.session.command)),
-                    unread: false
-                )
-            }
-        let done = activityMenu.activity.finished
-            .filter { $0.workspaceKey != current }
+        activityMenu.activity.finished.filter { inScope($0.workspaceKey) }
             .map { globalActivityItem($0, indicator: .done, unread: true) }
-        return blocked + active + done
     }
 
     /// Whether the local-only tiers (Projects, New session, All sessions,
@@ -504,7 +657,7 @@ struct CommandPaletteOverlay: View {
         // Preset launches in the current (⌘N-target) project. Preset labels
         // are the local catalog, so these lead only in the local workspace;
         // a scoped/remote workspace resolves its own presets elsewhere.
-        if localTiersEnabled, let projectID = store.defaultLaunchProjectID {
+        if localTiersEnabled, foregroundInScope, let projectID = store.defaultLaunchProjectID {
             let projectName = store.displayProjectsByID[projectID]?.name ?? ""
             for preset in [Preset.newTerminal] + store.availablePresets {
                 items.append(PaletteItem(
@@ -575,20 +728,37 @@ struct CommandPaletteOverlay: View {
             (activityMenu.activity.blockers + activityMenu.activity.jobs + activityMenu.activity.finished)
                 .map(\.session.sessionID)
         )
-        let home = metas.filter {
-            !$0.working && !$0.blocked && !$0.unread
-                && !activeElsewhere.contains($0.sessionID)
-                && (current == nil || $0.topLevelProjectID == current)
+        let others = otherWorkspaces
+        if foregroundInScope {
+            let home = metas.filter {
+                !$0.working && !$0.blocked && !$0.unread
+                    && !activeElsewhere.contains($0.sessionID)
+                    && (current == nil || $0.topLevelProjectID == current)
+            }
+            tier(
+                current.flatMap { store.displayProjectsByID[$0]?.name },
+                Array(home.prefix(Self.recentSessionLimit).map(\.item))
+            )
         }
-        tier(
-            current.flatMap { store.displayProjectsByID[$0]?.name },
-            Array(home.prefix(Self.recentSessionLimit).map(\.item))
-        )
+        // A single other workspace picked: its own recents lead.
+        if scopeKey != nil, let other = others.first {
+            let recents = other.rows.sessions
+                .filter { !$0.active && !activeElsewhere.contains($0.id) }
+                .prefix(Self.recentSessionLimit)
+                .map(\.item)
+            tier("Recent in \(other.row.name)", Array(recents))
+        }
         // Projects, launches, and the All-sessions page are local-host
         // actions; in a scoped or remote workspace the palette stops here.
-        if localTiersEnabled {
+        if localTiersEnabled && foregroundInScope {
             items.append(allSessionsLink)
-            tier("Projects", projectItems.filter { $0.id != "project:\(current ?? "")" })
+            tier(
+                showsWorkspaceChips ? "Projects · \(foregroundName ?? "This workspace")" : "Projects",
+                projectItems.filter { $0.id != "project:\(current ?? "")" }
+            )
+        }
+        for other in others {
+            tier("Projects · \(other.row.name)", other.rows.projects)
         }
         tier(nil, actionItems)
         return Array(items.prefix(Self.maxResults))
@@ -597,13 +767,14 @@ struct CommandPaletteOverlay: View {
     private var results: [PaletteItem] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return tieredRecents }
-        let sessions = sessionItems
-        // Search spans the current scope's sessions plus every other
-        // workspace's active/blocked/finished rows, so a query finds a
-        // spinning or done session anywhere. The local-only Projects and
-        // All-sessions rows join only in the local workspace.
-        let localOnly = localTiersEnabled ? [allSessionsLink] + projectItems : []
-        let regularResults = (sessions + otherWorkspaceActivityItems + localOnly + actionItems)
+        // Search spans the chip's workspaces: the foreground's live rows plus
+        // every other workspace's sessions and projects from the pool. The
+        // local-only Projects and All-sessions rows join only in the local
+        // workspace.
+        let sessions = foregroundInScope ? sessionItems : []
+        let localOnly = localTiersEnabled && foregroundInScope ? [allSessionsLink] + projectItems : []
+        let others = otherWorkspaces.flatMap { $0.rows.sessions.map(\.item) + $0.rows.projects }
+        let regularResults = (sessions + others + localOnly + actionItems)
             .compactMap { item -> (PaletteItem, Int)? in
                 let titleScore = PaletteFuzzy.score(trimmed, in: item.title)
                     .map { $0 * 2 }
@@ -641,6 +812,9 @@ struct CommandPaletteOverlay: View {
                     return true
                 case 53: // esc
                     close()
+                    return true
+                case 48 where showsWorkspaceChips: // tab / ⇧tab
+                    cycleScope(event.modifierFlags.contains(.shift) ? -1 : 1)
                     return true
                 default:
                     return false
