@@ -252,8 +252,10 @@ final class GlobalPaletteController: ObservableObject {
         )
         .frame(width: size.width, height: size.height, alignment: .top)
         panel.contentView = NSHostingView(rootView: content)
-        panel.appearance = NSApp.windows.first { $0.isVisible && !($0 is NSPanel) }?.effectiveAppearance
-            ?? NSApp.effectiveAppearance
+        // Same source as the main window: Unpeel's theme setting (nil =
+        // follow macOS live). Copying another window's appearance could pick
+        // the menu-bar item's window, which follows the wallpaper instead.
+        panel.appearance = NSApp.appearance
 
         // Center on the screen under the pointer, upper third.
         let mouse = NSEvent.mouseLocation
