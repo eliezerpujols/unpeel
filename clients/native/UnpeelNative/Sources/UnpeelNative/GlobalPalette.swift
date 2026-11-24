@@ -239,7 +239,9 @@ final class GlobalPaletteController: ObservableObject {
     // MARK: Panel
 
     private func showPanel(store: UnpeelStore) {
-        let size = NSSize(width: 600, height: 470)
+        // Room around the 560-pt card for its shadow: a borderless panel
+        // clips anything drawn past its bounds.
+        let size = NSSize(width: 560 + 2 * Self.shadowMargin, height: 420 + 2 * Self.shadowMargin)
         let panel = self.panel ?? GlobalPalettePanel(size: size)
         self.panel = panel
         let content = CommandPaletteOverlay(
@@ -259,7 +261,7 @@ final class GlobalPaletteController: ObservableObject {
         if let visible = screen?.visibleFrame {
             let origin = NSPoint(
                 x: visible.midX - size.width / 2,
-                y: visible.maxY - visible.height * 0.18 - size.height
+                y: visible.maxY - visible.height * 0.18 - size.height + Self.shadowMargin
             )
             panel.setFrameOrigin(origin)
         }
@@ -272,6 +274,8 @@ final class GlobalPaletteController: ObservableObject {
             }
         }
     }
+
+    static let shadowMargin: CGFloat = 60
 
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }

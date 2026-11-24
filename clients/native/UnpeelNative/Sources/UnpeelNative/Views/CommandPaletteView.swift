@@ -188,8 +188,8 @@ struct CommandPaletteOverlay: View {
         Group {
             if floating {
                 palette(listMaxHeight: 360)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 10)
+                    .frame(width: 560)
+                    .padding(GlobalPaletteController.shadowMargin)
             } else {
                 windowBody
             }

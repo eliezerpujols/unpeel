@@ -116,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         store.installSessionShortcutMonitors()
         // System-wide palette shortcut (Settings ▸ Appearance ▸ Global shortcut).
         GlobalPaletteController.shared.start(store: store) { [weak self] in
-            self?.showMainWindow()
+            self?.showMainWindowOnActiveSpace()
         }
 
         // Menu-bar presence: keeps the activity dropdown (and live spinner) one
@@ -198,6 +198,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
     /// Dock re-open (`applicationShouldHandleReopen`) and menu-bar session
     /// clicks can resurrect the window after the user closed it — the hosted
     /// PTYs keep running while the app lives on as a menu-bar agent.
+    /// Global palette: bring the window to the desktop the user is on
+    /// instead of switching desktops to reach it. A full-screen window has
+    /// its own Space and can't move, so it is just shown.
+    func showMainWindowOnActiveSpace() {
+        guard let window, !window.styleMask.contains(.fullScreen) else {
+            showMainWindow()
+            return
+        }
+        let saved = window.collectionBehavior
+        if !saved.contains(.canJoinAllSpaces) {
+            window.collectionBehavior = saved.union(.moveToActiveSpace)
+        }
+        showMainWindow()
+        // Restore after the move, so normal ⌘Tab / Dock clicks still go to
+        // the window's (new) desktop like any other app.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak window] in
+            window?.collectionBehavior = saved
+        }
+    }
+
     func showMainWindow() {
         if let window {
             window.makeKeyAndOrderFront(nil)
