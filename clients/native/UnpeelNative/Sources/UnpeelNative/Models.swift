@@ -860,8 +860,8 @@ enum ComputerAccess: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .off: return "No computer control for any session."
-        case .ask: return "Approve each action or allow access for the session."
-        case .allow: return "Sessions in this workspace can control this Mac without asking."
+        case .ask: return "Ask before showing the screen or granting app control."
+        case .allow: return "Sessions can see the screen without asking. Each app still requires a grant."
         }
     }
 

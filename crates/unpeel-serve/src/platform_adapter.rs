@@ -55,6 +55,7 @@ pub const ADAPTER_SERVICES: &[&str] = &[
     "artifact.thumbnail",
     "computer.apps",
     unpeel_core::computer_mcp::PERFORM_OPERATION,
+    unpeel_core::computer_mcp::RESOLVE_OPERATION,
     unpeel_core::computer_mcp::STATUS_OPERATION,
     "controller.transport.host-owned",
     "link.entitlement.refresh",

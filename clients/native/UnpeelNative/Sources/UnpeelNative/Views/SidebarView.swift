@@ -3116,6 +3116,7 @@ struct SessionRowView: View {
                     if isPinned {
                         SidebarPinnedIndicator()
                     }
+                    ComputerControlRowMark(sessionID: session.id, paneIDs: paneItems.map(\.sessionID))
                 }
             }
 

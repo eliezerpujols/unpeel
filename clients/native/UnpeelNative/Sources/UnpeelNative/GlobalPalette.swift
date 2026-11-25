@@ -29,6 +29,11 @@ struct GlobalShortcut: Codable, Equatable {
         modifiers: NSEvent.ModifierFlags.option.rawValue
     )
 
+    static let computerStop = GlobalShortcut(
+        keyCode: UInt32(kVK_ANSI_Period),
+        modifiers: NSEvent.ModifierFlags([.control, .option, .command]).rawValue
+    )
+
     var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
     var carbonModifiers: UInt32 {
@@ -55,6 +60,7 @@ struct GlobalShortcut: Codable, Equatable {
     static func keyName(_ code: UInt32) -> String {
         switch Int(code) {
         case kVK_Space: return "Space"
+        case kVK_ANSI_Period: return "."
         case kVK_Return: return "↩"
         case kVK_Tab: return "⇥"
         case kVK_Escape: return "⎋"
@@ -115,6 +121,66 @@ struct GlobalShortcut: Codable, Equatable {
     }
 }
 
+// One Carbon handler routes all Unpeel hot keys by ID.
+@MainActor
+final class GlobalHotKeys {
+    enum Key: UInt32 {
+        case palette = 1
+        case computerStop
+    }
+
+    static let shared = GlobalHotKeys()
+    private static let signature: OSType = 0x554E_504C // "UNPL"
+    private var handlerRef: EventHandlerRef?
+    private var registrations: [Key: (EventHotKeyRef, () -> Void)] = [:]
+
+    func register(_ key: Key, shortcut: GlobalShortcut, action: @escaping () -> Void) -> Bool {
+        unregister(key)
+        guard UnpeelWorkspaceContext.isDefaultInstance, installHandler() else { return false }
+        var ref: EventHotKeyRef?
+        let id = EventHotKeyID(signature: Self.signature, id: key.rawValue)
+        let status = RegisterEventHotKey(
+            shortcut.keyCode, shortcut.carbonModifiers, id, GetApplicationEventTarget(), 0, &ref
+        )
+        guard status == noErr, let ref else { return false }
+        registrations[key] = (ref, action)
+        return true
+    }
+
+    func unregister(_ key: Key) {
+        guard let (ref, _) = registrations.removeValue(forKey: key) else { return }
+        UnregisterEventHotKey(ref)
+    }
+
+    private func installHandler() -> Bool {
+        if handlerRef != nil { return true }
+        var spec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, _ -> OSStatus in
+                var id = EventHotKeyID()
+                guard let event,
+                      GetEventParameter(
+                          event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                          nil, MemoryLayout<EventHotKeyID>.size, nil, &id
+                      ) == noErr,
+                      id.signature == GlobalHotKeys.signature,
+                      let key = GlobalHotKeys.Key(rawValue: id.id)
+                else { return OSStatus(eventNotHandledErr) }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { GlobalHotKeys.shared.registrations[key]?.1() }
+                }
+                return noErr
+            },
+            1, &spec, nil, &handlerRef
+        )
+        return status == noErr
+    }
+}
+
 // MARK: - Controller
 
 @MainActor
@@ -134,8 +200,6 @@ final class GlobalPaletteController: ObservableObject {
 
     private weak var store: UnpeelStore?
     private var onReveal: (() -> Void)?
-    private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
     private var panel: GlobalPalettePanel?
     private var resignObserver: NSObjectProtocol?
     /// While the Settings recorder listens, the hot key must not fire.
@@ -157,7 +221,6 @@ final class GlobalPaletteController: ObservableObject {
         self.store = store
         self.onReveal = onReveal
         guard Self.isAvailable else { return }
-        installHandler()
         register()
     }
 
@@ -182,41 +245,12 @@ final class GlobalPaletteController: ObservableObject {
 
     // MARK: Hot key
 
-    private func installHandler() {
-        guard handlerRef == nil else { return }
-        var spec = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, _ -> OSStatus in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { GlobalPaletteController.shared.hotKeyPressed() }
-                }
-                return noErr
-            },
-            1, &spec, nil, &handlerRef
-        )
-    }
-
     private func register() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
+        GlobalHotKeys.shared.unregister(.palette)
         registrationFailed = false
-        guard Self.isAvailable, handlerRef != nil, enabled, !suspended else { return }
-        var ref: EventHotKeyRef?
-        let id = EventHotKeyID(signature: OSType(0x554E_504C), id: 1) // "UNPL"
-        let status = RegisterEventHotKey(
-            shortcut.keyCode, shortcut.carbonModifiers, id,
-            GetApplicationEventTarget(), 0, &ref
-        )
-        if status == noErr {
-            hotKeyRef = ref
-        } else {
-            registrationFailed = true
+        guard Self.isAvailable, enabled, !suspended else { return }
+        registrationFailed = !GlobalHotKeys.shared.register(.palette, shortcut: shortcut) { [weak self] in
+            self?.hotKeyPressed()
         }
     }
 

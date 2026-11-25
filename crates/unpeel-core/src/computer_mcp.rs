@@ -2,22 +2,30 @@
 //! callback registration, and screenshot paths. The Mac app owns input and capture.
 
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+mod safety;
+use safety::Decision;
+pub use safety::{AppTarget, APP_APPROVALS};
 
 use crate::session_host::{self, HostedSessionManifest, HostedSessionState};
 use crate::state::ComputerAccess;
 use crate::{app_paths, app_state, relay_wire, remote_stdio, session_artifacts};
 
 pub const LOCAL_COMPUTER_PATH: &str = "/_unpeel/computer";
+pub const RESOLVE_OPERATION: &str = "computer.resolve";
 pub const PERFORM_OPERATION: &str = "computer.perform";
 pub const STATUS_OPERATION: &str = "computer.status";
 
 pub const OFF_MESSAGE: &str = "Computer use is turned off in Unpeel Settings ▸ Computer use";
+pub const PAUSED_MESSAGE: &str =
+    "Computer use was paused. Resume in the Unpeel pill or Settings ▸ Computer use.";
 const MAX_DURATION_SECS: f64 = 30.0;
 // Leave room under the Host frame ceiling for JSON escaping and base64.
 const MAX_TEXT_BYTES: usize = 60 * 1024;
@@ -110,7 +118,7 @@ fn help(arguments: &Value) -> Result<String, String> {
         ACTIONS
     };
     let mut lines = vec![
-        "Coordinates use the latest full screenshot's pixel space, with origin at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds.".to_owned(),
+        "Coordinates use the latest screenshot's pixel space, with origin at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds. Input requires a grant for each app. Use the Unpeel browser tool for browser interaction. Terminals and IDEs only accept left_click and scroll.".to_owned(),
     ];
     lines.extend(
         actions
@@ -273,21 +281,53 @@ fn access_mode(value: Option<&Value>) -> Result<ComputerAccess, String> {
     }
 }
 
-fn has_session_approval(state: &Value, session_id: &str) -> bool {
-    state["computer_approvals"]
-        .as_array()
-        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session_id)))
-}
-
 pub enum ComputerApproval {
     Once,
     Session,
+    Denied,
+}
+
+pub struct ControlGeneration {
+    path: PathBuf,
+    expected: String,
+}
+
+impl ControlGeneration {
+    fn new(expected: String) -> Self {
+        Self {
+            path: app_paths::machine_home().join("computer-control.json"),
+            expected,
+        }
+    }
+
+    pub fn is_current(&self) -> bool {
+        #[derive(Deserialize)]
+        struct Control {
+            paused: bool,
+            generation: String,
+        }
+        match std::fs::read(&self.path) {
+            Ok(raw) => serde_json::from_slice::<Control>(&raw)
+                .is_ok_and(|state| !state.paused && state.generation == self.expected),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.expected == "initial"
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn require_current(&self) -> Result<(), String> {
+        if self.is_current() {
+            Ok(())
+        } else {
+            Err(PAUSED_MESSAGE.into())
+        }
+    }
 }
 
 static PENDING_APPROVALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Keep one action waiting per session. A one-time answer can then only
-/// release the action that presented the prompt.
+/// Keep one pending prompt per session, including while its answer is being saved.
 struct PendingApproval<'a>(&'a str);
 
 impl<'a> PendingApproval<'a> {
@@ -312,43 +352,68 @@ impl Drop for PendingApproval<'_> {
     }
 }
 
-fn authorize_action(
+fn approval_needed(
     state: &Value,
-    mode: ComputerAccess,
     session_id: &str,
-    request_approval: impl FnOnce(&str) -> Result<ComputerApproval, String>,
+    target: Option<&AppTarget>,
+) -> Result<bool, String> {
+    let mode = access_mode(state.get("computer_use"))?;
+    match safety::decision(state, session_id, target) {
+        Some(Decision::Allow) => Ok(false),
+        Some(Decision::Deny) => Err(denied_message(target)),
+        None => Ok(target.is_some() || mode == ComputerAccess::Ask),
+    }
+}
+
+fn denied_message(target: Option<&AppTarget>) -> String {
+    match target {
+        Some(app) => format!("The user denied access to {} for this session.", app.name),
+        None => "The user denied access to this Mac’s screen.".into(),
+    }
+}
+
+type RequestApproval<'a> =
+    dyn Fn(&str, Option<&AppTarget>, &ControlGeneration) -> Result<ComputerApproval, String> + 'a;
+
+fn authorize_action(
+    session_id: &str,
+    target: Option<&AppTarget>,
+    control: &ControlGeneration,
+    request_approval: &RequestApproval<'_>,
 ) -> Result<(), String> {
-    if mode == ComputerAccess::Allow || has_session_approval(state, session_id) {
+    if !approval_needed(&app_state::load()?, session_id, target)? {
         return Ok(());
     }
     let _pending = PendingApproval::begin(session_id)?;
-    // Another request may have recorded an approval since the first read.
-    let state = app_state::load()?;
-    if access_mode(state.get("computer_use"))? == ComputerAccess::Allow
-        || has_session_approval(&state, session_id)
-    {
+    if !approval_needed(&app_state::load()?, session_id, target)? {
         return Ok(());
     }
-    let approval = request_approval(session_id)?;
-    // A prompt can outlive the session or a change to the workspace policy.
-    require_session(session_id)?;
-    if matches!(approval, ComputerApproval::Session) {
-        app_state::edit(|root| {
-            if access_mode(root.get("computer_use"))? == ComputerAccess::Ask {
-                let approvals = root
-                    .entry("computer_approvals")
-                    .or_insert_with(|| json!([]))
-                    .as_array_mut()
-                    .ok_or("Invalid computer approvals in app-state.json")?;
-                if !approvals.iter().any(|id| id.as_str() == Some(session_id)) {
-                    approvals.push(json!(session_id));
-                }
+    control.require_current()?;
+    let answer = request_approval(session_id, target, control)?;
+    // A prompt can outlive the session, the access setting or a stop/resume.
+    control.require_current()?;
+    match answer {
+        ComputerApproval::Once if target.is_none() => Ok(()),
+        ComputerApproval::Once => Err("App access must be granted for the session.".into()),
+        ComputerApproval::Denied if target.is_none() => Err(denied_message(target)),
+        ComputerApproval::Session | ComputerApproval::Denied => {
+            let decision = if matches!(answer, ComputerApproval::Session) {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+            app_state::edit(|state| {
+                require_session(session_id)?;
+                access_mode(state.get("computer_use"))?;
+                control.require_current()?;
+                safety::remember(state, session_id, target, decision)
+            })?;
+            if decision == Decision::Deny {
+                return Err(denied_message(target));
             }
             Ok(())
-        })?;
+        }
     }
-    access_mode(app_state::load()?.get("computer_use"))?;
-    Ok(())
 }
 
 /// Computer use rides the existing unified integration. The new live setting
@@ -357,7 +422,7 @@ pub(crate) fn session_has_integration(manifest: &HostedSessionManifest) -> bool 
     manifest.sessions_mcp_enabled() || manifest.browser_mcp_enabled()
 }
 
-fn require_session(session_id: &str) -> Result<(), String> {
+fn require_session(session_id: &str) -> Result<HostedSessionManifest, String> {
     if session_id.is_empty()
         || !session_id
             .bytes()
@@ -365,15 +430,13 @@ fn require_session(session_id: &str) -> Result<(), String> {
     {
         return Err("Computer use requires an Unpeel terminal session".into());
     }
-    let running = session_host::load_manifest(session_id).is_some_and(|manifest| {
-        manifest.state == HostedSessionState::Running
-            && manifest.session.id == session_id
-            && session_has_integration(&manifest)
-    });
-    if !running {
-        return Err("Computer use requires a running session with Unpeel MCP enabled".into());
-    }
-    Ok(())
+    session_host::load_manifest(session_id)
+        .filter(|manifest| {
+            manifest.state == HostedSessionState::Running
+                && manifest.session.id == session_id
+                && session_has_integration(manifest)
+        })
+        .ok_or_else(|| "Computer use requires a running session with Unpeel MCP enabled".into())
 }
 
 fn screenshot_filename() -> String {
@@ -394,15 +457,66 @@ fn takes_screenshot(action: &str) -> bool {
     !matches!(action, "wait" | "cursor_position" | "status")
 }
 
-/// Serve the same-user workspace socket route. Access and validation are
-/// repeated here so a raw local request cannot bypass the MCP dispatcher.
+fn has_app_target(action: &str) -> bool {
+    !matches!(
+        action,
+        "screenshot" | "zoom" | "cursor_position" | "wait" | "status"
+    )
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ObservedApp {
+    name: String,
+    bundle_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Resolution {
+    target: Option<AppTarget>,
+    frontmost_app: Option<ObservedApp>,
+    screen_coordinate: Option<[f64; 2]>,
+    screen_end_coordinate: Option<[f64; 2]>,
+    control_generation: String,
+}
+
+fn action_log_entry(action: &str, body: &Value, resolution: &Resolution) -> Value {
+    let mut entry = json!({
+        "time_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+        "app": resolution.target.as_ref().map_or_else(
+            || json!(resolution.frontmost_app),
+            |app| json!({"name": app.name, "bundle_id": app.bundle_id}),
+        ),
+        "action": action,
+    });
+    for field in ["coordinate", "start_coordinate", "region"] {
+        if let Some(value) = body.get(field) {
+            entry[field] = value.clone();
+        }
+    }
+    if let Some(point) = resolution.screen_coordinate {
+        entry["screen_coordinate"] = json!(point);
+    }
+    if let Some(point) = resolution.screen_end_coordinate {
+        entry["screen_end_coordinate"] = json!(point);
+    }
+    if action == "type" {
+        entry["text_length"] = json!(body["text"].as_str().map_or(0, |text| text.chars().count()));
+    }
+    entry
+}
+
+/// Serve the same-user workspace socket route. The adapter resolves the
+/// recipient because only it can map the session's pixels to the live desktop.
 pub fn handle_local_call(
     request: &Value,
-    request_approval: impl FnOnce(&str) -> Result<ComputerApproval, String>,
-    call_adapter: impl FnOnce(&str, Value) -> Result<Value, String>,
+    request_approval: impl Fn(
+        &str,
+        Option<&AppTarget>,
+        &ControlGeneration,
+    ) -> Result<ComputerApproval, String>,
+    call_adapter: impl Fn(&str, Value) -> Result<Value, String>,
 ) -> Result<Value, String> {
-    let state = app_state::load()?;
-    let mode = access_mode(state.get("computer_use"))?;
+    access_mode(app_state::load()?.get("computer_use"))?;
     let session_id = request
         .get("session_id")
         .and_then(Value::as_str)
@@ -411,11 +525,55 @@ pub fn handle_local_call(
     let arguments = &request["arguments"];
     let action = action_name(arguments)?;
     let mut body = validate_arguments(action, arguments)?;
-    authorize_action(&state, mode, session_id, request_approval)?;
+    body["session_id"] = json!(session_id);
+
+    // Resolve only needs text for the app lookup. Key names and typed text
+    // travel exclusively in the final, authorized perform request.
+    let mut lookup = body.clone();
+    if action != "open_app" {
+        lookup
+            .as_object_mut()
+            .expect("validated request")
+            .remove("text");
+    }
+    let resolved = call_adapter(RESOLVE_OPERATION, lookup)?;
+    if resolved["ok"].as_bool() != Some(true) {
+        return Err(adapter_error(&resolved));
+    }
+    let resolution: Resolution = serde_json::from_value(resolved)
+        .map_err(|_| "The Mac app did not resolve the computer action")?;
+    let target = resolution.target.as_ref();
+    if has_app_target(action) != target.is_some()
+        || target.is_some_and(|app| !app.is_valid() || action != "open_app" && app.pid.is_none())
+    {
+        return Err("The Mac app did not identify the target app".into());
+    }
+    let control = ControlGeneration::new(resolution.control_generation.clone());
+    control.require_current()?;
+    session_artifacts::append_computer_action(
+        session_id,
+        &action_log_entry(action, &body, &resolution),
+    )?;
+    if let Some(app) = target {
+        safety::check_tier(action, app)?;
+    }
+    authorize_action(session_id, target, &control, &request_approval)?;
+    control.require_current()?;
+    let session = require_session(session_id)?;
+    access_mode(app_state::load()?.get("computer_use"))?;
     if action == "status" {
         return call_adapter(STATUS_OPERATION, json!({}));
     }
-    body["session_id"] = json!(session_id);
+
+    body["target"] = json!(target);
+    if let Some(point) = resolution.screen_coordinate {
+        body["screen_coordinate"] = json!(point);
+    }
+    if let Some(point) = resolution.screen_end_coordinate {
+        body["screen_end_coordinate"] = json!(point);
+    }
+    body["control_generation"] = json!(resolution.control_generation);
+    body["session_name"] = json!(session.session.label);
     let path = if takes_screenshot(action) {
         let path = session_artifacts::create_computer_screenshot_dir(session_id)?
             .join(screenshot_filename());
@@ -448,14 +606,25 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
             .ok_or("Mac app did not return a valid screenshot scale")?);
     }
     if action == "cursor_position" {
-        // A real cursor can be on a secondary display outside the capture.
-        let valid = result["coordinate"].as_array().is_some_and(|coordinate| {
-            coordinate.len() == 2 && coordinate.iter().all(|pixel| pixel.as_i64().is_some())
-        });
-        if !valid {
+        // Older adapters encoded these as CGFloat. Preserve signed pixels
+        // because the cursor can be outside the captured display.
+        let coordinate = result["coordinate"]
+            .as_array()
+            .filter(|values| values.len() == 2);
+        let normalize = |pixel: &Value| -> Option<i64> {
+            if let Some(integer) = pixel.as_i64() {
+                return Some(integer);
+            }
+            let rounded = pixel.as_f64()?.round();
+            (rounded >= i64::MIN as f64 && rounded < -(i64::MIN as f64)).then_some(rounded as i64)
+        };
+        let [x, y] = coordinate.map(Vec::as_slice).unwrap_or_default() else {
             return Err("Mac app did not return a valid cursor position".into());
-        }
-        metadata["coordinate"] = result["coordinate"].clone();
+        };
+        let (Some(x), Some(y)) = (normalize(x), normalize(y)) else {
+            return Err("Mac app did not return a valid cursor position".into());
+        };
+        metadata["coordinate"] = json!([x, y]);
     }
     Ok(metadata)
 }
@@ -732,6 +901,74 @@ mod tests {
         assert_ne!(first, second);
         for name in [first, second] {
             assert!(name.strip_suffix(".png").unwrap().parse::<u128>().is_ok());
+        }
+    }
+
+    #[test]
+    fn cursor_position_normalizes_fractional_pixels_from_older_adapters() {
+        let reply = json!({"ok": true, "coordinate": [-20.5, 30.49]});
+        assert_eq!(
+            perform_result("cursor_position", reply, None).unwrap()["coordinate"],
+            json!([-21, 30])
+        );
+        for coordinate in [json!([12]), json!([12, "3"]), json!([1e30, 2])] {
+            let reply = json!({"ok": true, "coordinate": coordinate});
+            assert!(perform_result("cursor_position", reply, None).is_err());
+        }
+    }
+
+    #[test]
+    fn action_log_records_only_the_length_of_typed_text() {
+        let secret = "secret 👋";
+        let body = json!({"text": secret, "coordinate": [1, 2]});
+        let resolution = Resolution {
+            target: Some(AppTarget {
+                name: "Notes".into(),
+                bundle_id: "com.apple.Notes".into(),
+                pid: Some(10),
+            }),
+            frontmost_app: None,
+            screen_coordinate: None,
+            screen_end_coordinate: None,
+            control_generation: "initial".into(),
+        };
+        let record = action_log_entry("type", &body, &resolution);
+        assert_eq!(record["text_length"], 8);
+        assert!(record["text"].is_null());
+        assert!(!record.to_string().contains(secret));
+        assert_eq!(record["coordinate"], json!([1, 2]));
+        assert_eq!(record["app"]["bundle_id"], "com.apple.Notes");
+    }
+
+    #[test]
+    fn app_input_requires_its_own_grant_in_both_enabled_modes() {
+        let app = AppTarget {
+            name: "Notes".into(),
+            bundle_id: "com.apple.Notes".into(),
+            pid: Some(1),
+        };
+        for mode in ["ask", "allow"] {
+            let mut state = json!({"computer_use": mode, "computer_approvals": ["session"]});
+            assert!(!approval_needed(&state, "session", None).unwrap());
+            assert!(approval_needed(&state, "session", Some(&app)).unwrap());
+            safety::remember(
+                state.as_object_mut().unwrap(),
+                "session",
+                Some(&app),
+                Decision::Deny,
+            )
+            .unwrap();
+            assert!(approval_needed(&state, "session", Some(&app)).is_err());
+            safety::remember(
+                state.as_object_mut().unwrap(),
+                "session",
+                Some(&app),
+                Decision::Allow,
+            )
+            .unwrap();
+            assert!(!approval_needed(&state, "session", Some(&app)).unwrap());
+            state["computer_use"] = json!("off");
+            assert!(approval_needed(&state, "session", Some(&app)).is_err());
         }
     }
 

@@ -1114,6 +1114,9 @@ pub struct AppState {
     /// carried across restarts like `mcp_write_approvals`.
     #[serde(default)]
     pub computer_approvals: Vec<String>,
+    /// Session-scoped app and screen access decisions for the native adapter.
+    #[serde(default)]
+    pub computer_app_approvals: BTreeMap<String, BTreeMap<String, String>>,
     /// App-wide Computer MCP engine options (app allowlist).
     #[serde(default)]
     pub computer_settings: ComputerSettings,
@@ -1222,6 +1225,7 @@ impl Default for AppState {
             computer_use: ComputerAccess::Off,
             computer_default_access: ComputerAccess::default(),
             computer_approvals: Vec::new(),
+            computer_app_approvals: BTreeMap::new(),
             computer_settings: ComputerSettings::default(),
             transcript_settings: TranscriptSettings::default(),
             menu_attention_detection: true,

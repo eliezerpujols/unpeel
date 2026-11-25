@@ -29,30 +29,37 @@ struct ComputerRequest: Equatable {
         case wait(Duration)
         case cursorPosition
         case openApp(String)
+        case status
 
         var needsAccessibility: Bool {
             switch self {
             case .click, .mouseMove, .drag, .leftMouseDown, .leftMouseUp, .type, .key, .scroll:
                 return true
-            case .screenshot, .zoom, .wait, .cursorPosition, .openApp:
+            case .screenshot, .zoom, .wait, .cursorPosition, .openApp, .status:
                 return false
             }
         }
     }
 
+    let name: String
     let sessionID: String
+    let sessionName: String?
+    let target: ComputerTarget?
+    let controlGeneration: String?
+    let screenPoint: CGPoint?
+    let screenEndPoint: CGPoint?
     let action: Action
     let screenshotPath: String?
 
-    static func parse(_ fields: [String: Any]) -> Result<Self, ComputerError> {
+    static func parse(_ fields: [String: Any], resolving: Bool = false) -> Result<Self, ComputerError> {
         do {
-            return .success(try Self(fields))
+            return .success(try Self(fields, resolving: resolving))
         } catch {
             return .failure(ComputerError(error.localizedDescription))
         }
     }
 
-    private init(_ fields: [String: Any]) throws {
+    private init(_ fields: [String: Any], resolving: Bool) throws {
         guard let session = fields["session_id"] as? String,
               !session.isEmpty, session.utf8.count <= 128,
               !session.contains("/"), !session.contains("\0"), session != ".", session != ".."
@@ -61,6 +68,16 @@ struct ComputerRequest: Equatable {
 
         guard let name = fields["action"] as? String else {
             throw ComputerError("An action is required.")
+        }
+        self.name = name
+        sessionName = fields["session_name"] as? String
+        controlGeneration = fields["control_generation"] as? String
+        screenPoint = try Self.resolvedPoint(fields, "screen_coordinate")
+        screenEndPoint = try Self.resolvedPoint(fields, "screen_end_coordinate")
+        if let raw = fields["target"], !(raw is NSNull) {
+            target = try JSONDecoder().decode(ComputerTarget.self, from: JSONSerialization.data(withJSONObject: raw, options: .fragmentsAllowed))
+        } else {
+            target = nil
         }
         let path: String?
         if let value = fields["screenshot_path"] {
@@ -73,7 +90,7 @@ struct ComputerRequest: Equatable {
 
         switch name {
         case "screenshot", "zoom":
-            guard path != nil else { throw ComputerError("\(name) requires screenshot_path.") }
+            guard resolving || path != nil else { throw ComputerError("\(name) requires screenshot_path.") }
             if name == "zoom" {
                 let values = try Self.pixels(fields["region"], count: 4, field: "region")
                 guard values[0] < values[2], values[1] < values[3] else {
@@ -102,10 +119,12 @@ struct ComputerRequest: Equatable {
         case "left_mouse_up":
             action = .leftMouseUp(try Self.optionalPoint(fields))
         case "type":
-            guard let text = fields["text"] as? String else { throw ComputerError("type requires text.") }
+            guard let text = resolving ? "" : fields["text"] as? String else {
+                throw ComputerError("type requires text.")
+            }
             action = .type(text)
         case "key", "hold_key":
-            guard let text = fields["text"] as? String else {
+            guard let text = resolving ? "space" : fields["text"] as? String else {
                 throw ComputerError("\(name) requires a key name in text.")
             }
             action = .key(try ComputerKey.parse(text), duration: name == "key" ? .zero : try Self.duration(fields))
@@ -119,6 +138,8 @@ struct ComputerRequest: Equatable {
             action = .scroll(direction, amount: amount, at: try Self.optionalPoint(fields))
         case "wait":
             action = .wait(try Self.duration(fields))
+        case "status" where resolving:
+            action = .status
         case "cursor_position":
             action = .cursorPosition
         case "open_app":
@@ -132,9 +153,17 @@ struct ComputerRequest: Equatable {
 
         // These actions never produce a screenshot, even if the caller supplies a path.
         switch action {
-        case .wait, .cursorPosition: screenshotPath = nil
+        case .wait, .cursorPosition, .status: screenshotPath = nil
         default: screenshotPath = path
         }
+    }
+
+    private static func resolvedPoint(_ fields: [String: Any], _ field: String) throws -> CGPoint? {
+        guard let raw = fields[field] else { return nil }
+        guard let pair = raw as? [Any], pair.count == 2,
+              let x = number(pair[0]), let y = number(pair[1])
+        else { throw ComputerError("Invalid resolved screen coordinate.") }
+        return CGPoint(x: x, y: y)
     }
 
     private static func point(_ fields: [String: Any], field: String = "coordinate") throws -> CGPoint {

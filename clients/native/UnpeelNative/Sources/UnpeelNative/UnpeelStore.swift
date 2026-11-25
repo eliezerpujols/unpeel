@@ -731,6 +731,7 @@ final class UnpeelStore: ObservableObject {
     var hostMcpApprovalAnswersInFlight: Set<String> = []
     /// The floating panel for the computer-permissions (TCC) nudge.
     let computerNudgePanel = FloatingPromptPanelController()
+    let computerAppApprovalPanel = FloatingPromptPanelController(preservesFocus: true)
     /// Missing-permission sets (sorted, "|"-joined) already alerted about this
     /// app run — the grant-prompt nudge fires once per distinct set.
 
@@ -2840,6 +2841,8 @@ final class UnpeelStore: ObservableObject {
                     } catch {
                         reply(500, #"{"error":"native thumbnail failed"}"#)
                     }
+                case let .success(.computerResolve(request)):
+                    reply(200, ComputerPlatformAdapter.shared.resolve(request))
                 case let .success(.computerPerform(request)):
                     reply(200, await ComputerPlatformAdapter.shared.perform(request))
                 case .success(.computerStatus):
@@ -2988,7 +2991,10 @@ final class UnpeelStore: ObservableObject {
                 guard let self else { return }
                 Self.sharedOrderCache = nil
                 Self.sharedProjectOrderCache = nil
-                _ = change
+                if change == ComputerControl.change {
+                    ComputerControl.shared.refresh()
+                    return
+                }
                 self.scheduleRescan(after: 0)
                 // The Host worker rescans on the same ping; wake this
                 // window's projection refresh too instead of waiting out

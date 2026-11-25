@@ -3,8 +3,11 @@ import Foundation
 
 @MainActor
 final class ComputerInput {
+    // Local approval and stop controls ignore events posted by this engine.
+    static let eventTag: Int64 = 0x554E_504C_4355
+
     private let source = CGEventSource(stateID: .privateState)
-    private var leftButtonDown = false
+    private var pendingLeftRelease: CGEvent?
 
     func cursorPosition() throws -> CGPoint {
         guard let position = CGEvent(source: nil)?.location else {
@@ -14,8 +17,9 @@ final class ComputerInput {
     }
 
     func move(to point: CGPoint) throws {
-        let event = try mouseEvent(leftButtonDown ? .leftMouseDragged : .mouseMoved, at: point)
+        let event = try mouseEvent(pendingLeftRelease != nil ? .leftMouseDragged : .mouseMoved, at: point)
         event.post(tap: .cghidEventTap)
+        pendingLeftRelease?.location = point
     }
 
     func click(_ button: CGMouseButton, count: Int, at point: CGPoint) throws {
@@ -35,29 +39,37 @@ final class ComputerInput {
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
-        if button == .left { leftButtonDown = false }
     }
 
-    func setLeftButton(down: Bool, at point: CGPoint?) throws {
-        let location = try point ?? cursorPosition()
-        let event = try mouseEvent(down ? .leftMouseDown : .leftMouseUp, at: location, clickCount: 1)
-        if point != nil { try move(to: location) }
-        event.post(tap: .cghidEventTap)
-        leftButtonDown = down
-    }
-
-    func drag(from start: CGPoint, to end: CGPoint) async throws {
-        let down = try mouseEvent(.leftMouseDown, at: start, clickCount: 1)
-        let up = try mouseEvent(.leftMouseUp, at: start, clickCount: 1)
-        try move(to: start)
+    func pressLeftButton(at point: CGPoint) throws {
+        let down = try mouseEvent(.leftMouseDown, at: point, clickCount: 1)
+        let up = try mouseEvent(.leftMouseUp, at: point, clickCount: 1)
+        try move(to: point)
         down.post(tap: .cghidEventTap)
-        leftButtonDown = true
-        // Release at the last point sent even if an event fails or the call is cancelled.
-        defer {
-            up.timestamp = DispatchTime.now().uptimeNanoseconds
-            up.post(tap: .cghidEventTap)
-            leftButtonDown = false
-        }
+        pendingLeftRelease = up
+    }
+
+    func liftLeftButton(at point: CGPoint) throws {
+        let event = try mouseEvent(.leftMouseUp, at: point, clickCount: 1)
+        try move(to: point)
+        event.post(tap: .cghidEventTap)
+        pendingLeftRelease = nil
+    }
+
+    func releaseLeftButton(to pid: pid_t) {
+        guard let release = pendingLeftRelease else { return }
+        pendingLeftRelease = nil
+        release.timestamp = DispatchTime.now().uptimeNanoseconds
+        // Cancellation must release the button without clicking whichever
+        // app may now occupy the last point.
+        release.postToPid(pid)
+    }
+
+    func drag(
+        from start: CGPoint, to end: CGPoint, pid: pid_t, checkPoint: (CGPoint) throws -> Void
+    ) async throws {
+        try pressLeftButton(at: start)
+        defer { releaseLeftButton(to: pid) }
         for step in 1...10 {
             try await Task.sleep(for: .milliseconds(16))
             let fraction = CGFloat(step) / 10
@@ -65,12 +77,13 @@ final class ComputerInput {
                 x: start.x + (end.x - start.x) * fraction,
                 y: start.y + (end.y - start.y) * fraction
             )
+            try checkPoint(point)
             try move(to: point)
-            up.location = point
         }
+        try liftLeftButton(at: end)
     }
 
-    func scroll(_ direction: ComputerRequest.ScrollDirection, amount: Int32, at point: CGPoint?) throws {
+    func scroll(_ direction: ComputerRequest.ScrollDirection, amount: Int32, at point: CGPoint) throws {
         let delta: (vertical: Int32, horizontal: Int32)
         switch direction {
         case .up: delta = (amount, 0)
@@ -82,14 +95,13 @@ final class ComputerInput {
             scrollWheelEvent2Source: source, units: .line, wheelCount: 2,
             wheel1: delta.vertical, wheel2: delta.horizontal, wheel3: 0
         ) else { throw ComputerError("Could not create a scroll event.") }
-        if let point {
-            try move(to: point)
-            event.location = point
-        }
+        event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+        try move(to: point)
+        event.location = point
         event.post(tap: .cghidEventTap)
     }
 
-    func key(_ key: ComputerKey, duration: Duration) async throws {
+    func key(_ key: ComputerKey, duration: Duration, to pid: pid_t) async throws {
         let (down, up) = try keyboardEvents(key.code)
         down.flags = key.modifiers
         up.flags = key.modifiers
@@ -98,25 +110,25 @@ final class ComputerInput {
             up.type = .flagsChanged
             down.flags.insert(modifier)
         }
-        down.post(tap: .cghidEventTap)
+        down.postToPid(pid)
         defer {
             up.timestamp = DispatchTime.now().uptimeNanoseconds
-            up.post(tap: .cghidEventTap)
+            up.postToPid(pid)
         }
         if duration > .zero { try await Task.sleep(for: duration) }
     }
 
-    func type(_ text: String) async throws {
+    func type(_ text: String, to pid: pid_t, checkFocus: () throws -> Void) async throws {
         var chunks = ComputerUnicodeChunks(text)
         while let chunk = chunks.next() {
-            try Task.checkCancellation()
+            try checkFocus()
             let (down, up) = try keyboardEvents(0)
             chunk.withUnsafeBufferPointer { units in
                 down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
                 up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
             }
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            down.postToPid(pid)
+            up.postToPid(pid)
             await Task.yield()
         }
     }
@@ -126,6 +138,7 @@ final class ComputerInput {
     ) throws -> CGEvent {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button)
         else { throw ComputerError("Could not create a mouse event.") }
+        event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
         return event
     }

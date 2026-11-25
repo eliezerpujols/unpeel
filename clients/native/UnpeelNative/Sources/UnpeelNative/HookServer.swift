@@ -66,6 +66,7 @@ enum PlatformAdapterCall: Equatable {
     case presentApprovals([PlatformPresentedApproval])
     case openInEditor(path: String)
     case thumbnail(query: [String: String])
+    case computerResolve(Result<ComputerRequest, ComputerError>)
     case computerPerform(Result<ComputerRequest, ComputerError>)
     case computerStatus
     case computerApps
@@ -554,6 +555,8 @@ final class HookServer: @unchecked Sendable {
                 }
             }
             return .success(.thumbnail(query: query))
+        case ComputerPlatformAdapter.Operation.resolve.rawValue:
+            return .success(.computerResolve(ComputerRequest.parse(request, resolving: true)))
         case ComputerPlatformAdapter.Operation.perform.rawValue:
             return .success(.computerPerform(ComputerRequest.parse(request)))
         case ComputerPlatformAdapter.Operation.status.rawValue:
