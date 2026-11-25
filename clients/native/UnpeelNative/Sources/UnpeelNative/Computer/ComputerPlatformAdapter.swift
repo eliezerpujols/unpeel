@@ -93,6 +93,7 @@ final class ComputerPlatformAdapter {
         var window: ComputerWindow?
         var windows: [ComputerWindow]?
         var screenshotWarning: String?
+        var deliveredVia: ComputerClickMethod?
         var axTree: String?
         var coordinate: [Int]?
         var frontmostApp: ComputerApps.App?
@@ -102,6 +103,7 @@ final class ComputerPlatformAdapter {
             case axTree = "ax_tree"
             case screenshotPath = "screenshot_path"
             case screenshotWarning = "screenshot_warning"
+            case deliveredVia = "delivered_via"
             case frontmostApp = "frontmost_app"
         }
     }
@@ -237,7 +239,7 @@ final class ComputerPlatformAdapter {
                     targetPoint: recipient.points?.start
                 )
                 control.show(activity)
-                try await post(request, to: recipient, generation: generation, activity: activity)
+                response.deliveredVia = try await post(request, to: recipient, generation: generation, activity: activity)
             }
         } else {
             guard request.target == nil else { throw ComputerError("The computer action target changed.") }
@@ -386,7 +388,7 @@ final class ComputerPlatformAdapter {
 
     private func post(
         _ request: ComputerRequest, to recipient: Recipient, generation: String, activity: ComputerControl.Activity
-    ) async throws {
+    ) async throws -> ComputerClickMethod? {
         func check(_ actual: ComputerTarget) throws {
             try control.requireRunning(generation: generation)
             try ComputerAppTier.require(request.name, in: actual, unrestricted: request.unrestricted)
@@ -394,6 +396,7 @@ final class ComputerPlatformAdapter {
                 throw ComputerError("The target app changed. Bring the app into view and retry the action.")
             }
         }
+        var method: ComputerClickMethod?
         switch recipient {
         case let .launch(launch):
             try check(launch.target)
@@ -408,9 +411,22 @@ final class ComputerPlatformAdapter {
             guard ComputerAXTree.contains(element, in: liveWindow) else {
                 throw ComputerError("The element is no longer in this window. Call get_app_state again.")
             }
-            try check(try ComputerTargetLookup.keyboard(app: action.app))
+            func checkElement() throws {
+                let current = try ComputerTargetLookup.keyboard(app: action.app)
+                try check(current)
+                try authorize(request, target: current)
+            }
+            try checkElement()
             let bounds = ComputerAXTree.bounds(of: element)?.intersection(liveWindow.bounds)
-            try ComputerAXActions.perform(action.operation, on: element, in: pid)
+            if action.operation == .press || action.operation == .perform(kAXPressAction) {
+                method = try await ComputerWebClick.press(
+                    action.operation, element: element, window: liveWindow, check: checkElement
+                ) { point, delivery in
+                    try input.click(.left, count: 1, at: point, delivery: delivery, windowScoped: true)
+                }
+            } else {
+                try ComputerAXActions.perform(action.operation, on: element, in: pid)
+            }
             if let bounds, !bounds.isEmpty {
                 let point = CGPoint(x: bounds.midX, y: bounds.midY)
                 cursorPoints[request.sessionID] = point
@@ -435,13 +451,14 @@ final class ComputerPlatformAdapter {
             guard actual.window == target.window else {
                 throw ComputerError("The window under the point changed. Take a new screenshot and retry.")
             }
-            try await postPointer(
+            method = try await postPointer(
                 request, target: actual, point: point, end: end, activity: activity, checkPoint: checkPoint
             )
             cursorPoints[request.sessionID] = end ?? point
             ghost.show(at: end ?? point, over: target.window?.id)
         }
         try control.requireRunning(generation: generation)
+        return method
     }
 
     private func pointer(at point: CGPoint, session: String) throws -> ComputerPointerTarget {
@@ -451,7 +468,7 @@ final class ComputerPlatformAdapter {
     private func postPointer(
         _ request: ComputerRequest, target: ComputerPointerTarget, point: CGPoint, end: CGPoint?,
         activity: ComputerControl.Activity, checkPoint: (CGPoint) throws -> Void
-    ) async throws {
+    ) async throws -> ComputerClickMethod? {
         let delivery = target.delivery
         switch request.action {
         case .mouseMove:
@@ -476,26 +493,48 @@ final class ComputerPlatformAdapter {
             default: break
             }
         case let .click(button, count, _):
-            let candidate = target.hit.map {
+            let simpleLeft = button == .left && count == 1
+            let captured = frames[request.sessionID]?.window.flatMap {
+                $0.id == target.window?.id && $0.app.matches(target.app) ? $0 : nil
+            }
+            let capturedDelivery = simpleLeft ? captured.flatMap { window in
+                window.app.pid.map { ComputerPointerDelivery(pid: $0, window: .init(id: window.id, bounds: window.bounds)) }
+            } : nil
+            func clickCandidate(_ hit: ComputerAccessibility.Hit) -> ComputerAccessibility.ClickCandidate<AXUIElement> {
                 ComputerAccessibility.clickCandidate(
-                    at: $0, allowsAXAction: button == .left && count == 1,
+                    at: hit, allowsAXAction: simpleLeft,
                     isTextEdit: target.app.bundleID.caseInsensitiveCompare("com.apple.TextEdit") == .orderedSame
                 )
+            }
+            var candidate = target.hit.map(clickCandidate)
+            if simpleLeft, target.usesBrowserEngine, candidate?.action == nil, candidate?.isDisabled != true,
+               let captured, let hit = ComputerAXTree.clickHit(at: point, in: captured) {
+                candidate = clickCandidate(hit)
             }
             let isForeground = NSWorkspace.shared.frontmostApplication?.processIdentifier == target.app.pid
             try Task.checkCancellation()
             switch ComputerClickRoute(
                 candidate: candidate, delivery: delivery, usesBrowserEngine: target.usesBrowserEngine,
-                isForeground: isForeground
+                isForeground: isForeground, capturedDelivery: capturedDelivery
             ) {
+            case let .accessibility(.press(element)) where captured != nil:
+                guard let captured else { break }
+                return try await ComputerWebClick.press(.perform(kAXPressAction), element: element, window: captured, check: {
+                    try checkPoint(point)
+                    try authorize(request, target: target.app)
+                }) { center, delivery in
+                    try input.click(.left, count: 1, at: center, delivery: delivery, windowScoped: true)
+                }
             case let .accessibility(click):
                 // AX can time out after dispatch. Never send a second click.
                 let result = ComputerAccessibility.perform(click)
                 guard result == .success else {
                     throw ComputerError("Accessibility could not confirm the click in \(target.app.name). Check the app before retrying.")
                 }
+                if case .press = click { return .axPress }
             case let .process(delivery):
-                try input.click(button, count: count, at: point, delivery: delivery)
+                try input.click(button, count: count, at: point, delivery: delivery, windowScoped: captured != nil)
+                return .pidClick
             case .unavailable:
                 if !isForeground {
                     throw ComputerError("This click needs the app in front. Bring \(target.app.name) forward manually and retry.")
@@ -509,6 +548,7 @@ final class ComputerPlatformAdapter {
             try input.scroll(direction, amount: amount, at: point, delivery: delivery)
         default: break
         }
+        return nil
     }
 
     private func cursorPoint(for sessionID: String) throws -> CGPoint {

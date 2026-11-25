@@ -94,7 +94,7 @@ enum ComputerAXTree {
     struct Capture {
         let text: String
         let elements: [AXUIElement]
-        fileprivate let includesWebArea: Bool
+        let includesWebArea: Bool
     }
 
     private static let maximumNodes = 180
@@ -130,7 +130,7 @@ enum ComputerAXTree {
         return tree
     }
 
-    private static func read(window: ComputerWindow, firstID: Int) throws -> Capture {
+    static func read(window: ComputerWindow, firstID: Int) throws -> Capture {
         guard firstID <= Int(Int32.max) - maximumNodes else {
             throw ComputerError("Accessibility element IDs have been exhausted. Restart Unpeel to start a new capture.")
         }
@@ -179,6 +179,33 @@ enum ComputerAXTree {
         guard !elements.isEmpty else { throw ComputerError("Could not read this window’s Accessibility tree.") }
         if truncated { lines.append("… Accessibility tree truncated.") }
         return Capture(text: lines.joined(separator: "\n"), elements: elements, includesWebArea: includesWebArea)
+    }
+
+    /// Scoped fallback when the system hit test ignores an occluded window.
+    static func clickHit(at point: CGPoint, in window: ComputerWindow) -> ComputerAccessibility.Hit? {
+        guard let pid = window.app.pid, let root = try? windowElement(for: window) else { return nil }
+        var remaining = 250
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(400))
+        func hit(_ element: AXUIElement, depth: Int) -> ComputerAccessibility.Hit? {
+            guard depth < 24, remaining > 0, clock.now < deadline,
+                  ComputerAccessibility.pid(of: element) == pid else { return nil }
+            remaining -= 1
+            let frame = bounds(of: element)
+            if let frame, !frame.contains(point) { return nil }
+            var children: CFArray?
+            if AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, remaining, &children) == .success,
+               let list = children as? [AXUIElement] {
+                for child in list {
+                    if let candidate = hit(child, depth: depth + 1) { return candidate }
+                }
+            }
+            guard frame != nil else { return nil }
+            let result = ComputerAccessibility.Hit(element: element, pid: pid, role: ComputerAccessibility.role(of: element))
+            let candidate = ComputerAccessibility.clickCandidate(at: result, allowsAXAction: true, isTextEdit: false)
+            return candidate.action != nil || candidate.isDisabled ? result : nil
+        }
+        return hit(root, depth: 0)
     }
 
     static func windowElement(for window: ComputerWindow) throws -> AXUIElement {

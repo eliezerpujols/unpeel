@@ -213,6 +213,9 @@ state after navigation or a UI change.
 
 - `press` and `click` invoke a control's default press action. `set_value`
   replaces the text of a writable control. `focus` sets focus within that app.
+  If a web press leaves the observed state unchanged, the tool may post a
+  click to the same window and control. Click results report the dispatched
+  method in `delivered_via` when available.
 - `scroll` with `app` and `element` uses the Accessibility scroll control.
   Pass `scroll_direction` and `scroll_amount` from 1 to 20 steps.
 - `perform_action` takes `ax_action`, such as `AXShowMenu`. Actions that raise

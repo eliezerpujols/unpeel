@@ -783,6 +783,9 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
         return Err(adapter_error(&result));
     }
     let mut metadata = json!({ "ok": true, "frontmost_app": result["frontmost_app"] });
+    if let Some(method @ ("ax_press" | "pid_click")) = result["delivered_via"].as_str() {
+        metadata["delivered_via"] = json!(method);
+    }
     if let Some(path) = path {
         if result["screenshot_path"].as_str() != path.to_str() {
             return Err("Mac app did not return the requested screenshot".into());
@@ -1040,6 +1043,19 @@ mod tests {
         assert!(!takes_screenshot("press", &fixture["valid"][3]));
         assert!(!takes_screenshot("scroll", &fixture["valid"][7]));
         assert!(takes_screenshot("scroll", &json!({"coordinate": [1, 1]})));
+    }
+
+    #[test]
+    fn click_delivery_metadata_is_forwarded_for_ax_and_process_input() {
+        for method in ["ax_press", "pid_click", "unknown"] {
+            let result =
+                perform_result("press", json!({"ok": true, "delivered_via": method}), None)
+                    .unwrap();
+            assert_eq!(
+                result["delivered_via"].as_str(),
+                (method != "unknown").then_some(method)
+            );
+        }
     }
 
     #[test]

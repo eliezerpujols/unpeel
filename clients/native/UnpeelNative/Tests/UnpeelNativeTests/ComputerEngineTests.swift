@@ -130,11 +130,13 @@ final class ComputerEngineTests: XCTestCase {
         let delivery = ComputerPointerDelivery(pid: 42, window: window)
         func route(
             _ action: ComputerAccessibility.Click<Int>? = nil, hasWindow: Bool = true,
-            browser: Bool = false, backgroundEvents: Bool = true, foreground: Bool = false
+            browser: Bool = false, backgroundEvents: Bool = true, foreground: Bool = false,
+            captured: Bool = false, disabled: Bool = false
         ) -> ComputerClickRoute<Int> {
             ComputerClickRoute(
-                candidate: .init(action: action, acceptsBackgroundEvents: backgroundEvents),
-                delivery: hasWindow ? delivery : nil, usesBrowserEngine: browser, isForeground: foreground
+                candidate: .init(action: action, acceptsBackgroundEvents: backgroundEvents, isDisabled: disabled),
+                delivery: hasWindow ? delivery : nil, usesBrowserEngine: browser, isForeground: foreground,
+                capturedDelivery: captured ? delivery : nil
             )
         }
         XCTAssertEqual(route(.press(1), browser: true), .accessibility(.press(1)))
@@ -145,6 +147,9 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertEqual(route(browser: true), .unavailable)
         XCTAssertEqual(route(backgroundEvents: false), .unavailable)
         XCTAssertEqual(route(hasWindow: false), .unavailable)
+        XCTAssertEqual(route(hasWindow: false, browser: true, captured: true), .process(delivery))
+        XCTAssertEqual(route(.press(1), hasWindow: false, browser: true, captured: true), .accessibility(.press(1)))
+        XCTAssertEqual(route(hasWindow: false, browser: true, captured: true, disabled: true), .unavailable)
     }
 
     @MainActor
@@ -162,6 +167,23 @@ final class ComputerEngineTests: XCTestCase {
             CGPoint(x: -700, y: 20), in: window, screenTop: 1117
         )
         XCTAssertEqual(location, CGPoint(x: 100, y: 1057))
+        XCTAssertEqual(window.appKitLocation(of: CGPoint(x: -700, y: 20)), CGPoint(x: 100, y: 300))
+    }
+
+    @MainActor
+    func testWebPressFallbackRequiresTwoStableObservations() async throws {
+        func unchanged(_ states: [String?]) async throws -> Bool {
+            var pending = states
+            return try await ComputerWebClick.showsNoEffect(
+                before: "initial", observe: { pending.removeFirst() }, pause: { _ in }
+            )
+        }
+        let noEffect = try await unchanged(["initial", "initial"])
+        let delayedEffect = try await unchanged(["initial", "updated"])
+        let unknown = try await unchanged([nil])
+        XCTAssertTrue(noEffect)
+        XCTAssertFalse(delayedEffect)
+        XCTAssertFalse(unknown)
     }
 
     func testWindowAndElementRequestsMatchTheDesktopProtocol() throws {

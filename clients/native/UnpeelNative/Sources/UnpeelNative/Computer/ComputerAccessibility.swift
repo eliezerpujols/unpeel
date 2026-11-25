@@ -17,6 +17,7 @@ enum ComputerAccessibility {
     struct ClickCandidate<Element> {
         var action: Click<Element>?
         var acceptsBackgroundEvents = true
+        var isDisabled = false
     }
 
     private static let desktop = {
@@ -66,6 +67,7 @@ enum ComputerAccessibility {
             }
             guard isEnabled(element) else {
                 candidate.acceptsBackgroundEvents = false
+                candidate.isDisabled = true
                 break
             }
             if allowsAXAction {
@@ -102,6 +104,19 @@ enum ComputerAccessibility {
 
     static func parent(of element: AXUIElement, in pid: pid_t) -> AXUIElement? {
         elementAttribute(kAXParentAttribute, of: element, in: pid)
+    }
+
+    static func webArea(containing element: AXUIElement, in pid: pid_t) -> AXUIElement? {
+        var current: AXUIElement? = element
+        for _ in 0..<24 {
+            guard let node = current else { break }
+            switch role(of: node) {
+            case "AXWebArea": return node
+            case kAXWindowRole, kAXApplicationRole: return nil
+            default: current = parent(of: node, in: pid)
+            }
+        }
+        return nil
     }
 
     static func elementAttribute(_ name: String, of element: AXUIElement, in pid: pid_t) -> AXUIElement? {

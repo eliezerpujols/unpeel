@@ -31,7 +31,9 @@ final class ComputerInput {
         pendingLeftRelease?.point = point
     }
 
-    func click(_ button: CGMouseButton, count: Int, at point: CGPoint, delivery: ComputerPointerDelivery) throws {
+    func click(
+        _ button: CGMouseButton, count: Int, at point: CGPoint, delivery: ComputerPointerDelivery, windowScoped: Bool = false
+    ) throws {
         let types: (down: NSEvent.EventType, up: NSEvent.EventType)
         switch button {
         case .left: types = (.leftMouseDown, .leftMouseUp)
@@ -40,8 +42,14 @@ final class ComputerInput {
         }
         let clicks = try (1...count).map { index in
             let number = nextMouseNumber()
-            let down = try mouseEvent(types.down, at: point, delivery: delivery, number: number, button: button, clickCount: index)
-            let up = try mouseEvent(types.up, at: point, delivery: delivery, number: number, button: button, clickCount: index)
+            let down = try mouseEvent(
+                types.down, at: point, delivery: delivery, number: number,
+                button: button, clickCount: index, windowScoped: windowScoped
+            )
+            let up = try mouseEvent(
+                types.up, at: point, delivery: delivery, number: number,
+                button: button, clickCount: index, windowScoped: windowScoped
+            )
             return (down, up)
         }
         for (down, up) in clicks {
@@ -158,11 +166,12 @@ final class ComputerInput {
 
     private func mouseEvent(
         _ type: NSEvent.EventType, at point: CGPoint, delivery: ComputerPointerDelivery,
-        number: Int, button: CGMouseButton = .left, clickCount: Int = 0
+        number: Int, button: CGMouseButton = .left, clickCount: Int = 0, windowScoped: Bool = false
     ) throws -> CGEvent {
-        let location = ComputerPointerDelivery.windowMouseLocation(
-            point, in: delivery.window, screenTop: CGDisplayBounds(CGMainDisplayID()).maxY
-        )
+        let location = windowScoped ? delivery.window.appKitLocation(of: point) :
+            ComputerPointerDelivery.windowMouseLocation(
+                point, in: delivery.window, screenTop: CGDisplayBounds(CGMainDisplayID()).maxY
+            )
         let isDown = [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged].contains(type)
         guard let event = NSEvent.mouseEvent(
             with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -172,6 +181,7 @@ final class ComputerInput {
         event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         // A previous shortcut must not turn a plain click into a Command-click.
         event.flags = []
+        if windowScoped { try delivery.setScopedLocation(event, at: point) }
         event.setIntegerValueField(.mouseEventNumber, value: Int64(number))
         event.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
