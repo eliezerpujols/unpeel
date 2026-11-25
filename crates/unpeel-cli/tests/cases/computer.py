@@ -30,94 +30,111 @@ def large_png():
     return PNG[:-12] + struct.pack(">I", len(data)) + chunk + struct.pack(">I", zlib.crc32(chunk)) + PNG[-12:]
 
 
-def exercise_approvals(case, mcp, session_id, client, calls, phone_port, token):
+def exercise_approvals(case, mcp, session_id, client, calls, phone_port, token, select_app):
     home = case.home
-    home.write_state({**home.state(), "computer_use": "ask"})
+    pause_file = Path(home.path("computer-control.json"))
 
-    def resolve(choice, answer, turn_off=False):
-        count = len(calls)
+    def dispatches():
+        return sum(call["operation"] == "computer.perform" for call in calls)
+
+    def begin(arguments):
         result = {}
-
-        def ask():
-            result.update(mcp.call("computer", {"action": "cursor_position"}))
-
-        thread = threading.Thread(target=ask, daemon=True)
+        thread = threading.Thread(target=lambda: result.update(mcp.call("computer", arguments)), daemon=True)
         thread.start()
-        pending = None
         deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and thread.is_alive():
             status, boot = mobile_request(phone_port, "/mobile/bootstrap", token)
-            pending = next(iter(boot.get("pendingApprovals", [])), None) if status == 200 else None
-            if pending or not thread.is_alive():
-                break
-            time.sleep(0.1)
-        case.check(
-            f"{choice}: phone sees a computer approval before the adapter runs",
-            pending is not None and pending["kind"] == "computer"
-            and pending["callerSessionID"] == session_id and pending.get("allowsOnce") is True
-            and len(calls) == count, str(pending or result),
-        )
-        if pending is None:
-            return None
+            if status == 200 and boot.get("pendingApprovals"):
+                return thread, result, boot["pendingApprovals"][0]
+            time.sleep(0.05)
+        return thread, result, None
+
+    for choice, app_name, bundle_id, answer in [
+        ("Deny", "Mail", "com.apple.mail", {"approved": False}),
+        ("Allow", "Calendar", "com.apple.iCal", {"approved": True}),
+        ("Stop", "Reminders", "com.apple.reminders", None),
+    ]:
+        select_app({"name": app_name, "bundle_id": bundle_id})
+        before = dispatches()
+        arguments = {"action": "type", "text": "a private message"}
+        thread, result, pending = begin(arguments)
+        if not case.check(f"{choice}: phone sees the app-specific approval before input",
+                          pending is not None and pending["kind"] == "computer"
+                          and pending["callerSessionID"] == session_id
+                          and app_name in pending["title"] and not pending.get("allowsOnce")
+                          and dispatches() == before, str(pending or result)):
+            return
         _, local = client.call(4, "GET", "/mobile/bootstrap")
         case.check(f"{choice}: the local Controller sees the same prompt",
                    pending in local.get("pendingApprovals", []), str(local.get("pendingApprovals")))
-        if choice == "Allow once":
-            _, concurrent = client.call(5, "POST", "/_unpeel/computer", body={
-                "session_id": session_id, "arguments": {"action": "cursor_position"},
-            })
-            case.check("another action cannot use the pending one-time answer",
-                       concurrent.get("ok") is False
-                       and "already has a computer access approval pending" in concurrent.get("error", "")
-                       and len(calls) == count, str(concurrent))
-        if turn_off:
-            home.write_state({**home.state(), "computer_use": "off"})
-        status, response = mobile_request(
-            phone_port, "/mobile/approvals/answer", token, method="POST",
-            body={"id": pending["id"], **answer},
-        )
-        thread.join(timeout=10)
-        case.check(
-            f"{choice}: phone answer resolves the pending MCP call",
-            status == 200 and not thread.is_alive() and "result" in result,
-            str((response, result)),
-        )
-        if "result" not in result:
-            return None
-        return result, len(calls) - count
-
-    for choice, answer, turn_off, expected in [
-        ("Deny", {"approved": False}, False, "denied computer access"),
-        ("Allow once", {"approved": True, "remember": False}, False, None),
-        ("Off while pending", {"approved": True}, True, OFF),
-        ("Allow for this session", {"approved": True}, False, None),
-    ]:
-        outcome = resolve(choice, answer, turn_off)
-        if outcome is None:
-            return
-        result, adapter_calls = outcome
-        if expected:
-            case.check(f"{choice}: blocks the action",
-                       result["result"]["isError"] and expected in mcp.text(result)
-                       and adapter_calls == 0, str(result))
+        case.check(f"{choice}: target resolution does not receive the typed text",
+                   calls[-1]["operation"] == "computer.resolve"
+                   and arguments["text"] not in json.dumps(calls[-1]["request"]), str(calls[-1]))
+        if answer is None:
+            pause_file.write_text(json.dumps({"paused": True, "generation": "stopped"}))
         else:
-            case.check(f"{choice}: runs just the pending action",
-                       not result["result"]["isError"] and adapter_calls == 1, str(result))
-        remembered = home.state().get("computer_approvals", [])
-        case.check(f"{choice}: only a session grant is remembered",
-                   remembered == ([session_id] if choice == "Allow for this session" else []),
-                   str(remembered))
-        if turn_off:
-            home.write_state({**home.state(), "computer_use": "ask"})
+            status, response = mobile_request(
+                phone_port, "/mobile/approvals/answer", token, method="POST",
+                body={"id": pending["id"], **answer},
+            )
+            case.check(f"{choice}: phone answer accepted", status == 200, str(response))
+        thread.join(timeout=8)
+        if not case.check(f"{choice}: pending MCP call completed", not thread.is_alive() and "result" in result, str(result)):
+            return
+        decisions = home.state()["computer_app_approvals"][session_id]
+        if choice == "Allow":
+            case.check("session grant dispatches input", not result["result"]["isError"]
+                       and dispatches() == before + 1 and decisions[bundle_id.lower()] == "allow", str(result))
+            again = mcp.call("computer", arguments)
+            case.check("previously granted app skips the next prompt",
+                       not again["result"]["isError"] and dispatches() == before + 2, str(again))
+        elif choice == "Deny":
+            again = mcp.call("computer", arguments)
+            case.check("denial blocks the current and next action in this app",
+                       result["result"]["isError"] and again["result"]["isError"]
+                       and "denied access to Mail" in mcp.text(again)
+                       and decisions[bundle_id] == "deny" and dispatches() == before, str(again))
+        else:
+            case.check("stop cancels a pending approval before dispatch",
+                       result["result"]["isError"] and "paused" in mcp.text(result)
+                       and bundle_id not in decisions and dispatches() == before, str(result))
+            pause_file.write_text(json.dumps({"paused": False, "generation": "resumed"}))
 
-    reply = mcp.call("computer", {"action": "cursor_position"})
-    case.check("a remembered session grant skips the next prompt",
-               not reply["result"]["isError"] and json.loads(mcp.text(reply))["coordinate"] == [10, 20],
-               str(reply))
+    home.write_state({**home.state(), "computer_use": "ask"})
+    arguments = {"action": "cursor_position"}
+    before = dispatches()
+    for remember in [False, True]:
+        thread, result, pending = begin(arguments)
+        if not case.check("Ask prompts before screen access",
+                          pending is not None and pending.get("allowsOnce") is True and dispatches() == before,
+                          str(pending or result)):
+            return
+        status, _ = mobile_request(phone_port, "/mobile/approvals/answer", token, method="POST",
+                                   body={"id": pending["id"], "approved": True, "remember": remember})
+        thread.join(timeout=8)
+        before += 1
+        decision = home.state()["computer_app_approvals"][session_id].get("@desktop")
+        case.check("screen approval honors Allow once and Allow for this session",
+                   status == 200 and not thread.is_alive() and not result.get("result", {}).get("isError", True)
+                   and dispatches() == before and decision == ("allow" if remember else None), str(result))
+    reply = mcp.call("computer", arguments)
+    case.check("the screen grant skips the next prompt",
+               not reply["result"]["isError"] and json.loads(mcp.text(reply))["coordinate"] == [10, 20], str(reply))
+
+    log = Path(home.path("app-sessions", session_id, "artifacts", "computer", "actions.jsonl")).read_text()
+    typed = [entry for entry in map(json.loads, log.splitlines()) if entry["action"] == "type"]
+    case.check("the action log stores the app and text length without typed text",
+               any(entry["app"]["name"] == "Calendar" and entry["text_length"] == 17 for entry in typed)
+               and "a private message" not in log, str(typed))
 
 
 def exercise_adapter(case, mcp, session_id, client, phone_port, token):
     calls = []
+    target = FRONTMOST_APP
+
+    def select_app(app):
+        nonlocal target
+        target = app
 
     class Callback(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -134,8 +151,15 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
             value = {"ok": True, "frontmost_app": FRONTMOST_APP}
             if envelope["operation"] == "computer.status":
                 value.update(screen_recording=True, accessibility=True)
+            elif envelope["operation"] == "computer.resolve":
+                control = Path(case.home.path("computer-control.json"))
+                value["control_generation"] = json.loads(control.read_text())["generation"] if control.exists() else "initial"
+                if args["action"] in {"left_click", "type"}:
+                    value["target"] = {**target, "pid": 42}
+                if "coordinate" in args:
+                    value["screen_coordinate"] = args["coordinate"]
             elif args["action"] == "cursor_position":
-                value["coordinate"] = [10, 20]
+                value["coordinate"] = [10.1, 19.5]
             elif args["action"] == "wait":
                 time.sleep(args["duration"])
             else:
@@ -159,7 +183,7 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                     "instanceID": "test-mac-adapter",
                     "callbackPort": callback.server_port,
                     "callbackToken": TOKEN,
-                    "capabilities": ["computer.apps", "computer.status", "computer.perform"],
+                    "capabilities": ["computer.apps", "computer.status", "computer.resolve", "computer.perform"],
                 }},
             )
             case.check("callback registration accepted", code == 200, str(registration))
@@ -172,11 +196,27 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                 "version": 1, "operation": "computer.status", "request": {}
             }, str(calls[-1]))
 
+            select_app({"name": "Safari", "bundle_id": "com.apple.Safari"})
+            reply = mcp.call("computer", {"action": "left_click", "coordinate": [0, 1]})
+            case.check("browser clicks are rejected before dispatch",
+                       reply["result"]["isError"] and "Unpeel browser tool" in mcp.text(reply)
+                       and calls[-1]["operation"] == "computer.resolve", str(reply))
+            select_app({"name": "Terminal", "bundle_id": "com.apple.Terminal"})
+            reply = mcp.call("computer", {"action": "type", "text": "disallowed"})
+            case.check("terminal typing is rejected before dispatch",
+                       reply["result"]["isError"] and "left-click and scroll" in mcp.text(reply)
+                       and calls[-1]["operation"] == "computer.resolve", str(reply))
+            select_app(FRONTMOST_APP)
+            case.home.write_state({**case.home.state(), "computer_app_approvals": {
+                session_id: {"com.apple.notes": "allow"}
+            }})
+
             reply = mcp.call("computer", {
                 "action": "left_click", "coordinate": [0, 1],
                 "start_coordinate": [10, 20], "text": "extraneous",
                 "session_id": "injected", "operation": "computer.status",
-                "screenshot_path": "/injected.png",
+                "screenshot_path": "/injected.png", "target": {"bundle_id": "fake.app"},
+                "screen_coordinate": [400, 500], "control_generation": "fake",
             })
             result = reply["result"]
             content = result["content"]
@@ -194,7 +234,10 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
             case.check("adapter receives only action fields and Host-owned values", calls[-1] == {
                 "version": 1, "operation": "computer.perform",
                 "request": {"action": "left_click", "coordinate": [0, 1],
-                            "session_id": session_id, "screenshot_path": str(path)},
+                            "session_id": session_id, "screenshot_path": str(path),
+                            "session_name": calls[-1]["request"]["session_name"],
+                            "target": {**FRONTMOST_APP, "pid": 42}, "screen_coordinate": [0, 1],
+                            "control_generation": "initial"},
             }, str(calls[-1]))
 
             code, listing = client.call(2, "GET", "/mobile/artifacts", query={"session_id": session_id})
@@ -218,7 +261,7 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                        not reply["result"]["isError"] and "screenshot_path" not in calls[-1]["request"],
                        str(reply))
 
-            exercise_approvals(case, mcp, session_id, client, calls, phone_port, token)
+            exercise_approvals(case, mcp, session_id, client, calls, phone_port, token, select_app)
 
             # The same-user Host route enforces policy independently of stdio.
             case.home.write_state({**case.home.state(), "computer_use": "off"})

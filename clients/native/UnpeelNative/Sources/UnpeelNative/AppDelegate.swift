@@ -115,6 +115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
         // self-tests' throwaway stores never register event monitors.
         store.installSessionShortcutMonitors()
         // System-wide palette shortcut (Settings ▸ Appearance ▸ Global shortcut).
+        ComputerControl.shared.start(ownPort: hookServer?.port) { [weak store] in
+            store?.pendingMcpApprovals.isEmpty == false
+        }
         GlobalPaletteController.shared.start(store: store) { [weak self] in
             self?.showMainWindowOnActiveSpace()
         }

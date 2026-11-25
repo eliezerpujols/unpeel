@@ -1518,6 +1518,27 @@ pub(crate) fn create_computer_screenshot_dir(session_id: &str) -> Result<PathBuf
     std::path::absolute(path).map_err(|error| format!("Could not resolve screenshot path: {error}"))
 }
 
+#[cfg(unix)]
+pub(crate) fn append_computer_action(
+    session_id: &str,
+    entry: &serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let write = || -> std::io::Result<()> {
+        let sessions = secure_fs::open_configured_root(&app_paths::app_sessions_root())?;
+        let session = secure_fs::open_dir_at(&sessions, session_id)?;
+        let artifacts = secure_fs::open_or_create_dir_at(&session, "artifacts")?;
+        let computer = secure_fs::open_or_create_dir_at(&artifacts, "computer")?;
+        let _lock = secure_fs::open_and_lock_file(&computer, b"actions.jsonl.lock")?;
+        let mut file = secure_fs::open_regular_append_at(&computer, b"actions.jsonl")?;
+        let mut line = serde_json::to_vec(entry)?;
+        line.push(b'\n');
+        file.write_all(&line)
+    };
+    write().map_err(|error| format!("Could not write computer action log: {error}"))
+}
+
 fn kind_dir_at(root: &Path, kind: &str) -> Option<PathBuf> {
     let mut path = root.to_owned();
     for component in kind_components(kind)? {
@@ -1998,6 +2019,15 @@ pub(crate) mod secure_fs {
 
     pub fn open_regular_read_at(dir: &File, name: &[u8]) -> io::Result<File> {
         open_regular_at(dir, name, libc::O_RDONLY, 0)
+    }
+
+    pub fn open_regular_append_at(dir: &File, name: &[u8]) -> io::Result<File> {
+        open_regular_at(
+            dir,
+            name,
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NONBLOCK,
+            0o600,
+        )
     }
 
     pub fn open_regular_rw_create_at(dir: &File, name: &[u8]) -> io::Result<File> {

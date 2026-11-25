@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ComputerUseSettingsPanel: View {
     @ObservedObject var store: UnpeelStore
+    @ObservedObject private var control = ComputerControl.shared
     @State private var screenRecording = false
     @State private var accessibility = false
 
@@ -25,6 +26,23 @@ struct ComputerUseSettingsPanel: View {
                 }
             } footer: {
                 Text(store.computerUseAccess.detail)
+                    .foregroundStyle(Theme.mutedForeground)
+            }
+            Section {
+                LabeledContent("Computer control") {
+                    if control.snapshot.paused {
+                        Button("Resume") { control.setPaused(false) }
+                    } else {
+                        Button("Pause") { control.setPaused(true) }
+                    }
+                }
+                LabeledContent("Stop shortcut") {
+                    Text(GlobalShortcut.computerStop.displayString)
+                }
+            } footer: {
+                Text(UnpeelWorkspaceContext.isDefaultInstance && !control.shortcutAvailable
+                     ? "macOS couldn’t register the shortcut. Use Pause here or Stop on the floating pill."
+                     : "Stops running computer actions and pauses computer use across local workspaces.")
                     .foregroundStyle(Theme.mutedForeground)
             }
             Section {
@@ -66,6 +84,7 @@ struct ComputerUseSettingsPanel: View {
     }
 
     private func refreshPermissions() {
+        control.refresh()
         screenRecording = ComputerPermissions.screenRecording
         accessibility = ComputerPermissions.accessibility
     }

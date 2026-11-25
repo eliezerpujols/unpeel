@@ -419,7 +419,9 @@ fn handle_computer_call(
     };
     let result = computer_mcp::handle_local_call(
         &body,
-        |session_id| approvals.request_computer_action(session_id),
+        |session_id, target, control| {
+            approvals.request_computer_action(session_id, target, control)
+        },
         |operation, body| {
             let response = hub.call(operation, body).map_err(|error| match error {
                 PlatformAdapterError::Unavailable => {

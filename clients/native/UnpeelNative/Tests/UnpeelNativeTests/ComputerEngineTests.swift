@@ -8,6 +8,56 @@ import XCTest
 final class ComputerEngineTests: XCTestCase {
     private let path = "/tmp/session/screenshots/test.png"
 
+    func testComputerTiersByBundleID() {
+        let cases: [(ComputerAppTier, [String])] = [
+            (.read, ["com.apple.Safari", "com.google.Chrome", "company.thebrowser.Browser",
+                     "org.mozilla.firefox", "org.mozilla.nightly", "org.mozilla.firefoxdeveloperedition",
+                     "com.microsoft.edgemac", "com.google.Chrome.canary"]),
+            (.click, ["com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty",
+                      "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+                      "com.todesktop.230313mzl4w4u92", "co.anysphere.cursor.nightly",
+                      "com.apple.dt.Xcode", "com.jetbrains.intellij", "com.unpeel.native", "com.unpeel.native.dev"]),
+            (.full, ["com.apple.Notes", "com.microsoft.VSCodeOther"])
+        ]
+        for (tier, ids) in cases {
+            for id in ids {
+                XCTAssertEqual(ComputerAppTier(bundleID: id), tier, id)
+                let app = ComputerTarget(name: id, bundleID: id, pid: 42)
+                for action in ["left_click", "scroll", "double_click", "right_click", "type", "hold_key", "open_app"] {
+                    let result = Result { try ComputerAppTier.require(action, in: app) }
+                    if tier == .full || (tier == .click && ["left_click", "scroll"].contains(action)) {
+                        XCTAssertNoThrow(try result.get(), "\(id) \(action)")
+                    } else {
+                        XCTAssertThrowsError(try result.get(), "\(id) \(action)") { error in
+                            if tier == .read { XCTAssertTrue(error.localizedDescription.contains("Unpeel browser tool")) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testStopStateDefaultsToRunningAndFailsClosedOnInvalidDiskState() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home.appendingPathComponent("computer-control.json")
+        XCTAssertEqual(ComputerControlSnapshot.load(from: file), .initial)
+
+        let paused = ComputerControlSnapshot(paused: true, generation: "stopped")
+        try JSONEncoder().encode(paused).write(to: file)
+        XCTAssertEqual(ComputerControlSnapshot.load(from: file), paused)
+
+        try Data("{".utf8).write(to: file)
+        XCTAssertEqual(ComputerControlSnapshot.load(from: file), .unavailable)
+    }
+
+    func testCursorPositionEncodesRoundedIntegerPixels() throws {
+        let coordinate = ComputerPixelCoordinate.rounded(CGPoint(x: 700.49, y: -23.50))
+        let json = try JSONEncoder().encode(coordinate)
+        XCTAssertEqual(String(decoding: json, as: UTF8.self), "[700,-24]")
+    }
+
     func testKeyNameParsing() throws {
         let cases: [(String, Int, CGEventFlags)] = [
             ("cmd+c", kVK_ANSI_C, .maskCommand),

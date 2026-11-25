@@ -8,11 +8,13 @@
 //! survive and both frontends honor them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use unpeel_core::computer_mcp::{ComputerApproval, APPROVAL_TIMEOUT};
+use unpeel_core::computer_mcp::{
+    AppTarget, ComputerApproval, ControlGeneration, APPROVAL_TIMEOUT, PAUSED_MESSAGE,
+};
 
 pub struct PendingApproval {
     pub id: String,
@@ -22,6 +24,7 @@ pub struct PendingApproval {
     pub caller_session_id: String,
     pub target_session_id: Option<String>,
     pub requested_at: u64,
+    allows_once: bool,
     responder: Sender<ApprovalOutcome>,
 }
 
@@ -46,11 +49,43 @@ pub enum ApprovalOutcome {
     ApprovedOnce,
     Declined,
     TimedOut,
+    Cancelled,
 }
 
 impl ApprovalOutcome {
     pub fn approved(self) -> bool {
         matches!(self, Self::Approved | Self::ApprovedOnce)
+    }
+}
+
+struct ApprovalWait<'a> {
+    timeout: Duration,
+    allows_once: bool,
+    keep_waiting: Option<&'a dyn Fn() -> bool>,
+}
+
+impl ApprovalWait<'_> {
+    fn receive(&self, receiver: std::sync::mpsc::Receiver<ApprovalOutcome>) -> ApprovalOutcome {
+        let Some(keep_waiting) = self.keep_waiting else {
+            return receiver
+                .recv_timeout(self.timeout)
+                .unwrap_or(ApprovalOutcome::TimedOut);
+        };
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if !keep_waiting() {
+                return ApprovalOutcome::Cancelled;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return ApprovalOutcome::TimedOut;
+            }
+            match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(outcome) => return outcome,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return ApprovalOutcome::TimedOut,
+            }
+        }
     }
 }
 
@@ -72,13 +107,47 @@ impl ApprovalHub {
     pub fn request_computer_action(
         self: &Arc<Self>,
         session_id: &str,
+        target: Option<&AppTarget>,
+        control: &ControlGeneration,
     ) -> Result<ComputerApproval, String> {
-        match self.request_computer(session_id) {
+        let (title, body) = if let Some(app) = target {
+            (
+                format!(
+                    "Allow {} to control {}?",
+                    session_display_name(session_id),
+                    app.name
+                ),
+                format!(
+                    "Allow or deny computer input in {} for this session.",
+                    app.name
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "Allow {} to see this Mac’s screen?",
+                    session_display_name(session_id)
+                ),
+                "This lets the agent see the desktop, including any visible windows.".into(),
+            )
+        };
+        let outcome = self.request_while(
+            "computer",
+            title,
+            body,
+            session_id.into(),
+            None,
+            ApprovalWait {
+                timeout: APPROVAL_TIMEOUT,
+                allows_once: target.is_none(),
+                keep_waiting: Some(&|| control.is_current()),
+            },
+        );
+        match outcome {
             ApprovalOutcome::Approved => Ok(ComputerApproval::Session),
             ApprovalOutcome::ApprovedOnce => Ok(ComputerApproval::Once),
-            ApprovalOutcome::Declined => {
-                Err("The user denied computer access for this action.".into())
-            }
+            ApprovalOutcome::Declined => Ok(ComputerApproval::Denied),
+            ApprovalOutcome::Cancelled => Err(PAUSED_MESSAGE.into()),
             ApprovalOutcome::TimedOut => {
                 Err("The computer access approval prompt timed out.".into())
             }
@@ -97,8 +166,30 @@ impl ApprovalHub {
         target_session_id: Option<String>,
         timeout: Duration,
     ) -> ApprovalOutcome {
-        let (tx, rx): (Sender<ApprovalOutcome>, Receiver<ApprovalOutcome>) =
-            std::sync::mpsc::channel();
+        self.request_while(
+            kind,
+            title,
+            body,
+            caller_session_id,
+            target_session_id,
+            ApprovalWait {
+                timeout,
+                allows_once: kind == "computer",
+                keep_waiting: None,
+            },
+        )
+    }
+
+    fn request_while(
+        &self,
+        kind: &str,
+        title: String,
+        body: String,
+        caller_session_id: String,
+        target_session_id: Option<String>,
+        wait: ApprovalWait<'_>,
+    ) -> ApprovalOutcome {
+        let (tx, rx) = std::sync::mpsc::channel();
         let id = uuid::Uuid::new_v4().to_string();
         if let Ok(mut guard) = self.pending.lock() {
             guard.push(PendingApproval {
@@ -109,13 +200,12 @@ impl ApprovalHub {
                 caller_session_id,
                 target_session_id,
                 requested_at: now_ms(),
+                allows_once: wait.allows_once,
                 responder: tx,
             });
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
-        let outcome = rx
-            .recv_timeout(timeout)
-            .unwrap_or(ApprovalOutcome::TimedOut);
+        let outcome = wait.receive(rx);
         // Drop the entry if it's still queued (timeout path).
         if let Ok(mut guard) = self.pending.lock() {
             let before = guard.len();
@@ -139,7 +229,7 @@ impl ApprovalHub {
         let outcome = match (approved, remember) {
             (false, _) => ApprovalOutcome::Declined,
             (true, true) => ApprovalOutcome::Approved,
-            (true, false) if guard[index].kind == "computer" => ApprovalOutcome::ApprovedOnce,
+            (true, false) if guard[index].allows_once => ApprovalOutcome::ApprovedOnce,
             (true, false) => return false,
         };
         let entry = guard.remove(index);
@@ -185,7 +275,7 @@ impl ApprovalHub {
                         obj.insert("targetSessionID".into(), target.clone().into());
                     }
                 }
-                if p.kind == "computer" {
+                if p.allows_once {
                     value["allowsOnce"] = true.into();
                 }
                 value

@@ -49,6 +49,8 @@ struct PendingMcpApproval: Identifiable, Equatable {
     let requestedAt: Date
     let allowsOnce: Bool
 
+    var isComputerAppGrant: Bool { kind == .computer && !allowsOnce }
+
     /// Session that should show the in-pane prompt and the attention badge.
     /// Write grants present on the destination so the user sees where input
     /// would land; other kinds have no destination and present on the caller.
@@ -181,7 +183,7 @@ extension UnpeelStore {
             owned.insert(item.id)
             pendingMcpApprovals.append(approval)
             notifyMcpApprovalRequested(approval)
-            if !didReveal {
+            if !didReveal && (scoped || !approval.isComputerAppGrant) {
                 revealSessionForMcpApproval(approval)
                 didReveal = true
             }
@@ -190,7 +192,24 @@ extension UnpeelStore {
             scopedHostMcpApprovalIDs = owned
         } else {
             hostOwnedMcpApprovalIDs = owned
+            refreshComputerAppApproval()
         }
+    }
+
+    private func refreshComputerAppApproval() {
+        guard let approval = pendingMcpApprovals.first(where: {
+            $0.isComputerAppGrant && hostOwnedMcpApprovalIDs.contains($0.id)
+                && !hostMcpApprovalAnswersInFlight.contains($0.id)
+        }) else {
+            computerAppApprovalPanel.dismiss()
+            return
+        }
+        let message = mcpApprovalMessage(approval)
+        computerAppApprovalPanel.show(
+            McpApprovalCard(approval: approval, title: message.title, message: message.body) { [weak self] approved, remember in
+                self?.answerMcpApproval(id: approval.id, approved: approved, remember: remember)
+            }
+        )
     }
 
     /// Answer a pending approval by id. Returns false when the id is no
@@ -226,6 +245,8 @@ extension UnpeelStore {
         }
         if hostOwnedMcpApprovalIDs.contains(id) {
             guard hostMcpApprovalAnswersInFlight.insert(id).inserted else { return true }
+            let isComputerAppGrant = pendingMcpApprovals[index].isComputerAppGrant
+            if isComputerAppGrant { computerAppApprovalPanel.dismiss() }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 var backend: NativeRemoteBackend?
@@ -249,6 +270,7 @@ extension UnpeelStore {
                 }
                 await backend?.close()
                 self.hostMcpApprovalAnswersInFlight.remove(id)
+                if isComputerAppGrant { self.refreshComputerAppApproval() }
             }
             return true
         }

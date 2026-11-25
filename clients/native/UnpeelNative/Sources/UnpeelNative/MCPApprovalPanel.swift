@@ -3,11 +3,9 @@
 //  UnpeelNative
 //
 //  Desktop surfaces for pending MCP approvals and the computer-permissions
-//  nudge. MCP grants render as an in-pane overlay on the Session they belong
-//  to (never a floating window, never NSAlert.runModal() — a nested modal
-//  run loop inside a main-actor job stalls mobile bootstrap). The TCC nudge
-//  still uses `FloatingPromptPanelController` because those grants live in
-//  System Settings, not in a Session.
+//  nudge. Grants have an in-pane card on the Session they belong to.
+//  App-specific computer grants can also show the card without taking focus
+//  from the target app. All prompts are nonmodal.
 //
 
 import AppKit
@@ -19,12 +17,21 @@ import SwiftUI
 @MainActor
 final class FloatingPromptPanelController {
     private var panel: NSPanel?
+    private let preservesFocus: Bool
+
+    init(preservesFocus: Bool = false) {
+        self.preservesFocus = preservesFocus
+    }
 
     /// Show (or update) the panel with the given content. Activates the app
     /// and centers the panel when it was not already visible; a visible
     /// panel keeps its position and just swaps content.
     func show<Content: View>(_ content: Content) {
         let root = AnyView(content)
+        if preservesFocus {
+            showWithoutActivation(root)
+            return
+        }
         if let panel, panel.isVisible {
             (panel.contentViewController as? NSHostingController<AnyView>)?.rootView = root
             return
@@ -42,6 +49,22 @@ final class FloatingPromptPanelController {
     func dismiss() {
         panel?.orderOut(nil)
         panel?.contentViewController = nil
+        panel?.contentView = nil
+    }
+
+    private func showWithoutActivation(_ root: AnyView) {
+        let panel = self.panel ?? NonactivatingPromptPanel()
+        self.panel = panel
+        let content = NonactivatingPromptHostingView(rootView: root)
+        panel.contentView = content
+        let size = content.fittingSize
+        panel.setContentSize(size)
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16))
+        }
+        panel.orderFrontRegardless()
     }
 
     private func makePanel() -> NSPanel {
@@ -64,6 +87,23 @@ final class FloatingPromptPanelController {
     }
 }
 
+final class NonactivatingPromptPanel: NSPanel {
+    init() {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        isOpaque = false
+        backgroundColor = .clear
+        isFloatingPanel = true
+        level = .floating
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+    }
+}
+
+final class NonactivatingPromptHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// In-pane card for one pending MCP approval. Return and Escape are
 /// swallowed while focused so they never reach the terminal underneath.
 struct McpApprovalPaneOverlay: View {
@@ -80,56 +120,11 @@ struct McpApprovalPaneOverlay: View {
             )) - 1
         )
         ZStack {
-            // Light dim so Liquid Glass still has terminal color to refract;
-            // a heavy scrim made the card read as a solid slab.
             Color.black.opacity(0.12)
                 .contentShape(Rectangle())
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    AttentionDot(color: Theme.attention)
-                        .padding(.top, 3)
-                    Text(message.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(message.body)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.mutedForeground)
-                    .fixedSize(horizontal: false, vertical: true)
-                if moreWaiting > 0 {
-                    Text("\(moreWaiting) more waiting")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.mutedForeground.opacity(0.7))
-                }
-                HStack(spacing: 8) {
-                    Spacer()
-                    McpApprovalDialogButton(
-                        label: approval.allowsOnce ? "Deny" : "Don’t Allow",
-                        prominent: false,
-                        action: {
-                            store.answerMcpApproval(id: approval.id, approved: false)
-                        }
-                    )
-                    if approval.allowsOnce {
-                        McpApprovalDialogButton(label: "Allow once", prominent: true) {
-                            store.answerMcpApproval(id: approval.id, approved: true, remember: false)
-                        }
-                    }
-                    McpApprovalDialogButton(
-                        label: approval.allowsOnce ? "Allow for this session" : "Allow",
-                        prominent: !approval.allowsOnce,
-                        action: {
-                            store.answerMcpApproval(id: approval.id, approved: true)
-                        }
-                    )
-                }
-                .padding(.top, 6)
+            McpApprovalCard(approval: approval, title: message.title, message: message.body, moreWaiting: moreWaiting) {
+                store.answerMcpApproval(id: approval.id, approved: $0, remember: $1)
             }
-            .padding(20)
-            .frame(width: 360)
-            .mcpApprovalGlassCard()
         }
         .background(
             McpApprovalKeyMonitor(
@@ -140,6 +135,57 @@ struct McpApprovalPaneOverlay: View {
                 onDeny: { store.answerMcpApproval(id: approval.id, approved: false) }
             )
         )
+    }
+}
+
+struct McpApprovalCard: View {
+    let approval: PendingMcpApproval
+    let title: String
+    let message: String
+    var moreWaiting = 0
+    let answer: (Bool, Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                AttentionDot(color: Theme.attention)
+                    .padding(.top, 3)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.foreground)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.mutedForeground)
+                .fixedSize(horizontal: false, vertical: true)
+            if moreWaiting > 0 {
+                Text("\(moreWaiting) more waiting")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.mutedForeground.opacity(0.7))
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                McpApprovalDialogButton(label: approval.kind == .computer ? "Deny" : "Don’t Allow", prominent: false) {
+                    answer(false, true)
+                }
+                if approval.allowsOnce {
+                    McpApprovalDialogButton(label: "Allow once", prominent: true) {
+                        answer(true, false)
+                    }
+                }
+                McpApprovalDialogButton(
+                    label: approval.kind == .computer ? "Allow for this session" : "Allow",
+                    prominent: !approval.allowsOnce
+                ) {
+                    answer(true, true)
+                }
+            }
+            .padding(.top, 6)
+        }
+        .padding(20)
+        .frame(width: 360)
+        .mcpApprovalGlassCard()
     }
 }
 

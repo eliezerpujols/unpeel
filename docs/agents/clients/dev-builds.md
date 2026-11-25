@@ -108,8 +108,20 @@ Confirm which binary is serving with
 
 Screen Recording and Accessibility are granted to the app bundle in System
 Settings under Privacy & Security. A dev build uses the grants for **Unpeel
-Dev**. The Host authorizes actions and selects the output path before calling
-the app over the authenticated platform adapter.
+Dev**. The Host asks the authenticated Mac adapter to resolve the app under
+the target point or the frontmost app for keyboard input. It checks the app
+tier and session grant before dispatch, and the adapter checks the target
+again before posting input.
+
+Each app grant or denial lasts for the session. **Ask** also prompts for
+screen access, while **Allow** permits screen access automatically.
+Browsers support screenshots only. Terminals, IDEs, and Unpeel accept
+left-click and scroll. Other apps support the full action set. The floating
+pill and the session row identify the session controlling an app. Press
+Control–Option–Command–period to stop computer actions across local
+workspaces. Resume from the pill or Settings ▸ Computer use. The Host
+records actions in `artifacts/computer/actions.jsonl` under the session,
+including only the length of typed text.
 
 `computer.status` reports `screen_recording`, `accessibility`, and the
 frontmost app. `computer.apps` lists running apps. `computer.perform` uses

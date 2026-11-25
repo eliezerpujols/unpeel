@@ -2011,6 +2011,14 @@ fn rewrite_app_state_session_references(
         }
     }
 
+    // Control grants belong to the old session, even on restart with resume.
+    if let Some(approvals) = state
+        .get_mut(crate::computer_mcp::APP_APPROVALS)
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        changed |= approvals.remove(old_id).is_some();
+    }
+
     for field in ["browser_approvals", "computer_approvals"] {
         if let Some(approvals) = state.get_mut(field) {
             changed |= rewrite_string_array(approvals, old_id, replacement_id);
@@ -3117,6 +3125,10 @@ mod tests {
             },
             "browser_approvals": ["other", "old", {"future": "kept"}],
             "computer_approvals": ["old", "other"],
+            "computer_app_approvals": {
+                "old": {"com.apple.notes": "allow"},
+                "other": {"com.apple.mail": "deny"}
+            },
             "browser_access": {"old": "ask"},
             "future_root": {"nested": [1, 2, 3]}
         });
@@ -3171,6 +3183,10 @@ mod tests {
             state["computer_approvals"],
             serde_json::json!(["new", "other"])
         );
+        assert_eq!(
+            state["computer_app_approvals"],
+            serde_json::json!({"other": {"com.apple.mail": "deny"}})
+        );
         // Bounded migration: unrelated/legacy fields are never typed away.
         assert_eq!(state["browser_access"]["old"], "ask");
         assert_eq!(state["future_root"]["nested"][2], 3);
@@ -3201,6 +3217,10 @@ mod tests {
             },
             "browser_approvals": ["old", "other"],
             "computer_approvals": ["other", "old"],
+            "computer_app_approvals": {
+                "old": {"com.apple.notes": "allow"},
+                "other": {"com.apple.mail": "deny"}
+            },
             "future_root": {"old": "not a session-id field"}
         });
 
@@ -3232,6 +3252,10 @@ mod tests {
         );
         assert_eq!(state["browser_approvals"], serde_json::json!(["other"]));
         assert_eq!(state["computer_approvals"], serde_json::json!(["other"]));
+        assert_eq!(
+            state["computer_app_approvals"],
+            serde_json::json!({"other": {"com.apple.mail": "deny"}})
+        );
         assert_eq!(state["future_root"]["old"], "not a session-id field");
     }
 
