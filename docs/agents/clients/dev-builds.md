@@ -116,8 +116,10 @@ again before posting input.
 
 Each app grant or denial lasts for the session. **Ask** also prompts for
 screen access, while **Allow** permits screen access automatically.
-Browsers support screenshots only. Terminals, IDEs, and Unpeel accept
-left-click and scroll. Other apps support the full action set. The floating
+By default, browsers support screenshots only, terminals, IDEs, and Unpeel
+accept left-click and scroll, and other apps support the full action set.
+**Let agents control any app** enables full input for every app.
+Allow then skips app approval prompts. Ask keeps session grants. The floating
 pill and the session row identify the session controlling an app. Press
 Control–Option–Command–period to stop computer actions across local
 workspaces. Resume from the pill or Settings ▸ Computer use. The Host

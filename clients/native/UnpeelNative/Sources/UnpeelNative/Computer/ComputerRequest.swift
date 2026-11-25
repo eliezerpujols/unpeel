@@ -51,6 +51,7 @@ struct ComputerRequest: Equatable {
     let sessionName: String?
     let target: ComputerTarget?
     let controlGeneration: String?
+    let unrestricted: Bool
     let screenPoint: CGPoint?
     let screenEndPoint: CGPoint?
     let action: Action
@@ -80,6 +81,10 @@ struct ComputerRequest: Equatable {
         self.name = name
         sessionName = fields["session_name"] as? String
         controlGeneration = fields["control_generation"] as? String
+        // This is an internal Host policy field. Agent arguments are rebuilt
+        // before the Host adds it. Missing or malformed values stay restricted.
+        let flag = fields["computer_unrestricted"] as? NSNumber
+        unrestricted = flag.map { CFGetTypeID($0) == CFBooleanGetTypeID() && $0.boolValue } ?? false
         screenPoint = try Self.resolvedPoint(fields, "screen_coordinate")
         screenEndPoint = try Self.resolvedPoint(fields, "screen_end_coordinate")
         if let raw = fields["target"], !(raw is NSNull) {

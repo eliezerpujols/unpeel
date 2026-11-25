@@ -23,6 +23,8 @@ esac
 command -v jq >/dev/null || fail "Install jq to read computer tool results."
 jq -e '.computer_use == "allow"' "$UNPEEL_HOME/app-state.json" >/dev/null \
   || skip "Set Computer use to Allow in the isolated Unpeel Dev workspace."
+jq -e '.computer_unrestricted != true' "$UNPEEL_HOME/app-state.json" >/dev/null \
+  || skip "Turn off Let agents control any app to verify the default app tiers."
 
 unpeel_bin=${UNPEEL_BIN:-}
 if [[ -z "$unpeel_bin" && -n "${UNPEEL_HOST_BIN:-}" ]]; then

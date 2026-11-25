@@ -251,6 +251,7 @@ private struct McpApprovalKeyMonitor: NSViewRepresentable {
             guard enabled, window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, self.enabled else { return event }
+                guard !ComputerInput.isSynthetic(event) else { return nil }
                 let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 if modifiers.contains(.command) || modifiers.contains(.option)
                     || modifiers.contains(.control)

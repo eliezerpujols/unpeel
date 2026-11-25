@@ -20,7 +20,11 @@ enum ComputerAppTier: Equatable {
     case read, click, full
 
     // Keep these bundle families aligned with computer_mcp/safety.rs.
-    init(bundleID: String) {
+    init(bundleID: String, unrestricted: Bool = false) {
+        if unrestricted {
+            self = .full
+            return
+        }
         let id = bundleID.lowercased()
         func belongs(to family: String) -> Bool {
             id == family || id.hasPrefix(family + ".")
@@ -44,8 +48,8 @@ enum ComputerAppTier: Equatable {
         }
     }
 
-    static func require(_ action: String, in app: ComputerTarget) throws {
-        switch Self(bundleID: app.bundleID) {
+    static func require(_ action: String, in app: ComputerTarget, unrestricted: Bool) throws {
+        switch Self(bundleID: app.bundleID, unrestricted: unrestricted) {
         case .read:
             throw ComputerError("\(app.name) is read-only in computer use. Use the Unpeel browser tool to interact with it.")
         case .click where action != "left_click" && action != "scroll":
@@ -53,6 +57,12 @@ enum ComputerAppTier: Equatable {
         case .click, .full:
             break
         }
+    }
+}
+
+enum ComputerAppAuthorization {
+    static func allowsInput(mode: ComputerAccess, unrestricted: Bool, decision: String?) -> Bool {
+        mode != .off && ((mode == .allow && unrestricted) || decision == "allow")
     }
 }
 
@@ -90,7 +100,8 @@ enum ComputerTargetLookup {
     static func pointer(at point: CGPoint, isClick: Bool = false) throws -> ComputerPointerTarget {
         // A window owner and its accessibility hit can differ, for example
         // when a browser exposes an accessibility element from a helper.
-        // Never assign the helper a more permissive tier than the browser.
+        // Resolve browsers to their window owner even when unrestricted,
+        // so a renderer helper cannot be mistaken for a separate app grant.
         let window = try frontWindow(at: point)
         if let window, ComputerAppTier(bundleID: window.app.bundleID) == .read {
             return ComputerPointerTarget(

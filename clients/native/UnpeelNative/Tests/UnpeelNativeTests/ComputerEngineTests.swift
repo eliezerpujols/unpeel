@@ -22,9 +22,11 @@ final class ComputerEngineTests: XCTestCase {
         for (tier, ids) in cases {
             for id in ids {
                 XCTAssertEqual(ComputerAppTier(bundleID: id), tier, id)
+                XCTAssertEqual(ComputerAppTier(bundleID: id, unrestricted: true), .full, id)
                 let app = ComputerTarget(name: id, bundleID: id, pid: 42)
                 for action in ["left_click", "scroll", "double_click", "right_click", "type", "hold_key", "open_app"] {
-                    let result = Result { try ComputerAppTier.require(action, in: app) }
+                    XCTAssertNoThrow(try ComputerAppTier.require(action, in: app, unrestricted: true))
+                    let result = Result { try ComputerAppTier.require(action, in: app, unrestricted: false) }
                     if tier == .full || (tier == .click && ["left_click", "scroll"].contains(action)) {
                         XCTAssertNoThrow(try result.get(), "\(id) \(action)")
                     } else {
@@ -34,6 +36,29 @@ final class ComputerEngineTests: XCTestCase {
                     }
                 }
             }
+        }
+    }
+
+    func testHostSuppliedUnrestrictedPolicyRequiresABoolean() throws {
+        XCTAssertFalse(try parse("type", ["text": "test"]).get().unrestricted)
+        XCTAssertTrue(try parse("type", ["text": "test", "computer_unrestricted": true]).get().unrestricted)
+        for raw: Any in [false, 1, "true", NSNull()] {
+            XCTAssertFalse(try parse("type", ["text": "test", "computer_unrestricted": raw]).get().unrestricted)
+        }
+    }
+
+    func testUnrestrictedModeSkipsAppGrantsOnlyInAllow() {
+        for decision in [nil, "allow", "deny"] {
+            XCTAssertFalse(ComputerAppAuthorization.allowsInput(mode: .off, unrestricted: true, decision: decision))
+            XCTAssertEqual(
+                ComputerAppAuthorization.allowsInput(mode: .ask, unrestricted: true, decision: decision),
+                decision == "allow"
+            )
+            XCTAssertTrue(ComputerAppAuthorization.allowsInput(mode: .allow, unrestricted: true, decision: decision))
+            XCTAssertEqual(
+                ComputerAppAuthorization.allowsInput(mode: .allow, unrestricted: false, decision: decision),
+                decision == "allow"
+            )
         }
     }
 
@@ -135,6 +160,7 @@ final class ComputerEngineTests: XCTestCase {
             event.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &length, unicodeString: &buffer)
             XCTAssertEqual(Array(buffer.prefix(length)), units)
             XCTAssertTrue(event.flags.isEmpty)
+            XCTAssertEqual(event.getIntegerValueField(.eventSourceUserData), ComputerInput.eventTag)
         }
     }
 

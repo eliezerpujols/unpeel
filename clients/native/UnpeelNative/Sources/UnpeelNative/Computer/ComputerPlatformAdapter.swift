@@ -302,15 +302,15 @@ final class ComputerPlatformAdapter {
     }
 
     private func authorize(_ request: ComputerRequest, target: ComputerTarget) throws {
-        try ComputerAppTier.require(request.name, in: target)
+        try ComputerAppTier.require(request.name, in: target, unrestricted: request.unrestricted)
         guard let approvedTarget = request.target, target.matches(approvedTarget) else {
             throw ComputerError("The target app changed. Bring the app into view and retry the action.")
         }
         let state = try? JSONSerialization.jsonObject(with: Data(contentsOf: LaunchConfig.appStateFile)) as? [String: Any]
-        guard let state, let mode = state["computer_use"] as? String,
-              ComputerAccess.fromStateString(mode) != .off,
-              let approvals = state["computer_app_approvals"] as? [String: [String: String]],
-              approvals[request.sessionID]?[target.bundleID.lowercased()] == "allow"
+        let mode = (state?["computer_use"] as? String).map(ComputerAccess.fromStateString) ?? .off
+        let approvals = state?["computer_app_approvals"] as? [String: [String: String]]
+        let decision = approvals?[request.sessionID]?[target.bundleID.lowercased()]
+        guard ComputerAppAuthorization.allowsInput(mode: mode, unrestricted: request.unrestricted, decision: decision)
         else { throw ComputerError("The session does not have computer access to \(target.name).") }
 
         if let hold = buttonHold {
@@ -326,7 +326,7 @@ final class ComputerPlatformAdapter {
     ) async throws {
         func check(_ actual: ComputerTarget) throws {
             try control.requireRunning(generation: generation)
-            try ComputerAppTier.require(request.name, in: actual)
+            try ComputerAppTier.require(request.name, in: actual, unrestricted: request.unrestricted)
             guard actual.matches(recipient.target) else {
                 throw ComputerError("The target app changed. Bring the app into view and retry the action.")
             }

@@ -82,9 +82,11 @@ makes sense for coding, it does not belong here.
   user grants one agent Session the **Create & remove** Agent access role
   (sidebar right-click), and even then it removes only the Sessions it
   created (`spawned_by`).
-- **Use `browser` for websites and `computer` for native Mac apps.** The Host
-  installs and hash-verifies the pinned browser engine
-  (`protocol/browser-engine-v1.json`). For [computer use](docs/agents/sessions-mcp.md#computer-use-on-macos),
+- **Default to `browser` for websites.** Use `computer` for the native Mac app
+  the user names. A real browser requires an explicit request for that browser
+  and the workspace’s **Let agents control any app** setting. The Host installs
+  and hash-verifies the pinned browser engine (`protocol/browser-engine-v1.json`).
+  For [computer use](docs/agents/sessions-mcp.md#computer-use-on-macos),
   the Host enforces approvals and owns screenshot paths. The Mac app captures
   the screen and sends input through its authenticated platform adapter.
   Unpeel never ships or requires a Node runtime.

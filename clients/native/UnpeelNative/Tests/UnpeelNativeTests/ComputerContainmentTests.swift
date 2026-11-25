@@ -77,6 +77,16 @@ final class ComputerContainmentTests: XCTestCase {
         }
     }
 
+    func testUnrestrictedWorkspaceSettingDefaultsOffAndOnlyAcceptsABoolean() throws {
+        let cases: [(Any?, Bool)] = [(nil, false), (false, false), (true, true), ("true", false), (1, false)]
+        for (value, expected) in cases {
+            var state: [String: Any] = ["projects": []]
+            state["computer_unrestricted"] = value
+            let data = try JSONSerialization.data(withJSONObject: state)
+            XCTAssertEqual(try JSONDecoder().decode(AppStateFile.self, from: data).computerUnrestricted, expected)
+        }
+    }
+
     func testComputerUseExperimentWriteKeepsSiblingGatesAndUnknownKeys() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("unpeel-cu-\(UUID().uuidString)")

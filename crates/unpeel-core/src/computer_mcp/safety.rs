@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const APP_APPROVALS: &str = "computer_app_approvals";
+pub(super) const UNRESTRICTED: &str = "computer_unrestricted";
+
 const DESKTOP: &str = "@desktop";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -32,7 +34,14 @@ enum Tier {
     Full,
 }
 
-fn app_tier(bundle_id: &str) -> Tier {
+pub(super) fn unrestricted(state: &Value) -> bool {
+    state[UNRESTRICTED].as_bool().unwrap_or(false)
+}
+
+fn app_tier(bundle_id: &str, unrestricted: bool) -> Tier {
+    if unrestricted {
+        return Tier::Full;
+    }
     let id = bundle_id.to_ascii_lowercase();
     match id.as_str() {
         "com.apple.safari"
@@ -75,8 +84,12 @@ fn family(id: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-pub(super) fn check_tier(action: &str, target: &AppTarget) -> Result<(), String> {
-    match app_tier(&target.bundle_id) {
+pub(super) fn check_tier(
+    action: &str,
+    target: &AppTarget,
+    unrestricted: bool,
+) -> Result<(), String> {
+    match app_tier(&target.bundle_id, unrestricted) {
         Tier::Read => Err(format!(
             "{} is read-only in computer use. Use the Unpeel browser tool to interact with it.",
             target.name
@@ -156,7 +169,8 @@ mod tests {
             "com.google.Chrome.canary",
             "com.apple.SafariTechnologyPreview",
         ] {
-            assert_eq!(app_tier(id), Tier::Read, "{id}");
+            assert_eq!(app_tier(id, false), Tier::Read, "{id}");
+            assert_eq!(app_tier(id, true), Tier::Full, "{id}");
         }
         for id in [
             "com.apple.Terminal",
@@ -171,14 +185,16 @@ mod tests {
             "com.unpeel.native",
             "com.unpeel.native.dev",
         ] {
-            assert_eq!(app_tier(id), Tier::Click, "{id}");
+            assert_eq!(app_tier(id, false), Tier::Click, "{id}");
+            assert_eq!(app_tier(id, true), Tier::Full, "{id}");
         }
         for id in [
             "com.apple.Notes",
             "com.microsoft.VSCodeOther",
             "com.jetbrainsx.foo",
         ] {
-            assert_eq!(app_tier(id), Tier::Full, "{id}");
+            assert_eq!(app_tier(id, false), Tier::Full, "{id}");
+            assert_eq!(app_tier(id, true), Tier::Full, "{id}");
         }
     }
 

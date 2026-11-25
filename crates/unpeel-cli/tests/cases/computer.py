@@ -125,6 +125,34 @@ def exercise_approvals(case, mcp, session_id, client, calls, phone_port, token, 
     case.check("the screen grant skips the next prompt",
                not reply["result"]["isError"] and json.loads(mcp.text(reply))["coordinate"] == [10, 20], str(reply))
 
+    for app, revoke in [
+        ({"name": "Safari", "bundle_id": "com.apple.Safari"}, False),
+        ({"name": "Chrome", "bundle_id": "com.google.Chrome"}, True),
+    ]:
+        select_app(app)
+        home.write_state({**home.state(), "computer_unrestricted": True})
+        before = dispatches()
+        thread, result, pending = begin({"action": "type", "text": "browser input", "app": app["bundle_id"]})
+        if not case.check(f"unrestricted Ask still prompts for {app['name']}",
+                          pending is not None and app["name"] in pending["title"]
+                          and pending["kind"] == "computer" and dispatches() == before,
+                          str(pending or result)):
+            return
+        if revoke:
+            home.write_state({**home.state(), "computer_unrestricted": False})
+        status, _ = mobile_request(phone_port, "/mobile/approvals/answer", token, method="POST",
+                                   body={"id": pending["id"], "approved": True, "remember": True})
+        thread.join(timeout=8)
+        if revoke:
+            case.check("turning off unrestricted access during approval blocks dispatch",
+                       status == 200 and not thread.is_alive() and result.get("result", {}).get("isError")
+                       and "Unpeel browser tool" in mcp.text(result) and dispatches() == before, str(result))
+        else:
+            case.check("unrestricted Ask dispatches only after approval",
+                       status == 200 and not thread.is_alive() and not result.get("result", {}).get("isError", True)
+                       and dispatches() == before + 1 and calls[-1]["request"]["computer_unrestricted"] is True,
+                       str(result))
+
     log = Path(home.path("app-sessions", session_id, "artifacts", "computer", "actions.jsonl")).read_text()
     typed = [entry for entry in map(json.loads, log.splitlines()) if entry["action"] == "type"]
     case.check("the action log stores the app and text length without typed text",
@@ -217,15 +245,32 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                        str(reply))
 
             select_app({"name": "Safari", "bundle_id": "com.apple.Safari"})
-            reply = mcp.call("computer", {"action": "left_click", "coordinate": [0, 1]})
-            case.check("browser clicks are rejected before dispatch",
+            reply = mcp.call("computer", {
+                "action": "left_click", "coordinate": [0, 1], "computer_unrestricted": True,
+            })
+            case.check("browser clicks stay read-only despite a caller-supplied unrestricted flag",
                        reply["result"]["isError"] and "Unpeel browser tool" in mcp.text(reply)
-                       and calls[-1]["operation"] == "computer.resolve", str(reply))
+                       and calls[-1]["operation"] == "computer.resolve"
+                       and "computer_unrestricted" not in calls[-1]["request"], str(reply))
             select_app({"name": "Terminal", "bundle_id": "com.apple.Terminal"})
             reply = mcp.call("computer", {"action": "type", "text": "disallowed"})
             case.check("terminal typing is rejected before dispatch",
                        reply["result"]["isError"] and "left-click and scroll" in mcp.text(reply)
                        and calls[-1]["operation"] == "computer.resolve", str(reply))
+            case.home.write_state({**case.home.state(), "computer_unrestricted": True})
+            for app in [
+                {"name": "Terminal", "bundle_id": "com.apple.Terminal"},
+                {"name": "Safari", "bundle_id": "com.apple.Safari"},
+                {"name": "Unpeel Dev", "bundle_id": "com.unpeel.native.dev"},
+            ]:
+                select_app(app)
+                reply = mcp.call("computer", {"action": "type", "text": "test", "computer_unrestricted": False})
+                case.check(f"unrestricted Allow types into {app['name']} without grants or prompts",
+                           not reply["result"]["isError"] and calls[-1]["operation"] == "computer.perform"
+                           and calls[-1]["request"]["computer_unrestricted"] is True
+                           and not case.home.state().get("computer_app_approvals", {}).get(session_id),
+                           str(reply))
+            case.home.write_state({**case.home.state(), "computer_unrestricted": False})
             select_app(FRONTMOST_APP)
             case.home.write_state({**case.home.state(), "computer_app_approvals": {
                 session_id: {"com.apple.notes": "allow"}
@@ -257,7 +302,7 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                             "session_id": session_id, "screenshot_path": str(path),
                             "session_name": calls[-1]["request"]["session_name"],
                             "target": {**FRONTMOST_APP, "pid": 42}, "screen_coordinate": [0, 1],
-                            "control_generation": "initial"},
+                            "control_generation": "initial", "computer_unrestricted": False},
             }, str(calls[-1]))
 
             background = {"name": "TextEdit", "bundle_id": "com.apple.TextEdit"}

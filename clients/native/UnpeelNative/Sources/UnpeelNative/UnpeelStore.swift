@@ -744,6 +744,7 @@ final class UnpeelStore: ObservableObject {
     @Published private(set) var browserDefaultAccess: BrowserAccess = .on
 
     @Published private var localComputerUseAccess: ComputerAccess = .off
+    @Published private var localComputerUnrestricted = false
     /// Remembered per-session browser approvals (`browser_approvals`), used
     /// only while `browserDefaultAccess == .ask`.
     @Published private(set) var browserApprovals: [String] = []
@@ -4794,21 +4795,38 @@ final class UnpeelStore: ObservableObject {
         return loadScopedAppState()?.computerUse ?? .off
     }
 
+    var computerUnrestricted: Bool {
+        if selectedHostScope == .local { return localComputerUnrestricted }
+        return loadScopedAppState()?.computerUnrestricted ?? false
+    }
+
     func setComputerUseAccess(_ access: ComputerAccess) {
-        guard access != computerUseAccess else { return }
-        guard editScopedAppStateAnnouncing({ $0["computer_use"] = access.rawValue }) else {
+        guard access != computerUseAccess,
+              editComputerUseSettings({ $0["computer_use"] = access.rawValue })
+        else { return }
+        if selectedHostScope == .local { localComputerUseAccess = access }
+    }
+
+    func setComputerUnrestricted(_ unrestricted: Bool) {
+        guard unrestricted != computerUnrestricted,
+              editComputerUseSettings({ $0["computer_unrestricted"] = unrestricted })
+        else { return }
+        if selectedHostScope == .local { localComputerUnrestricted = unrestricted }
+    }
+
+    private func editComputerUseSettings(_ mutate: (inout [String: Any]) -> Void) -> Bool {
+        guard editScopedAppStateAnnouncing(mutate) else {
             ToastCenter.shared.show(
-                "Couldn’t save computer use access",
+                "Couldn’t save computer use settings",
                 systemImage: "exclamationmark.triangle"
             )
-            return
+            return false
         }
-        if selectedHostScope == .local {
-            localComputerUseAccess = access
-        } else {
+        if selectedHostScope != .local {
             scopedAppStateCache = nil
             objectWillChange.send()
         }
+        return true
     }
 
     // MARK: - Unpeel Link profile (Settings ▸ Remote ▸ Unpeel Link)
@@ -6147,6 +6165,10 @@ final class UnpeelStore: ObservableObject {
         let computerAccess = stateFile?.computerUse ?? .off
         if computerAccess != localComputerUseAccess {
             localComputerUseAccess = computerAccess
+        }
+        let unrestricted = stateFile?.computerUnrestricted ?? false
+        if unrestricted != localComputerUnrestricted {
+            localComputerUnrestricted = unrestricted
         }
         let browserApproved = stateFile?.browserApprovals ?? []
         if browserApproved != browserApprovals {

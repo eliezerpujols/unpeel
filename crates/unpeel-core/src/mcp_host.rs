@@ -565,8 +565,9 @@ fn initialize_result(params: &Value) -> Value {
     worktrees; 'artifacts' publishes review artifacts such as gallery images. \
     'browser' (when present) operates a real browser isolated to this session (own profile and \
     window, closed with the session). When the user asks to open, show, preview, or check a web \
-    page, site, or localhost URL, use 'browser' open, never the `open` command, Safari, \
-    another browser app, or the 'computer' tool. The Unpeel browser is where the user \
+    page, site, or localhost URL, use 'browser' open by default. Use 'computer' in the app the user names. \
+    Use 'computer' in a real browser only when the user asks for that browser and Let agents control any app is on. \
+    The Unpeel browser is where the user \
     reviews pages and sends Agentation \
     feedback to a session. Core loop: open a URL, snapshot for element refs like \
     @e1, act by ref (click/fill), re-snapshot after navigation or DOM changes — refs go stale. \
@@ -577,7 +578,7 @@ fn initialize_result(params: &Value) -> Value {
     user explicitly asks. \
     'computer' (when present) controls native Mac apps. Take a screenshot first and after \
     each step. Use the latest screenshot's pixels for coordinates. Do not use your own built-in \
-    browser, Chrome, or computer-use tools. They fail inside an Unpeel terminal. Never send money, trade, \
+    browser or computer-use tools. They fail inside an Unpeel terminal. Never send money, trade, \
     buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them. \
     'apps' (when present) discovers the Unpeel Apps installed on this Host: 'list' them, \
@@ -4793,7 +4794,9 @@ mod tests {
         let initialized = initialize_result(&json!({}));
         let instructions = initialized["instructions"].as_str().unwrap();
         for expected in [
-            "page, site, or localhost URL, use 'browser' open, never the `open` command, Safari, another browser app, or the 'computer' tool",
+            "page, site, or localhost URL, use 'browser' open by default",
+            "Use 'computer' in the app the user names",
+            "only when the user asks for that browser and Let agents control any app is on",
             "'computer' (when present) controls native Mac apps",
             "Take a screenshot first and after each step",
             "latest screenshot's pixels",
@@ -4812,7 +4815,9 @@ mod tests {
         for guidance in [description, help] {
             for expected in [
                 "native Mac apps",
-                "Unpeel browser for websites",
+                "Unpeel browser for websites by default",
+                "Use the computer tool in the app the user names",
+                "and Let agents control any app is on",
                 "Take a screenshot first and after each step",
                 "latest screenshot's pixels",
                 "Do not use your built-in computer-use tools",

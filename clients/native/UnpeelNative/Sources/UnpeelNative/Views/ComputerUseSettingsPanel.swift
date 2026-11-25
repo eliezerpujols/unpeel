@@ -12,7 +12,7 @@ struct ComputerUseSettingsPanel: View {
             Section {} header: {
                 SettingsPaneHeader(
                     title: "Computer use",
-                    description: "Agents can see the screen and control apps on this Mac. Browsers stay read-only."
+                    description: "Agents can see the screen and control apps on this Mac."
                 )
             }
             Section {
@@ -25,7 +25,16 @@ struct ComputerUseSettingsPanel: View {
                     }
                 }
             } footer: {
-                Text(store.computerUseAccess.detail)
+                Text(store.computerUseAccess.detail(unrestricted: store.computerUnrestricted))
+                    .foregroundStyle(Theme.mutedForeground)
+            }
+            Section {
+                Toggle("Let agents control any app", isOn: Binding(
+                    get: { store.computerUnrestricted },
+                    set: store.setComputerUnrestricted
+                ))
+            } footer: {
+                Text("Includes browsers with your signed-in accounts, terminals, and Unpeel itself.")
                     .foregroundStyle(Theme.mutedForeground)
             }
             Section {

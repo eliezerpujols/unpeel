@@ -1106,6 +1106,9 @@ pub struct AppState {
     /// Live access to the Mac app's computer-use adapter. Explicit opt-in.
     #[serde(default = "ComputerAccess::off")]
     pub computer_use: ComputerAccess,
+    /// Full-tier input for all apps, with app prompts skipped in Allow mode.
+    #[serde(default)]
+    pub computer_unrestricted: bool,
     /// Access setting retained for clients of the former computer engine.
     #[serde(default)]
     pub computer_default_access: ComputerAccess,
@@ -1223,6 +1226,7 @@ impl Default for AppState {
             mcp_worktree_access: false,
             mcp_auto_add_browser_screenshots: true,
             computer_use: ComputerAccess::Off,
+            computer_unrestricted: false,
             computer_default_access: ComputerAccess::default(),
             computer_approvals: Vec::new(),
             computer_app_approvals: BTreeMap::new(),

@@ -524,6 +524,7 @@ struct AppStateFile: Decodable {
     let appPresentations: AppPresentationsFile?
     /// Live Computer MCP access for this workspace. Absent ⇒ off.
     let computerUse: ComputerAccess
+    let computerUnrestricted: Bool
     /// `browser_approvals` (state.rs) — session ids the user approved for
     /// browser use under Ask. Absent ⇒ empty.
     let browserApprovals: [String]
@@ -583,6 +584,7 @@ struct AppStateFile: Decodable {
         case mcpAppOpenApprovals = "mcp_app_open_approvals"
         case appPresentations = "app_presentations"
         case computerUse = "computer_use"
+        case computerUnrestricted = "computer_unrestricted"
         case browserApprovals = "browser_approvals"
         case mcpWorktreeAccess = "mcp_worktree_access"
         case mcpAutoAddBrowserScreenshots = "mcp_auto_add_browser_screenshots"
@@ -648,6 +650,7 @@ struct AppStateFile: Decodable {
         )) ?? nil
         computerUse = (try? container.decode(String.self, forKey: .computerUse))
             .map(ComputerAccess.fromStateString) ?? .off
+        computerUnrestricted = (try? container.decode(Bool.self, forKey: .computerUnrestricted)) ?? false
         browserApprovals = ((try? container.decodeIfPresent(
             [String].self, forKey: .browserApprovals
         )) ?? nil) ?? []
@@ -857,11 +860,13 @@ enum ComputerAccess: String, CaseIterable, Identifiable {
         }
     }
 
-    var detail: String {
+    func detail(unrestricted: Bool) -> String {
         switch self {
         case .off: return "No computer control for any session."
         case .ask: return "Ask before showing the screen or granting app control."
-        case .allow: return "Sessions can see the screen without asking. Each app still requires a grant."
+        case .allow:
+            return unrestricted ? "Sessions can control any app without asking."
+                : "Sessions can see the screen without asking. Each app still requires a grant."
         }
     }
 

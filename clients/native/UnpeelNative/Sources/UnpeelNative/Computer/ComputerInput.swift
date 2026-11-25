@@ -4,7 +4,11 @@ import Foundation
 @MainActor
 final class ComputerInput {
     // Local approval and stop controls ignore events posted by this engine.
-    static let eventTag: Int64 = 0x554E_504C_4355
+    nonisolated static let eventTag: Int64 = 0x554E_504C_4355
+
+    nonisolated static func isSynthetic(_ event: NSEvent) -> Bool {
+        event.cgEvent?.getIntegerValueField(.eventSourceUserData) == eventTag
+    }
 
     private let source = CGEventSource(stateID: .privateState)
     private var pendingLeftRelease: (point: CGPoint, delivery: ComputerPointerDelivery, number: Int)?
@@ -253,6 +257,8 @@ final class ComputerInput {
         else { throw ComputerError("Could not create a keyboard event.") }
         down.flags = flags
         up.flags = flags
+        down.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+        up.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         return (down, up)
     }
 }

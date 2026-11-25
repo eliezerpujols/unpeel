@@ -54,8 +54,11 @@ final class ComputerControl: ObservableObject {
 
     func start(ownPort: UInt16?, hasPendingApprovals: @escaping () -> Bool) {
         self.ownPort = ownPort
-        inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .scrollWheel]) { [weak self] event in
-            guard event.cgEvent?.getIntegerValueField(.eventSourceUserData) == ComputerInput.eventTag else { return event }
+        inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp,
+            .scrollWheel, .keyDown, .keyUp, .flagsChanged
+        ]) { [weak self] event in
+            guard ComputerInput.isSynthetic(event) else { return event }
             let windowNumber = event.windowNumber
             let blocked = MainActor.assumeIsolated {
                 hasPendingApprovals() || self?.pill.panel?.windowNumber == windowNumber

@@ -37,8 +37,9 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(125);
 const MAX_INLINE_PNG_BYTES: usize = 1_500_000 / 4 * 3;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
-const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel browser for websites. \
-    Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. Take a screenshot first and \
+const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel browser for websites by default. \
+    Use the computer tool in the app the user names. Use it in a real browser only when the user asks for that browser \
+    and Let agents control any app is on. Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. Take a screenshot first and \
     after each step. Use the latest screenshot's pixels for coordinates. Never send money, trade, \
     buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them.";
@@ -134,7 +135,7 @@ fn help(arguments: &Value) -> Result<String, String> {
     };
     let mut lines = vec![
         USAGE.to_owned(),
-        "The origin is at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds. Input requires a grant for each app. Terminals and IDEs only accept left_click and scroll.".to_owned(),
+        "The origin is at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds. With Let agents control any app off, browsers are read-only and terminals, IDEs, and Unpeel accept left-click and scroll. Enabling it gives all apps full input. Ask still requires per-app approval. Allow skips app prompts while the setting is on.".to_owned(),
     ];
     lines.extend(
         actions
@@ -406,6 +407,9 @@ fn approval_needed(
     target: Option<&AppTarget>,
 ) -> Result<bool, String> {
     let mode = access_mode(state.get("computer_use"))?;
+    if target.is_some() && mode == ComputerAccess::Allow && safety::unrestricted(state) {
+        return Ok(false);
+    }
     match safety::decision(state, session_id, target) {
         Some(Decision::Allow) => Ok(false),
         Some(Decision::Deny) => Err(denied_message(target)),
@@ -608,16 +612,28 @@ pub fn handle_local_call(
         &action_log_entry(action, &body, &resolution),
     )?;
     if let Some(app) = target {
-        safety::check_tier(action, app)?;
+        safety::check_tier(action, app, safety::unrestricted(&app_state::load()?))?;
     }
     authorize_action(session_id, target, &control, &request_approval)?;
     control.require_current()?;
     let session = require_session(session_id)?;
-    access_mode(app_state::load()?.get("computer_use"))?;
+    let state = app_state::load()?;
+    access_mode(state.get("computer_use"))?;
+    let unrestricted = safety::unrestricted(&state);
+    if let Some(app) = target {
+        // An approval can outlive a change to the workspace's input policy.
+        safety::check_tier(action, app, unrestricted)?;
+        if approval_needed(&state, session_id, Some(app))? {
+            return Err(
+                "Computer use approval changed. Retry the action to request approval.".into(),
+            );
+        }
+    }
     if action == "status" {
         return call_adapter(STATUS_OPERATION, json!({}));
     }
 
+    body[safety::UNRESTRICTED] = json!(unrestricted);
     body["target"] = json!(target);
     if let Some(point) = resolution.screen_coordinate {
         body["screen_coordinate"] = json!(point);
@@ -1057,6 +1073,42 @@ mod tests {
         assert!(!record.to_string().contains(secret));
         assert_eq!(record["coordinate"], json!([1, 2]));
         assert_eq!(record["app"]["bundle_id"], "com.apple.Notes");
+    }
+
+    #[test]
+    fn unrestricted_allow_skips_app_approvals_but_ask_and_off_keep_their_policy() {
+        let safari = AppTarget {
+            name: "Safari".into(),
+            bundle_id: "com.apple.Safari".into(),
+            pid: Some(1),
+        };
+        assert!(!AppState::default().computer_unrestricted);
+        for value in [Value::Null, json!(false), json!("true"), json!(1)] {
+            let state = json!({"computer_use": "allow", "computer_unrestricted": value});
+            assert!(approval_needed(&state, "session", Some(&safari)).unwrap());
+        }
+        let mut state = json!({"computer_use": "allow", "computer_unrestricted": true});
+        assert!(!approval_needed(&state, "session", Some(&safari)).unwrap());
+        state["computer_use"] = json!("ask");
+        assert!(approval_needed(&state, "session", Some(&safari)).unwrap());
+        safety::remember(
+            state.as_object_mut().unwrap(),
+            "session",
+            Some(&safari),
+            Decision::Deny,
+        )
+        .unwrap();
+        assert!(approval_needed(&state, "session", Some(&safari)).is_err());
+        state["computer_use"] = json!("allow");
+        assert!(!approval_needed(&state, "session", Some(&safari)).unwrap());
+        state["computer_unrestricted"] = json!(false);
+        assert!(approval_needed(&state, "session", Some(&safari)).is_err());
+        state["computer_unrestricted"] = json!(true);
+        state["computer_use"] = json!("off");
+        assert_eq!(
+            approval_needed(&state, "session", Some(&safari)).unwrap_err(),
+            OFF_MESSAGE
+        );
     }
 
     #[test]

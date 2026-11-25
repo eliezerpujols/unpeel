@@ -194,8 +194,10 @@ Registration per provider (all through the explicitly installed integration,
 
 ## Computer use on macOS
 
-Use `computer` for native Mac apps and the [Unpeel `browser` tool](browser-mcp.md)
-for websites and localhost URLs. An agent's built-in browser and computer-use
+Default to the [Unpeel `browser` tool](browser-mcp.md) for websites and localhost
+URLs. Use `computer` for the native Mac app the user names. Use it in an
+installed browser only when the user names that browser and **Let agents
+control any app** is on. An agent's built-in browser and computer-use
 tools fail inside an Unpeel terminal. Call `computer` with `{"action":"help"}`
 for the supported actions or `{"action":"status"}` to check permissions, the
 frontmost app, and active displays. `status` lists each display's index,
@@ -233,12 +235,16 @@ Mac app must be connected as its platform adapter and have macOS Screen
 Recording and Accessibility permissions. Set the mode in **Unpeel Settings ▸
 Computer use**.
 
-- **Off** blocks computer use. **Ask** prompts before screen access. **Allow**
-  grants screen access. In both Ask and Allow, input or opening an app requires
-  a separate grant for that app in the current session.
-- Browsers are read-only through `computer`. Terminals, IDEs, and Unpeel
-  accept only left-click and scroll. Use the control pill or `⌃⌥⌘.` to pause
-  computer use, and resume from the pill or Settings.
+- **Off** blocks computer use. **Ask** prompts for screen access and app input.
+  **Allow** grants screen access and ordinarily requires each app to be approved
+  for the session.
+- **Let agents control any app** is off by default. With it off, browsers are
+  read-only and terminals, IDEs, and Unpeel accept only left-click and scroll.
+  Turning it on enables full input in all apps, including browsers signed in to
+  your accounts. Ask still prompts for app approval. Allow skips those prompts
+  while the setting is on.
+- Use the control pill or `⌃⌥⌘.` to pause computer use, and resume from the pill
+  or Settings.
 - The workspace Host checks approvals and chooses paths under the session's
   `artifacts/computer/screenshots/`. The Mac app captures the screenshots and
   sends the input. The Host logs action metadata in
@@ -253,8 +259,8 @@ verifier share the same workspace.
 UNPEEL_HOME="$(mktemp -d /tmp/up-computer.XXXXXX)" bun run dev:native:blank
 ```
 
-In that instance, enable Sessions use, set Computer use to Allow, and grant
-Screen Recording and Accessibility. Open a fresh shell session and copy its
+In that instance, enable Sessions use, set Computer use to Allow, leave
+**Let agents control any app** off, and grant Screen Recording and Accessibility. Open a fresh shell session and copy its
 ID with `printenv UNPEEL_SESSION_ID`. In macOS Terminal, run the following from
 the checkout with the home printed by the launcher and that session ID.
 The shell needs `jq` and macOS Automation permission for TextEdit. Approve
