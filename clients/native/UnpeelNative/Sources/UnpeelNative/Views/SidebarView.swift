@@ -1196,7 +1196,7 @@ struct ProjectNodeView: View {
     /// Long groups show their first `collapsedSessionLimit` rows (pinned
     /// first) with a Show more / Show less toggle at the end of the list.
     @State private var showsAllSessions = false
-    private static let collapsedSessionLimit = 7
+    static let collapsedSessionLimit = 7
 
     /// Top-level projects and child folders both use the detached drag;
     /// children interleave with sessions, while top-level projects reorder

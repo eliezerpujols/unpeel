@@ -1074,12 +1074,15 @@ struct SidebarListContent: Equatable {
         /// The muted "No sessions yet." / "No active sessions." row an
         /// expanded empty project shows.
         case emptyPlaceholder(projectID: String, label: String, depth: Int)
+        /// The collapsed "Show more" toggle a long project list ends with.
+        case showMore(projectID: String, hiddenCount: Int, depth: Int)
 
         var id: String {
             switch self {
             case .folder(let row): return "folder:\(row.id)"
             case .session(let row): return "session:\(row.id)"
             case .emptyPlaceholder(let projectID, _, _): return "empty:\(projectID)"
+            case .showMore(let projectID, _, _): return "more:\(projectID)"
             }
         }
     }
@@ -1276,6 +1279,29 @@ enum SidebarListContentBuilder {
     /// groups interleaved), then the regular section's interleaved Session
     /// and child-folder rows (recursing when a folder is expanded), then the
     /// empty placeholder. `budget` bounds total row production.
+    /// Mirrors `ProjectNodeView.visibleRegularItemCount` for a collapsed
+    /// list: the first rows up to the cap, extended to the selected Session.
+    private static func collapsedVisibleCount(
+        pinnedCount: Int,
+        regular: [SidebarMixedItem],
+        isSelected: (SessionEntry) -> Bool
+    ) -> Int {
+        let limit = max(0, ProjectNodeView.collapsedSessionLimit - pinnedCount)
+        guard regular.count > limit else { return regular.count }
+        func contains(_ node: ProjectNode) -> Bool {
+            node.sessions.contains(where: isSelected) || node.worktrees.contains(where: contains)
+        }
+        if let index = regular.firstIndex(where: { item in
+            switch item {
+            case .session(let entry): isSelected(entry)
+            case .folder(let child): contains(child)
+            }
+        }), index >= limit {
+            return index + 1
+        }
+        return limit
+    }
+
     private static func innerRows(
         for node: ProjectNode,
         depth: Int,
@@ -1326,7 +1352,23 @@ enum SidebarListContentBuilder {
         let pinned = pinnedItems(node)
         guard appendItems(pinned, pinned: true) else { return rows }
         let regularItems = displayedItems(node, sessionLists(node).displayed)
-        guard appendItems(regularItems, pinned: false) else { return rows }
+        // Same collapsed cap as the live list (`ProjectNodeView`), which
+        // starts collapsed whenever a workspace page mounts.
+        let visibleRegular = collapsedVisibleCount(
+            pinnedCount: pinned.count,
+            regular: regularItems,
+            isSelected: { sessionRow($0, depth, false).isSelected }
+        )
+        guard appendItems(Array(regularItems.prefix(visibleRegular)), pinned: false)
+        else { return rows }
+        if visibleRegular < regularItems.count, budget > 0 {
+            budget -= 1
+            rows.append(.showMore(
+                projectID: node.id,
+                hiddenCount: regularItems.count - visibleRegular,
+                depth: depth
+            ))
+        }
         if pinned.isEmpty, regularItems.isEmpty {
             rows.append(.emptyPlaceholder(
                 projectID: node.id,
@@ -1874,6 +1916,13 @@ private struct SidebarPooledListBody: View {
                 ageTimestampMs: row.ageTimestampMs,
                 onSelect: {}
             ).equatable()
+        case .showMore(_, let hiddenCount, let depth):
+            SidebarShowMoreRow(
+                expanded: false,
+                hiddenCount: hiddenCount,
+                depth: depth,
+                action: {}
+            )
         case .emptyPlaceholder(_, let label, let depth):
             // The REAL component with inert inputs (the page never
             // hit-tests), so the label's Menu-chrome metrics are identical
