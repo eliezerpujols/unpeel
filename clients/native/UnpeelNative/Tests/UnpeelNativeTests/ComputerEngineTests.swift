@@ -101,21 +101,51 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertThrowsError(try ComputerTargetLookup.preferredKeyboardPID(matching: [], frontmost: 25))
     }
 
-    func testPointerRoutingPrefersWindowsAndUsesHIDForKnownExceptions() {
-        let window = ComputerPointerDelivery.Window(id: 76, bounds: CGRect(x: -800, y: 50, width: 640, height: 360))
-        func route(
-            _ window: ComputerPointerDelivery.Window?, role: String? = nil,
-            app: String = "com.apple.Notes", click: Bool = true, foreground: Bool = false
-        ) -> ComputerPointerDelivery {
-            ComputerPointerDelivery(pid: 42, window: window, role: role, bundleID: app, isClick: click, isForeground: foreground)
+    @MainActor
+    func testAccessibilityFindsTheNearestActionableControl() {
+        func candidate(
+            _ roles: [String], pressable: Set<Int> = [], focusable: Set<Int> = [], disabled: Set<Int> = [],
+            singleLeftClick: Bool = true, isTextEdit: Bool = false
+        ) -> ComputerAccessibility.ClickCandidate<Int> {
+            ComputerAccessibility.clickCandidate(
+                at: 0, allowsAXAction: singleLeftClick, isTextEdit: isTextEdit, roleOf: { roles[$0] },
+                parentOf: { roles.indices.contains($0 + 1) ? $0 + 1 : nil },
+                isEnabled: { !disabled.contains($0) }, canFocus: focusable.contains, canPress: pressable.contains
+            )
         }
-        XCTAssertEqual(route(window, role: "AXTextArea"), .window(42, window))
-        XCTAssertEqual(route(window, role: "AXMenuItem"), .hid(42))
-        XCTAssertEqual(route(nil), .hid(42))
-        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit"), .hid(42, requiresActivation: true))
-        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit", foreground: true), .window(42, window))
-        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit", click: false), .window(42, window))
-        XCTAssertEqual(route(window, role: "AXButton", app: "com.apple.TextEdit"), .window(42, window))
+        XCTAssertEqual(candidate(["AXStaticText", "AXLink", "AXGroup"], pressable: [1, 2]).action, .press(1))
+        XCTAssertEqual(candidate(["AXImage", "AXGroup", "AXButton"], pressable: [2]).action, .press(2))
+        XCTAssertEqual(candidate(["AXMenuItem", "AXMenu"], pressable: [0]).action, .press(0))
+        XCTAssertEqual(candidate(["AXCheckBox"], pressable: [0]).action, .press(0))
+        XCTAssertEqual(candidate(["AXStaticText", "AXTextField"], pressable: [1], focusable: [1]).action, .focus(1))
+        XCTAssertEqual(candidate(["AXTextArea", "AXWindow"], focusable: [0], isTextEdit: true).action, .focus(0))
+        XCTAssertNil(candidate(["AXButton", "AXGroup"], pressable: [0, 1], disabled: [0]).action)
+        XCTAssertNil(candidate(["AXGroup", "AXWindow"], pressable: [1]).action)
+        XCTAssertNil(candidate(["AXLink"], pressable: [0], singleLeftClick: false).action)
+        XCTAssertFalse(candidate(["AXGroup", "AXWebArea"], singleLeftClick: false).acceptsBackgroundEvents)
+        XCTAssertFalse(candidate(["AXTextArea", "AXWindow"], isTextEdit: true).acceptsBackgroundEvents)
+    }
+
+    func testClickRoutingPrefersAccessibilityAndRejectsUnsupportedBackgroundClicks() {
+        let window = ComputerPointerDelivery.Window(id: 76, bounds: CGRect(x: -800, y: 50, width: 640, height: 360))
+        let delivery = ComputerPointerDelivery(pid: 42, window: window)
+        func route(
+            _ action: ComputerAccessibility.Click<Int>? = nil, hasWindow: Bool = true,
+            browser: Bool = false, backgroundEvents: Bool = true, foreground: Bool = false
+        ) -> ComputerClickRoute<Int> {
+            ComputerClickRoute(
+                candidate: .init(action: action, acceptsBackgroundEvents: backgroundEvents),
+                delivery: hasWindow ? delivery : nil, usesBrowserEngine: browser, isForeground: foreground
+            )
+        }
+        XCTAssertEqual(route(.press(1), browser: true), .accessibility(.press(1)))
+        XCTAssertEqual(route(.focus(0), backgroundEvents: false), .accessibility(.focus(0)))
+        XCTAssertEqual(route(.press(0), hasWindow: false), .accessibility(.press(0)))
+        XCTAssertEqual(route(), .process(delivery))
+        XCTAssertEqual(route(browser: true, foreground: true), .process(delivery))
+        XCTAssertEqual(route(browser: true), .unavailable)
+        XCTAssertEqual(route(backgroundEvents: false), .unavailable)
+        XCTAssertEqual(route(hasWindow: false), .unavailable)
     }
 
     @MainActor

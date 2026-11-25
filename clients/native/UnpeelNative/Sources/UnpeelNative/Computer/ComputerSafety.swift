@@ -68,12 +68,6 @@ enum ComputerAppAuthorization {
 
 @MainActor
 enum ComputerTargetLookup {
-    private static let desktop = {
-        let element = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(element, 0.25)
-        return element
-    }()
-
     static func frontmost() throws -> ComputerTarget {
         try target(NSWorkspace.shared.frontmostApplication)
     }
@@ -97,44 +91,40 @@ enum ComputerTargetLookup {
         throw ComputerError("Multiple copies of that app are running. Choose the intended copy in the foreground.")
     }
 
-    static func pointer(at point: CGPoint, isClick: Bool = false) throws -> ComputerPointerTarget {
-        // A window owner and its accessibility hit can differ, for example
-        // when a browser exposes an accessibility element from a helper.
-        // Resolve browsers to their window owner even when unrestricted,
-        // so a renderer helper cannot be mistaken for a separate app grant.
+    static func pointer(at point: CGPoint) throws -> ComputerPointerTarget {
         let window = try frontWindow(at: point)
-        if let window, ComputerAppTier(bundleID: window.app.bundleID) == .read {
+        let hit = ComputerAccessibility.hit(at: point)
+        if let window, window.usesBrowserEngine {
+            // Renderer helpers do not have their own app grant. If the
+            // system-wide hit differs, ask the verified window owner and
+            // only keep an AX element attributed to that process.
+            let appHit = hit?.pid == window.pid ? hit : ComputerAccessibility.hit(at: point, in: window.pid)
             return ComputerPointerTarget(
-                app: window.app, window: window.info,
-                delivery: ComputerPointerDelivery(
-                    pid: window.pid, window: window.info, role: nil, bundleID: window.app.bundleID,
-                    isClick: isClick, isForeground: false
-                )
+                app: window.app, window: window.info, hit: appHit, usesBrowserEngine: true
             )
         }
-        // Accessibility hit-tests menus and overlapping windows in the same
-        // top-left point space as Quartz.
-        var element: AXUIElement?
-        var pid: pid_t = 0
-        guard AXUIElementCopyElementAtPosition(desktop, Float(point.x), Float(point.y), &element) == .success,
-              let element, AXUIElementGetPid(element, &pid) == .success, pid > 0
-        else { throw ComputerError("Could not identify the app at that point.") }
-        let hit = try target(NSRunningApplication(processIdentifier: pid))
-        guard window?.app.matches(hit) != false || ComputerAppTier(bundleID: hit.bundleID) == .read else {
+        guard let hit else { throw ComputerError("Could not identify the app at that point.") }
+        let application = NSRunningApplication(processIdentifier: hit.pid)
+        let app = try target(application)
+        guard window?.app.matches(app) != false else {
             throw ComputerError("Could not confirm which app would receive input at that point.")
         }
-        var value: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
         return ComputerPointerTarget(
-            app: hit, window: window?.info,
-            delivery: ComputerPointerDelivery(
-                pid: pid, window: window?.info, role: value as? String, bundleID: hit.bundleID, isClick: isClick,
-                isForeground: NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-            )
+            app: app, window: window?.info, hit: hit, usesBrowserEngine: window?.usesBrowserEngine ?? usesBrowserEngine(app, application)
         )
     }
 
-    private static func frontWindow(at point: CGPoint) throws -> (app: ComputerTarget, pid: pid_t, info: ComputerPointerDelivery.Window?)? {
+    private static func usesBrowserEngine(_ app: ComputerTarget, _ application: NSRunningApplication?) -> Bool {
+        // Classify browsers independently of the current permission mode.
+        if ComputerAppTier(bundleID: app.bundleID) == .read { return true }
+        guard let bundle = application?.bundleURL else { return false }
+        let framework = bundle.appendingPathComponent("Contents/Frameworks/Electron Framework.framework")
+        return FileManager.default.fileExists(atPath: framework.path)
+    }
+
+    private static func frontWindow(at point: CGPoint) throws -> (
+        app: ComputerTarget, pid: pid_t, info: ComputerPointerDelivery.Window?, usesBrowserEngine: Bool
+    )? {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]
         else { throw ComputerError("Could not read the windows on this display.") }
@@ -148,7 +138,9 @@ enum ComputerTargetLookup {
             let info: ComputerPointerDelivery.Window? = (window[kCGWindowNumber as String] as? CGWindowID).flatMap {
                 $0 == kCGNullWindowID ? nil : ComputerPointerDelivery.Window(id: $0, bounds: rect)
             }
-            return (try target(NSRunningApplication(processIdentifier: pid)), pid, info)
+            let application = NSRunningApplication(processIdentifier: pid)
+            let app = try target(application)
+            return (app, pid, info, usesBrowserEngine(app, application))
         }
         return nil
     }

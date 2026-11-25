@@ -31,11 +31,6 @@ struct ComputerRequest: Equatable {
         case openApp(String)
         case status
 
-        var isClick: Bool {
-            if case .click = self { return true }
-            return false
-        }
-
         var needsAccessibility: Bool {
             switch self {
             case .click, .mouseMove, .drag, .leftMouseDown, .leftMouseUp, .type, .key, .scroll:

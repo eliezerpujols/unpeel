@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -284,7 +285,7 @@ final class ComputerPlatformAdapter {
             return .launch(try ComputerApps.resolveLaunch(name))
         case let .click(_, _, pixel), let .mouseMove(pixel):
             let position = try point(pixel, resolved: request.screenPoint)
-            return .pointer(try ComputerTargetLookup.pointer(at: position, isClick: request.action.isClick), position)
+            return .pointer(try ComputerTargetLookup.pointer(at: position), position)
         case let .leftMouseDown(pixel), let .leftMouseUp(pixel), let .scroll(_, _, pixel):
             let position = try point(pixel, resolved: request.screenPoint)
             return .pointer(try ComputerTargetLookup.pointer(at: position), position)
@@ -349,20 +350,13 @@ final class ComputerPlatformAdapter {
             func checkPoint(_ position: CGPoint) throws {
                 try check(ComputerTargetLookup.pointer(at: position).app)
             }
-            func checkDelivery(afterSystemActivation: Bool) throws {
-                let actual = try ComputerTargetLookup.pointer(at: point, isClick: request.action.isClick)
-                try check(actual.app)
-                let sameDestination = afterSystemActivation
-                    ? actual.window?.id == target.window?.id
-                    : actual.delivery == target.delivery
-                guard sameDestination else {
-                    throw ComputerError("The window under the point changed. Take a new screenshot and retry.")
-                }
+            let actual = try ComputerTargetLookup.pointer(at: point)
+            try check(actual.app)
+            guard actual.window == target.window else {
+                throw ComputerError("The window under the point changed. Take a new screenshot and retry.")
             }
-            try checkDelivery(afterSystemActivation: false)
             try await postPointer(
-                request, target: target, point: point, end: end, activity: activity,
-                checkDelivery: checkDelivery, checkPoint: checkPoint
+                request, target: actual, point: point, end: end, activity: activity, checkPoint: checkPoint
             )
             cursorPoints[request.sessionID] = end ?? point
         }
@@ -371,16 +365,16 @@ final class ComputerPlatformAdapter {
 
     private func postPointer(
         _ request: ComputerRequest, target: ComputerPointerTarget, point: CGPoint, end: CGPoint?,
-        activity: ComputerControl.Activity, checkDelivery: (Bool) throws -> Void, checkPoint: (CGPoint) throws -> Void
+        activity: ComputerControl.Activity, checkPoint: (CGPoint) throws -> Void
     ) async throws {
         let delivery = target.delivery
         switch request.action {
         case .mouseMove:
             // A point on a system surface can still establish the session's
             // cursor without moving the physical pointer.
-            if delivery.targetsWindow { try input.move(to: point, delivery: delivery) }
+            if let delivery { try input.move(to: point, delivery: delivery) }
         case .drag, .leftMouseDown, .leftMouseUp:
-            guard delivery.targetsWindow else {
+            guard let delivery else {
                 throw ComputerError("Dragging or holding a button requires a target window.")
             }
             switch request.action {
@@ -397,22 +391,37 @@ final class ComputerPlatformAdapter {
             default: break
             }
         case let .click(button, count, _):
-            if case let .hid(pid, requiresActivation) = delivery {
-                try await input.withHIDPointer(at: point, targetPID: pid, requiresActivation: requiresActivation) {
-                    try checkDelivery(requiresActivation)
-                    try input.click(button, count: count, at: point, delivery: delivery)
+            let candidate = target.hit.map {
+                ComputerAccessibility.clickCandidate(
+                    at: $0, allowsAXAction: button == .left && count == 1,
+                    isTextEdit: target.app.bundleID.caseInsensitiveCompare("com.apple.TextEdit") == .orderedSame
+                )
+            }
+            let isForeground = NSWorkspace.shared.frontmostApplication?.processIdentifier == target.app.pid
+            try Task.checkCancellation()
+            switch ComputerClickRoute(
+                candidate: candidate, delivery: delivery, usesBrowserEngine: target.usesBrowserEngine,
+                isForeground: isForeground
+            ) {
+            case let .accessibility(click):
+                // AX can time out after dispatch. Never send a second click.
+                let result = ComputerAccessibility.perform(click)
+                guard result == .success else {
+                    throw ComputerError("Accessibility could not confirm the click in \(target.app.name). Check the app before retrying.")
                 }
-            } else {
+            case let .process(delivery):
                 try input.click(button, count: count, at: point, delivery: delivery)
+            case .unavailable:
+                if !isForeground {
+                    throw ComputerError("This click needs the app in front. Bring \(target.app.name) forward manually and retry.")
+                }
+                throw ComputerError("This click needs an accessible control or a window that accepts targeted input.")
             }
         case let .scroll(direction, amount, _):
-            guard let pid = target.app.pid else { throw ComputerError("The target app has no process.") }
-            // Quartz wheel events have no AppKit destination window after
-            // postToPid. WindowServer must route them under the cursor.
-            try await input.withHIDPointer(at: point, targetPID: pid) {
-                try checkDelivery(false)
-                try input.scroll(direction, amount: amount, at: point)
+            guard let delivery else {
+                throw ComputerError("Scrolling requires a window that accepts targeted input.")
             }
+            try input.scroll(direction, amount: amount, at: point, delivery: delivery)
         default: break
         }
     }

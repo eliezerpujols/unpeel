@@ -217,13 +217,14 @@ existing window or control that accepts it. Some macOS shortcuts, including
 menu commands in apps such as TextEdit, only work in the foreground.
 
 Pointer actions use the visible window under the given point. The session
-keeps its own pointer position without moving the physical cursor for
-window-targeted events. Scrolling, system menus, and a background TextEdit
-editor can require WindowServer to route input through the physical pointer.
-That fallback can move the
-pointer or focus briefly, then restores both where macOS allows it. A user switch to a
-different app or a physical pointer move takes precedence. Dragging and
-holding a button require a target window.
+keeps its own pointer position and leaves the user's cursor and foreground
+app alone. A single left click uses macOS Accessibility to press the nearest
+control that supports it, including links, buttons, checkboxes, and menu
+items. Clicking a focusable text field sets its Accessibility focus for
+follow-up typing with `app`. Other clicks, scrolling, dragging, and button
+holds use process-targeted events when the destination supports them. If a
+background click needs the app in front, the tool asks the user to bring it
+forward manually.
 
 Never send money, trade, buy, or transfer funds. Ask the user to do it. Never
 click links in emails or messages. Use the Unpeel browser and check unfamiliar

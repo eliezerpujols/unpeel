@@ -1,32 +1,13 @@
 import AppKit
 
-enum ComputerPointerDelivery: Equatable {
+struct ComputerPointerDelivery: Equatable {
     struct Window: Equatable {
         let id: CGWindowID
         let bounds: CGRect
     }
 
-    case window(pid_t, Window)
-    case hid(pid_t, requiresActivation: Bool = false)
-
-    init(pid: pid_t, window: Window?, role: String?, bundleID: String, isClick: Bool, isForeground: Bool) {
-        let systemMenus = [kAXMenuBarRole, kAXMenuBarItemRole, kAXMenuRole, kAXMenuItemRole]
-        let usesSystemMenu = role.map(systemMenus.contains) ?? false
-        // TextEdit accepts window-targeted clicks when key, but its text
-        // view discards them in the background. Use one compensated HID click.
-        let needsActiveTextEdit = isClick && !isForeground && role == kAXTextAreaRole
-            && bundleID.caseInsensitiveCompare("com.apple.TextEdit") == .orderedSame
-        if let window, !usesSystemMenu, !needsActiveTextEdit {
-            self = .window(pid, window)
-        } else {
-            self = .hid(pid, requiresActivation: needsActiveTextEdit)
-        }
-    }
-
-    var targetsWindow: Bool {
-        if case .window = self { return true }
-        return false
-    }
+    let pid: pid_t
+    let window: Window
 
     /// AppKit must build the event with a window number. The public Quartz
     /// window-under-pointer fields alone leave NSEvent.windowNumber at zero.
@@ -42,20 +23,43 @@ enum ComputerPointerDelivery: Equatable {
     }
 
     func post(_ event: CGEvent) {
-        switch self {
-        case let .window(pid, window):
-            event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
-            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.id))
-            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.id))
-            event.postToPid(pid)
-        case .hid:
-            event.post(tap: .cghidEventTap)
-        }
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.id))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.id))
+        event.postToPid(pid)
     }
 }
 
 struct ComputerPointerTarget {
     let app: ComputerTarget
     let window: ComputerPointerDelivery.Window?
-    let delivery: ComputerPointerDelivery
+    let hit: ComputerAccessibility.Hit?
+    let usesBrowserEngine: Bool
+
+    var delivery: ComputerPointerDelivery? {
+        let menus = [kAXMenuBarRole, kAXMenuBarItemRole, kAXMenuRole, kAXMenuItemRole]
+        guard let window, let pid = app.pid, hit?.role.map(menus.contains) != true else { return nil }
+        return ComputerPointerDelivery(pid: pid, window: window)
+    }
 }
+
+enum ComputerClickRoute<Element> {
+    case accessibility(ComputerAccessibility.Click<Element>)
+    case process(ComputerPointerDelivery)
+    case unavailable
+
+    init(
+        candidate: ComputerAccessibility.ClickCandidate<Element>?, delivery: ComputerPointerDelivery?,
+        usesBrowserEngine: Bool, isForeground: Bool
+    ) {
+        if let action = candidate?.action {
+            self = .accessibility(action)
+        } else if let delivery, isForeground || (!usesBrowserEngine && candidate?.acceptsBackgroundEvents != false) {
+            self = .process(delivery)
+        } else {
+            self = .unavailable
+        }
+    }
+}
+
+extension ComputerClickRoute: Equatable where Element: Equatable {}

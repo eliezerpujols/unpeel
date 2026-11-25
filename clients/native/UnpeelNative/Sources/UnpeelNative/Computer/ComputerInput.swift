@@ -31,71 +31,6 @@ final class ComputerInput {
         pendingLeftRelease?.point = point
     }
 
-    /// Menus and some system surfaces require WindowServer routing. Limit that
-    /// path to discrete actions, then give the user's pointer and focus back.
-    func withHIDPointer(
-        at point: CGPoint, targetPID: pid_t, requiresActivation: Bool = false, send: () throws -> Void
-    ) async throws {
-        let workspace = NSWorkspace.shared
-        guard let previousApp = workspace.frontmostApplication else {
-            throw ComputerError("Could not save your foreground app for system pointer input.")
-        }
-        let previousPoint = try cursorPosition()
-        let result: Result<Void, Error>
-        do {
-            if requiresActivation, previousApp.processIdentifier != targetPID {
-                guard let target = NSRunningApplication(processIdentifier: targetPID), !target.isTerminated,
-                      workspace.frontmostApplication?.processIdentifier == previousApp.processIdentifier else {
-                    throw ComputerError("The foreground app changed before system pointer input.")
-                }
-                try Task.checkCancellation()
-                _ = target.activate(options: [])
-                try await ComputerApps.waitForFrontmost(
-                    targetPID, name: target.localizedName ?? "The target app", timeout: .milliseconds(750)
-                ) { workspace.frontmostApplication?.processIdentifier }
-            }
-            try await positionPointer(at: point, pid: targetPID)
-            try send()
-            result = .success(())
-        } catch {
-            result = .failure(error)
-        }
-
-        // Finish cleanup even if the stop shortcut cancelled this request.
-        let restoring = Task { @MainActor in
-            try await Task.sleep(for: .milliseconds(100))
-            // Respect physical mouse movement or a switch to a third app.
-            defer {
-                if let current = try? cursorPosition(), Self.near(current, point) {
-                    CGWarpMouseCursorPosition(previousPoint)
-                }
-            }
-            try await ComputerApps.restoreForeground(previousApp, displacedBy: targetPID)
-        }
-        try await restoring.value
-        try result.get()
-    }
-
-    private func positionPointer(at point: CGPoint, pid: pid_t) async throws {
-        try Task.checkCancellation()
-        try move(to: point, delivery: .hid(pid))
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .milliseconds(125))
-        while true {
-            try Task.checkCancellation()
-            if Self.near(try cursorPosition(), point) { return }
-            guard clock.now < deadline else {
-                throw ComputerError("The cursor did not reach the target. Take a new screenshot and retry.")
-            }
-            try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(10))))
-        }
-    }
-
-    private static func near(_ first: CGPoint, _ second: CGPoint) -> Bool {
-        // Quartz can round a fractional point to the backing grid.
-        abs(first.x - second.x) <= 1 && abs(first.y - second.y) <= 1
-    }
-
     func click(_ button: CGMouseButton, count: Int, at point: CGPoint, delivery: ComputerPointerDelivery) throws {
         let types: (down: NSEvent.EventType, up: NSEvent.EventType)
         switch button {
@@ -159,7 +94,9 @@ final class ComputerInput {
         try liftLeftButton(at: end, delivery: delivery)
     }
 
-    func scroll(_ direction: ComputerRequest.ScrollDirection, amount: Int32, at point: CGPoint) throws {
+    func scroll(
+        _ direction: ComputerRequest.ScrollDirection, amount: Int32, at point: CGPoint, delivery: ComputerPointerDelivery
+    ) throws {
         let delta: (vertical: Int32, horizontal: Int32)
         switch direction {
         case .up: delta = (amount, 0)
@@ -174,7 +111,7 @@ final class ComputerInput {
         event.flags = []
         event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         event.location = point
-        event.post(tap: .cghidEventTap)
+        delivery.post(event)
     }
 
     func key(_ key: ComputerKey, duration: Duration, to pid: pid_t) async throws {
@@ -223,25 +160,15 @@ final class ComputerInput {
         _ type: NSEvent.EventType, at point: CGPoint, delivery: ComputerPointerDelivery,
         number: Int, button: CGMouseButton = .left, clickCount: Int = 0
     ) throws -> CGEvent {
-        let event: CGEvent?
-        switch delivery {
-        case let .window(_, window):
-            let location = ComputerPointerDelivery.windowMouseLocation(
-                point, in: window, screenTop: CGDisplayBounds(CGMainDisplayID()).maxY
-            )
-            let isDown = [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged].contains(type)
-            event = NSEvent.mouseEvent(
-                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: Int(window.id), context: nil, eventNumber: number, clickCount: clickCount,
-                pressure: isDown ? 1 : 0
-            )?.cgEvent
-        case .hid:
-            guard let quartzType = CGEventType(rawValue: UInt32(type.rawValue)) else {
-                throw ComputerError("Unsupported system mouse event.")
-            }
-            event = CGEvent(mouseEventSource: source, mouseType: quartzType, mouseCursorPosition: point, mouseButton: button)
-        }
-        guard let event else { throw ComputerError("Could not create a mouse event.") }
+        let location = ComputerPointerDelivery.windowMouseLocation(
+            point, in: delivery.window, screenTop: CGDisplayBounds(CGMainDisplayID()).maxY
+        )
+        let isDown = [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged].contains(type)
+        guard let event = NSEvent.mouseEvent(
+            with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: Int(delivery.window.id), context: nil, eventNumber: number, clickCount: clickCount,
+            pressure: isDown ? 1 : 0
+        )?.cgEvent else { throw ComputerError("Could not create a mouse event.") }
         event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
         // A previous shortcut must not turn a plain click into a Command-click.
         event.flags = []
