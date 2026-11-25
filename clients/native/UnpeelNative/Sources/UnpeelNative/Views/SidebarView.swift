@@ -1193,6 +1193,11 @@ struct ProjectNodeView: View {
     /// the title row.
     @State private var groupHovering = false
 
+    /// Long groups show their first `collapsedSessionLimit` rows (pinned
+    /// first) with a Show more / Show less toggle at the end of the list.
+    @State private var showsAllSessions = false
+    private static let collapsedSessionLimit = 7
+
     /// Top-level projects and child folders both use the detached drag;
     /// children interleave with sessions, while top-level projects reorder
     /// only among their siblings.
@@ -1582,7 +1587,10 @@ struct ProjectNodeView: View {
             // group can sit between any two sessions. Folders stay on top
             // until a drag writes them into session-order.json.
             let mixedItems = store.renderedDisplayedItems(in: node)
-            ForEach(Array(mixedItems.enumerated()), id: \.element.id) { index, item in
+            let visibleCount = visibleRegularItemCount(
+                pinned: pinnedItems.count, regular: mixedItems
+            )
+            ForEach(Array(mixedItems.prefix(visibleCount).enumerated()), id: \.element.id) { index, item in
                 switch item {
                 case .folder(let child):
                     ProjectNodeView(
@@ -1602,6 +1610,16 @@ struct ProjectNodeView: View {
                             shortcutHint: shortcutHints[session.id]
                         )
                     }
+                }
+            }
+
+            if mixedItems.count > regularItemLimit(pinned: pinnedItems.count) {
+                SidebarShowMoreRow(
+                    expanded: showsAllSessions,
+                    hiddenCount: mixedItems.count - visibleCount,
+                    depth: depth
+                ) {
+                    withAnimation(SidebarMotion.accordionOpen) { showsAllSessions.toggle() }
                 }
             }
 
@@ -1649,6 +1667,28 @@ struct ProjectNodeView: View {
             .easeOut(duration: 0.28),
             value: store.activePaneMemberSessionIDs
         )
+    }
+
+    private func regularItemLimit(pinned: Int) -> Int {
+        max(0, Self.collapsedSessionLimit - pinned)
+    }
+
+    /// Visible prefix of the regular section. Collapsed, it never hides the
+    /// selected Session: the prefix extends to include it.
+    private func visibleRegularItemCount(pinned: Int, regular: [SidebarMixedItem]) -> Int {
+        let limit = regularItemLimit(pinned: pinned)
+        guard !showsAllSessions, regular.count > limit else { return regular.count }
+        if let selected = store.selectedSessionID,
+           let index = regular.firstIndex(where: { item in
+               switch item {
+               case .session(let session): session.id == selected
+               case .folder(let child): child.containsSidebarSession(selected)
+               }
+           }),
+           index >= limit {
+            return index + 1
+        }
+        return limit
     }
 
     @ViewBuilder
@@ -1885,6 +1925,48 @@ struct EmptySessionsPlaceholderRow: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .background(HoverReporter { hovering = $0 })
+            .animation(.easeInOut(duration: 0.12), value: hovering)
+            Spacer(minLength: 0)
+        }
+        .padding(EdgeInsets(
+            top: 4,
+            leading: 28 + CGFloat(depth) * 14,
+            bottom: 4,
+            trailing: 0
+        ))
+    }
+}
+
+/// Show more / Show less toggle at the end of a long Session list.
+struct SidebarShowMoreRow: View {
+    let expanded: Bool
+    let hiddenCount: Int
+    let depth: Int
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: action) {
+                Text(expanded ? "Show less" : "Show more")
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        hovering
+                            ? Theme.foreground
+                            : Theme.mutedForeground.opacity(0.72)
+                    )
+                    .padding(EdgeInsets(top: 3, leading: 6, bottom: 3, trailing: 6))
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(hovering ? Theme.foreground.opacity(0.08) : .clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Show fewer sessions" : "Show \(hiddenCount) more")
+            .accessibilityLabel(expanded ? "Show less" : "Show \(hiddenCount) more sessions")
             .background(HoverReporter { hovering = $0 })
             .animation(.easeInOut(duration: 0.12), value: hovering)
             Spacer(minLength: 0)
