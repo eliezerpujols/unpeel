@@ -316,6 +316,12 @@ final class UnpeelStore: ObservableObject {
                 }
                 return
             }
+            // A Session chosen here (click, create, resume) supersedes the
+            // selection remembered from before a workspace switch; otherwise
+            // that memory could later pull focus back to an older Session.
+            if selectedSessionID != nil {
+                localSelectedSessionIDBeforeRemote = nil
+            }
             if localHostClientStarted,
                localHostProjectionReady,
                remoteHostRuntime.selectedSessionID != selectedSessionID {
@@ -1516,6 +1522,11 @@ final class UnpeelStore: ObservableObject {
     /// transition. Weak: the pager lives and dies with the sidebar.
     weak var workspacePagerAnimator: SidebarWorkspacePager?
     private var localSelectedSessionIDBeforeRemote: String?
+    /// Highest Host create/restart selection intent this store has applied.
+    /// The intent and the snapshot it rides with arrive on separate main-queue
+    /// ticks; the projection applies an unconsumed intent itself so it never
+    /// pushes the pre-create selection back into the runtime in between.
+    private var consumedDirectSelectionSequence: UInt64 = 0
     /// Last selected Session per non-local scope (pane scope key), for this
     /// app run: returning to a workspace/Host re-selects where you left off
     /// instead of the top row. Deliberately in-memory only, like the Local
@@ -1778,10 +1789,12 @@ final class UnpeelStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] intent in
                 guard let self, let intent,
+                      intent.sequence > self.consumedDirectSelectionSequence,
                       self.selectedHostScope == .local,
                       self.localHostClientStarted,
                       self.localHostProjectionReady
                 else { return }
+                self.consumedDirectSelectionSequence = intent.sequence
                 if let sessionID = intent.sessionID,
                    self.remoteHostRuntime.snapshot?.sessions.contains(where: {
                        $0.id == sessionID
@@ -16678,6 +16691,16 @@ extension UnpeelStore {
                 knownIDs: Set(projectedSessions.keys),
                 hostTruthIsComplete: localHostTruthIsComplete
             )
+            // A create/restart focus decision published with this snapshot
+            // wins over the selection this window held before it.
+            if let intent = remoteHostRuntime.directDataPlaneSelectionIntent,
+               intent.sequence > consumedDirectSelectionSequence {
+                consumedDirectSelectionSequence = intent.sequence
+                if let id = intent.sessionID, projectedSessions[id] != nil,
+                   selectedSessionID != id {
+                    selectedSessionID = id
+                }
+            }
             if !remoteHostRuntime.directDataPlaneSelectionIntentPending,
                remoteHostRuntime.selectedSessionID != selectedSessionID {
                 remoteHostRuntime.selectDirectDataPlaneSession(selectedSessionID)
