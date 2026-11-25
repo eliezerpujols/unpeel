@@ -19,8 +19,8 @@ use unpeel_core::host_connection::{
     HostCall, HostConnection, HostConnectionError, RequestSemantics,
 };
 use unpeel_core::remote_session_backend::{
-    RemoteEffectFailureKind, RemoteOutputPollOptions, RemoteProjectOrganizationPatch,
-    RemoteSessionBackend, RemoteSessionBackendError,
+    RemoteOutputPollOptions, RemoteProjectOrganizationPatch, RemoteSessionBackend,
+    RemoteSessionBackendError,
 };
 use unpeel_core::ssh_connection::LocalProcessConnection;
 
@@ -585,8 +585,12 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
         .expect("start unified Host service");
     let mut service = ScopedChild(service);
     let socket = unpeel_core::remote_stdio::local_host_socket_path(&fixture.host_home);
+    let mut registration = None;
     assert!(
-        wait_until(Duration::from_secs(15), || socket.exists()),
+        wait_until(Duration::from_secs(15), || {
+            registration = UnixStream::connect(&socket).ok();
+            registration.is_some()
+        }),
         "workspace Host worker never became ready"
     );
 
@@ -643,7 +647,7 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
         stream.write_all(body).unwrap();
     });
 
-    let mut registration = UnixStream::connect(&socket).unwrap();
+    let mut registration = registration.unwrap();
     registration
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
@@ -690,7 +694,6 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
         "adapter status: {}",
         String::from_utf8_lossy(&status.body)
     );
-    assert!(String::from_utf8_lossy(&status.body).contains("session.notify_when_done.set"));
     assert!(String::from_utf8_lossy(&status.body).contains("push.register"));
     assert!(String::from_utf8_lossy(&status.body).contains("relay.credentials.recover"));
 
@@ -730,11 +733,14 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
     }
     backend
         .set_session_notify_when_done("s1", true)
-        .expect("registered native adapter handles the Host verb");
-    let request = recv_platform_callback(&captured_rx, "session.notify_when_done.set");
-    assert!(request.contains("POST /_unpeel/platform-adapter/call HTTP/1.1"));
-    assert!(request.contains("Authorization: Bearer 0123456789abcdef0123456789abcdef"));
-    assert!(request.contains("\"operation\":\"session.notify_when_done.set\""));
+        .expect("Host persists the completion notification preference");
+    assert!(backend
+        .bootstrap()
+        .unwrap()
+        .snapshot
+        .sessions
+        .iter()
+        .any(|session| { session.id == "s1" && session.notify_when_done }));
 
     backend
         .set_project_organization(
@@ -746,6 +752,8 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
         )
         .expect("folder-color write reaches the native overlay adapter");
     let request = recv_platform_callback(&captured_rx, "overlay.project-color.set");
+    assert!(request.contains("POST /_unpeel/platform-adapter/call HTTP/1.1"));
+    assert!(request.contains("Authorization: Bearer 0123456789abcdef0123456789abcdef"));
     assert!(request.contains("\"operation\":\"overlay.project-color.set\""));
     assert!(request.contains("\"projectID\":\"p1\""));
     assert!(request.contains("\"colorID\":\"amber\""));
@@ -906,7 +914,7 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
                     .host_protocol
                     .as_ref()
                     .is_some_and(|protocol| {
-                        !protocol.supports("session.notify_when_done.set")
+                        protocol.supports("session.notify_when_done.set")
                             && !protocol.supports("push.register")
                             && !protocol.supports("relay.credentials.recover")
                     });
@@ -924,9 +932,7 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
         })
     }));
 
-    // A compound request must fail before ordinary Host fields mutate when
-    // the platform registration is gone. This protects both the historical
-    // adapter-free TUI contract and the app-relaunch window.
+    // A malformed compound patch still fails before the title can land.
     let raw = fixture.service_connection();
     let compound = HostCall::new(
         "POST",
@@ -935,17 +941,17 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
     )
     .with_body(
         "application/json",
-        br#"{"sessionID":"s1","title":"must not land","notifyWhenDone":false}"#.to_vec(),
+        br#"{"sessionID":"s1","title":"must not land","notifyWhenDone":"invalid"}"#.to_vec(),
     );
     let prepared = raw.prepare(compound).unwrap();
     let reply = raw.request(prepared, Duration::from_secs(5)).unwrap();
-    assert_eq!(reply.status, 501);
+    assert_eq!(reply.status, 400);
     assert!(
         !fixture
             .host_home
             .join("app-sessions/s1/title.json")
             .exists(),
-        "unsupported platform field partially applied the title"
+        "malformed notification field partially applied the title"
     );
     let unknown = HostCall::new(
         "POST",
@@ -960,14 +966,24 @@ fn unified_worker_advertises_and_withdraws_connection_scoped_platform_adapter() 
     let reply = raw.request(prepared, Duration::from_secs(5)).unwrap();
     assert_eq!(
         reply.status, 404,
-        "Session resolution must precede capability rejection"
+        "notification preference requires a known Session"
     );
     raw.disconnect();
 
-    let error = backend
+    backend
         .set_session_notify_when_done("s1", false)
-        .expect_err("withdrawn capability must fail closed");
-    assert_eq!(error.kind(), RemoteEffectFailureKind::NotApplied);
+        .expect("notification preferences still work after adapter withdrawal");
+    assert!(backend
+        .bootstrap()
+        .unwrap()
+        .snapshot
+        .sessions
+        .iter()
+        .any(|session| {
+            session.id == "s1"
+                && session.notify_when_done_configured == Some(true)
+                && !session.notify_when_done
+        }));
 
     backend.disconnect();
     service.stop();

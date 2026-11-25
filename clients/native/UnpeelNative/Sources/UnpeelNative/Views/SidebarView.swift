@@ -1145,8 +1145,9 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.menuPresets == rhs.menuPresets
             && lhs.folderColor == rhs.folderColor
             && lhs.showsWorktreeCreate == rhs.showsWorktreeCreate
-            && lhs.showsLocalProjectVerbs == rhs.showsLocalProjectVerbs
-            && lhs.showsOrganizationVerbs == rhs.showsOrganizationVerbs
+            && lhs.canManageLocalProjectRecords == rhs.canManageLocalProjectRecords
+            && lhs.canRenameChildProject == rhs.canRenameChildProject
+            && lhs.canSortSessions == rhs.canSortSessions
             && lhs.canRenameProject == rhs.canRenameProject
             && lhs.showsFilesystemVerbs == rhs.showsFilesystemVerbs
             && lhs.isConfirmingRemove == rhs.isConfirmingRemove
@@ -1348,14 +1349,6 @@ struct ProjectNodeView: View {
 
     @ViewBuilder
     private var projectRow: some View {
-        // `showsLocalProjectVerbs` is the pure-`.local` gate: native preset
-        // management (Settings ▸ Agents edits THIS instance's home).
-        // `isLocalMachine` gates the verbs that ARE valid against a scoped
-        // local workspace on this Mac: organization verbs (folder color, sort,
-        // groups, rename — Host carriers or the scoped home's own records),
-        // filesystem verbs (Reveal/Open in editor operate on the real path),
-        // and Remove/Add (they run local-against the scoped workspace's home).
-        // A true remote Host scope hides all of them.
         let isLocalScope = store.selectedHostScope == .local
         let isLocalMachine = store.selectedHostScope.isLocalMachine
         let worktreesEnabled = store.isExperimentalEnabled(.worktrees)
@@ -1381,8 +1374,9 @@ struct ProjectNodeView: View {
             // real project (not a plain folder), not a worktree child,
             // and the path is a git repo.
             showsWorktreeCreate: canCreateWorktree,
-            showsLocalProjectVerbs: isLocalScope,
-            showsOrganizationVerbs: isLocalMachine,
+            canManageLocalProjectRecords: isLocalMachine,
+            canRenameChildProject: store.canRenameChildProject(node.project),
+            canSortSessions: store.canOrganizeProject(node.id),
             showsFilesystemVerbs: isLocalMachine,
             isConfirmingRemove: store.confirmingRemoveProjectID == node.id,
             shortcutHint: store.projectShortcutHintIndex(forProject: node.id),
@@ -1743,7 +1737,7 @@ struct ProjectNodeView: View {
             isResumingAgent: store.resumingAgentSessionIDs.contains(session.id),
             isEditing: store.editingSessionID == session.id
                 && store.editingSessionSurface == .sidebar,
-            notifyWhenDone: store.notifyWhenDoneSessionIDs.contains(session.id),
+            notifyWhenDone: store.sessionNotifyWhenDone(session.id),
             canRestart: store.sessionCanRestart(session.id),
             canResumeAgent: store.sessionCanResumeAgent(session.id),
             canStop: store.sessionCanStop(session.id),
@@ -2031,15 +2025,11 @@ struct ProjectRowView: View {
     /// Whether the context menu offers New worktree… (gate: not a folder,
     /// not a worktree child, is a git repo — ProjectItem.svelte:843-848).
     var showsWorktreeCreate = false
-    /// Controls project operations that still require a local filesystem.
-    var showsLocalProjectVerbs = true
-    /// Whether the organization verbs (Rename, Folder color, Sort sessions,
-    /// New group…, Remove group/worktree) are offered. True in `.local` AND
-    /// in a scoped `.localWorkspace`: folder color, sort, and group rename
-    /// ride the Host's `project.organization.set`; group create/remove and
-    /// worktree rename write the scoped home's own records. False for a
-    /// true remote Host.
-    var showsOrganizationVerbs = true
+    /// Group creation/removal, worktree removal, and folder color still
+    /// depend on local workspace records or an adapter-backed writer.
+    var canManageLocalProjectRecords = true
+    var canRenameChildProject = false
+    var canSortSessions = false
     /// Whether the filesystem/state verbs valid on THIS machine (Reveal in
     /// Finder, Open in editor, Remove) are offered. True in `.local` AND in a
     /// scoped `.localWorkspace` (same Mac). False for a true remote Host.
@@ -2340,9 +2330,9 @@ struct ProjectRowView: View {
         // is non-destructive (stopSession per live session — rows stay as
         // exited). Unpeel Sessions MCP access is set per session.
         .contextMenu {
-            if (isChildFolder && showsOrganizationVerbs)
+            if (isChildFolder && canRenameChildProject)
                 || (node.project.acceptsSessionDrop && canPin) {
-                if isChildFolder, showsOrganizationVerbs {
+                if isChildFolder, canRenameChildProject {
                     Button("Rename") {
                         onRenameWorktree()
                     }
@@ -2357,27 +2347,19 @@ struct ProjectRowView: View {
             Menu("New session") {
                 let split = splitPresetsForNewSessionMenu(menuPresets)
                 Button("Terminal") { onLaunchPreset(.newTerminal) }
-                if !split.agents.isEmpty || showsLocalProjectVerbs {
-                    Divider()
-                    Section("Agents") {
-                        ForEach(split.agents) { preset in
-                            Button(preset.label) { onLaunchPreset(preset) }
-                        }
-                        if showsLocalProjectVerbs {
-                            Button("Manage Agents…") { onManagePresets() }
-                        }
+                Divider()
+                Section("Agents") {
+                    ForEach(split.agents) { preset in
+                        Button(preset.label) { onLaunchPreset(preset) }
                     }
+                    Button("Manage Agents…") { onManagePresets() }
                 }
-                if !split.plugins.isEmpty || showsLocalProjectVerbs {
-                    Divider()
-                    Section("Plugins") {
-                        ForEach(split.plugins) { preset in
-                            Button(preset.label) { onLaunchPreset(preset) }
-                        }
-                        if showsLocalProjectVerbs {
-                            Button("Manage Plugins…") { onManagePlugins() }
-                        }
+                Divider()
+                Section("Plugins") {
+                    ForEach(split.plugins) { preset in
+                        Button(preset.label) { onLaunchPreset(preset) }
                     }
+                    Button("Manage Plugins…") { onManagePlugins() }
                 }
             }
             // Multi-folder projects: start a session in a specific folder,
@@ -2402,10 +2384,10 @@ struct ProjectRowView: View {
             // Folder color is a MAIN-project verb: groups and worktrees stay
             // neutral so nesting reads by indent, not tint (decided
             // 2026-08-13 after a group picked up a color by accident).
-            if node.project.parentProjectID == nil, showsOrganizationVerbs, canRenameProject {
+            if node.project.parentProjectID == nil, canRenameProject {
                 Button("Rename…") { onRenameProject() }
             }
-            if node.project.parentProjectID == nil, showsOrganizationVerbs {
+            if node.project.parentProjectID == nil, canManageLocalProjectRecords {
                 Menu("Folder color") {
                     Button {
                         onSetFolderColor(nil)
@@ -2430,30 +2412,25 @@ struct ProjectRowView: View {
                     }
                 }
             }
-            // Per-group sort: custom (the manual drag order, the default) or
-            // recently updated (last activity, like All recent). Date sort
-            // disables drag re-ordering for the group; the stored manual
-            // order survives a switch back. Scoped local workspaces flip it
-            // through the Host `project.organization.set` carrier.
-            if showsOrganizationVerbs {
-            Menu("Sort sessions") {
-                Picker("Sort sessions", selection: Binding(
-                    get: { isDateSorted },
-                    set: { onSetSessionDateSorted($0) }
-                )) {
-                    Text("Custom order").tag(false)
-                    Text("Recently updated").tag(true)
+            if canSortSessions {
+                Menu("Sort sessions") {
+                    Picker("Sort sessions", selection: Binding(
+                        get: { isDateSorted },
+                        set: { onSetSessionDateSorted($0) }
+                    )) {
+                        Text("Custom order").tag(false)
+                        Text("Recently updated").tag(true)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
-            }
             }
             if showsWorktreeCreate {
                 Button("New worktree…") {
                     onCreateWorktree()
                 }
             }
-            if node.project.parentProjectID == nil, showsOrganizationVerbs {
+            if node.project.parentProjectID == nil, canManageLocalProjectRecords {
                 Button("New group…") {
                     onCreateGroup()
                 }
@@ -2531,7 +2508,7 @@ struct ProjectRowView: View {
                 // Worktree/group removal writes the scoped home's own
                 // records (and runs git against the real path), so it is
                 // valid on this Mac; a true remote Host hides it.
-                if showsOrganizationVerbs {
+                if canManageLocalProjectRecords {
                     Divider()
                     if isWorktreeChild {
                         Button("Remove worktree", role: .destructive) {
@@ -3394,8 +3371,7 @@ struct SessionRowView: View {
                 }
             }
         }
-        // "Notify when done" — push a phone notification when this session
-        // next finishes a turn (paired iPhone with notifications on).
+        // Opt in to notifications for this Session's completed turns.
         if canNotifyWhenDone {
             Toggle("Notify when done", isOn: Binding(
                 get: { notifyWhenDone },

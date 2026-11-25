@@ -94,6 +94,46 @@ Core pieces (`UnpeelWorkspaceRegistry.swift`):
   `UNPEEL_HOOK_TRACE_FILE` injected (`integrations/mod.rs`) so a workspace's
   hook broadcasts/traces stay in its own home instead of the real `~/.unpeel`.
 
+### Feature parity across workspaces
+
+Every Session and project feature works in main Local, other local
+workspaces, paired Hosts, and SSH Hosts. A scope-only feature is a bug
+unless it is listed below with its reason. Gate verbs by the advertised
+Host operation and the provider or resource's capabilities.
+
+**Mark as Read / Mark as Unread** use the selected Host's shared receipt
+and update the sidebar immediately. **Notify when done** uses the provider's
+completion capability and delivers on the Mac Controller from Host-recorded
+completion. Delivery through snapshots requires a reachable workspace.
+Background pairing polls Direct. Link delivers while the selected or
+retained runtime connection is active.
+
+#### Accepted menu gaps
+
+- **Clear attention** is main Local only. It dismisses the native activity
+  and menu-prompt state. The Host has no dismissal operation, and pending
+  approvals require an explicit answer.
+- **Agent access** works on this Mac's workspaces. Paired and SSH Hosts have
+  no operation for reading or updating a Session's cross-Session grants.
+- **Pin to global project sidebar** works remotely once the Host has the
+  sidebar group. First use needs a Host operation to create that group.
+- **New group, Remove group, worktree rename/create/remove, and project
+  Remove** use local project records or run Git on this Mac. Remote
+  equivalents need Host operations for those changes and their lifecycle.
+- **Folder color** is offered on this Mac's workspaces. The disk-only SSH
+  gateway has no color writer, and Hosts do not advertise color support
+  independently of general project organization.
+- **Reveal in Finder and Open in**, including project-folder Reveal, need
+  paths on this Mac. A remote Host would need a mounted path or remote
+  opener. **Move to Workspace** moves a project and its records between
+  homes on this Mac. Moving between machines needs a Host transfer.
+- **Add folder to project** still opens a local directory picker inside
+  the folder editor. Remote editing of existing folders uses the Host
+  operation. Adding new ones needs the Host directory picker in that editor.
+- **Project site links** use the main Local app's manifest and loopback
+  probe data. Other scopes need the Host to publish detected links, and
+  paired and SSH Hosts additionally need a way to reach their loopback sites.
+
 ### Controller-owned pane layouts and windows
 
 Desktop multi-pane views have parity in every selected Host scope: main local,

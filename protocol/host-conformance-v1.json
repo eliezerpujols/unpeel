@@ -176,7 +176,7 @@
       }
     },
     {
-      "id": "organization.notify-unsupported-headless",
+      "id": "organization.notify-enabled",
       "method": "POST",
       "path": "/mobile/session-organization",
       "body": {
@@ -185,7 +185,7 @@
       },
       "expected": {
         "native": 200,
-        "tui": 501
+        "tui": 200
       }
     },
     {
@@ -602,6 +602,40 @@
       "expected": {
         "native": 400,
         "tui": 400
+      }
+    },
+    {
+      "id": "mark-unread.missing-session-id",
+      "method": "POST",
+      "path": "/mobile/mark-unread",
+      "body": {},
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "mark-unread.valid",
+      "method": "POST",
+      "path": "/mobile/mark-unread",
+      "body": {
+        "sessionID": "conformance-session"
+      },
+      "expected": {
+        "native": 200,
+        "tui": 200
+      }
+    },
+    {
+      "id": "mark-read.valid",
+      "method": "POST",
+      "path": "/mobile/mark-read",
+      "body": {
+        "sessionID": "conformance-session"
+      },
+      "expected": {
+        "native": 200,
+        "tui": 200
       }
     },
     {

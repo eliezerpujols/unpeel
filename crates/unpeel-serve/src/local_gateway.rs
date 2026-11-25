@@ -280,12 +280,6 @@ fn serve_connection(
             return response;
         }
         let is_bootstrap = request.method == "GET" && request.path == "/mobile/bootstrap";
-        let (request, notify_when_done) =
-            match platform_session_organization(request, &platform_adapters) {
-                Ok(value) => value,
-                Err(response) => return response,
-            };
-        let had_notify_when_done = notify_when_done.is_some();
         let write_project_color = |project_id: &str, color: Option<&str>| -> Result<(), String> {
             if !platform_adapters.supports("overlay.project-color.set") {
                 // No native overlay reaches this workspace: `app-state.json`'s
@@ -337,29 +331,6 @@ fn serve_connection(
                 // a sibling workspace).
                 approvals.decorate_bootstrap(&mut response.body);
             }
-            if let Some(request) = notify_when_done {
-                response = match platform_adapters.call("session.notify_when_done.set", request) {
-                    Ok(adapter) => unpeel_core::controller_api::ControllerResponse {
-                        id: response.id,
-                        status: adapter.status,
-                        body: adapter.body,
-                    },
-                    Err(PlatformAdapterError::Unavailable) => {
-                        unpeel_core::controller_api::ControllerResponse {
-                            id: response.id,
-                            status: 501,
-                            body: serde_json::json!({
-                                "error": "notifyWhenDone is not supported by this Host"
-                            }),
-                        }
-                    }
-                    Err(error) => unpeel_core::controller_api::ControllerResponse {
-                        id: response.id,
-                        status: 503,
-                        body: serde_json::json!({ "error": error.to_string() }),
-                    },
-                };
-            }
             if let Some(protocol) = response
                 .body
                 .get("hostProtocol")
@@ -383,15 +354,6 @@ fn serve_connection(
         }
         let body = serde_json::to_vec(&response.body)
             .unwrap_or_else(|_| br#"{"error":"response encoding failed"}"#.to_vec());
-        if had_notify_when_done {
-            crate::tracelog::trace(
-                "local-gateway",
-                &format!(
-                    "connection {id} completed platform organization with {}",
-                    response.status
-                ),
-            );
-        }
         (response.status, body)
     };
     if let Err(error) = remote_stdio::serve(&mut reader, &mut writer, &handler) {
@@ -495,102 +457,6 @@ fn handle_platform_adapter_control(
                 .unwrap_or_else(|_| br#"{"error":"adapter registration failed"}"#.to_vec()),
         ),
     }
-}
-
-/// Strip the platform field before dispatching common organization semantics.
-/// All ordinary validation/effects still happen in the shared Host; only a
-/// successful common response may reach the registered native adapter.
-fn platform_session_organization(
-    mut request: unpeel_core::relay_wire::TunnelRequest,
-    platform_adapters: &PlatformAdapterHub,
-) -> Result<
-    (
-        unpeel_core::relay_wire::TunnelRequest,
-        Option<serde_json::Value>,
-    ),
-    (u16, Vec<u8>),
-> {
-    if request.method != "POST" || request.path != "/mobile/session-organization" {
-        return Ok((request, None));
-    }
-    let mut body = match serde_json::from_slice::<serde_json::Value>(&request.body) {
-        Ok(serde_json::Value::Object(object)) => object,
-        _ => return Ok((request, None)),
-    };
-    let notify_value = body.get("notifyWhenDone").cloned();
-    if notify_value.is_none()
-        || notify_value
-            .as_ref()
-            .is_some_and(serde_json::Value::is_null)
-    {
-        return Ok((request, None));
-    }
-
-    // The disk Host's organization contract resolves the resource before it
-    // validates fields, then validates title/pin/stop/project before the
-    // platform field. Repeat that pure preflight here before removing the
-    // native field, otherwise an adapter-free compound request could mutate
-    // ordinary Host state before returning 501.
-    let session_id = body
-        .get("sessionID")
-        .or_else(|| body.get("session_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 128
-                && !value.contains('/')
-                && !value.contains('\\')
-                && !value.contains("..")
-        })
-        .ok_or_else(|| (400, br#"{"error":"invalid session id"}"#.to_vec()))?
-        .to_owned();
-    if unpeel_core::session_host::load_manifest(&session_id).is_none() {
-        return Err((404, br#"{"error":"unknown session"}"#.to_vec()));
-    }
-    match body.get("title") {
-        None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {}
-        Some(_) => return Err((400, br#"{"error":"title must be a string"}"#.to_vec())),
-    }
-    match body.get("pinned") {
-        None | Some(serde_json::Value::Null | serde_json::Value::Bool(_)) => {}
-        Some(_) => return Err((400, br#"{"error":"pinned must be a boolean"}"#.to_vec())),
-    }
-    match body.get("archived") {
-        None | Some(serde_json::Value::Null | serde_json::Value::Bool(_)) => {}
-        Some(_) => return Err((400, br#"{"error":"archived must be a boolean"}"#.to_vec())),
-    }
-    match body.get("projectID") {
-        None | Some(serde_json::Value::Null) => {}
-        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {}
-        Some(serde_json::Value::String(_)) => {
-            return Err((400, br#"{"error":"projectID must not be empty"}"#.to_vec()))
-        }
-        Some(_) => return Err((400, br#"{"error":"projectID must be a string"}"#.to_vec())),
-    }
-    let notify_when_done = match notify_value {
-        Some(serde_json::Value::Bool(value)) => value,
-        _ => {
-            return Err((
-                400,
-                br#"{"error":"notifyWhenDone must be a boolean"}"#.to_vec(),
-            ))
-        }
-    };
-    if !platform_adapters.supports("session.notify_when_done.set") {
-        return Err((
-            501,
-            br#"{"error":"notifyWhenDone is not supported by this Host"}"#.to_vec(),
-        ));
-    }
-    body.remove("notifyWhenDone");
-    let notify = Some(serde_json::json!({
-        "sessionID": session_id,
-        "notifyWhenDone": notify_when_done,
-    }));
-    request.body =
-        serde_json::to_vec(&serde_json::Value::Object(body)).unwrap_or_else(|_| b"{}".to_vec());
-    Ok((request, notify))
 }
 
 fn handle_local_control(

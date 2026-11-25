@@ -228,6 +228,8 @@ def body(case):
             "artifact.read",
             "artifact.upload.resumable",
             "session.create",
+            "session.mark_unread",
+            "session.notify_when_done.set",
             "session.order.set",
             "session.pin.set",
             "session.runtime.resume",
@@ -236,8 +238,7 @@ def body(case):
         }.issubset(host_capabilities)
         and not {"session.archive", "session.archive.list", "session.restore"}
         & host_capabilities
-        and "session.runtime.restart" not in host_capabilities
-        and "session.notify_when_done.set" not in host_capabilities,
+        and "session.runtime.restart" not in host_capabilities,
         str(sorted(host_capabilities)),
     )
 
@@ -402,9 +403,10 @@ def body(case):
         str(sessions.get("fixture-1")),
     )
     case.check(
-        "headless sessions do not offer notify-when-done without push delivery",
-        sessions.get("fixture-org", {}).get("capabilities", {}).get("notifyWhenDone") is False,
-        str(sessions.get("fixture-org")),
+        "notify-when-done follows provider completion capability",
+        sessions.get("fixture-org", {}).get("capabilities", {}).get("notifyWhenDone") is True
+        and sessions.get("fixture-slow", {}).get("capabilities", {}).get("notifyWhenDone") is False,
+        str({key: sessions.get(key) for key in ("fixture-org", "fixture-slow")}),
     )
     case.check(
         "returned managed agents split Resume Agent from exited Resume",
@@ -490,21 +492,28 @@ def body(case):
         str(organized_boot),
     )
 
-    unsupported_status, unsupported = mobile_request(
+    notify_status, notify = mobile_request(
         port, "/mobile/session-organization", token, method="POST",
-        body={
-            "sessionID": "fixture-org",
-            "title": "must not partially apply",
-            "notifyWhenDone": True,
-        },
+        body={"sessionID": "fixture-org", "notifyWhenDone": True},
     )
+
+    def bootstrap_has_notify_preference():
+        boot_status, current = mobile_request(port, "/mobile/bootstrap", token)
+        return boot_status == 200 and any(
+            row.get("id") == "fixture-org"
+            and row.get("notifyWhenDoneConfigured") is True
+            and row.get("notifyWhenDone") is True
+            and "completionNotificationAtUnixMs" not in row
+            for row in current.get("sessions", [])
+        )
+
     case.check(
-        "notify-when-done is explicitly unsupported and the patch is atomic",
-        unsupported_status == 501
-        and "not supported" in unsupported.get("error", "")
+        "notify-when-done persists and publishes without a platform adapter",
+        notify_status == 200
+        and bool(driver.wait_for(bootstrap_has_notify_preference, timeout=5))
         and (home.read_marker("fixture-org", "title.json") or {}).get("title")
         == organized_title,
-        str((unsupported_status, unsupported)),
+        str((notify_status, notify)),
     )
     empty_status, _ = mobile_request(
         port, "/mobile/session-organization", token, method="POST",
@@ -520,7 +529,11 @@ def body(case):
     )
     invalid_notify_status, _ = mobile_request(
         port, "/mobile/session-organization", token, method="POST",
-        body={"sessionID": "fixture-org", "notifyWhenDone": "yes"},
+        body={
+            "sessionID": "fixture-org",
+            "title": "must not partially apply",
+            "notifyWhenDone": "yes",
+        },
     )
     unknown_empty_status, _ = mobile_request(
         port, "/mobile/session-organization", token, method="POST",
@@ -760,6 +773,16 @@ def body(case):
     )
 
     status, _ = mobile_request(
+        port, "/mobile/mark-unread", token, method="POST",
+        body={"sessionID": "fixture-live"},
+    )
+    receipt = home.read_marker("fixture-live", "read.json") or {}
+    case.check(
+        "shared mark-unread writes the cross-frontend manual unread receipt",
+        status == 200 and receipt.get("unread") is True,
+        repr(receipt),
+    )
+    status, _ = mobile_request(
         port, "/mobile/mark-read", token, method="POST",
         body={"sessionID": "fixture-live"},
     )
@@ -768,7 +791,9 @@ def body(case):
     )
     case.check(
         "shared mark-read writes the cross-frontend receipt",
-        status == 200 and isinstance(receipt.get("read_at"), int),
+        status == 200
+        and isinstance(receipt.get("read_at"), int)
+        and receipt.get("unread") is None,
         repr(receipt),
     )
 

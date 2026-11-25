@@ -172,6 +172,7 @@ protocol NativeRemoteBackendProtocol: Sendable {
     ) async throws -> NativeRemoteEffectReceipt
     func clearDesktopFit(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func markRead(sessionID: String) async throws -> NativeRemoteEffectReceipt
+    func markUnread(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func setSessionTitle(sessionID: String, title: String) async throws
         -> NativeRemoteEffectReceipt
     func setSessionPinned(sessionID: String, pinned: Bool) async throws
@@ -292,8 +293,7 @@ extension NativeRemoteBackendProtocol {
         )
     }
 
-    /// Default for gateways and test doubles that predate the platform
-    /// adapter verb: fail closed rather than mutating Controller-local state.
+    /// Default for backends without completion preference support.
     func setSessionNotifyWhenDone(
         sessionID: String, enabled: Bool
     ) async throws -> NativeRemoteEffectReceipt {
@@ -1022,28 +1022,19 @@ final class NativeRemoteBackend: @unchecked Sendable {
     }
 
     func markRead(sessionID: String) async throws -> NativeRemoteEffectReceipt {
-        let handle = try currentIdentityValidatedHandle()
-        let session = Data(sessionID.utf8)
-        return try await Self.runBlocking(priority: .utility) {
-            try Task.checkCancellation()
-            var outputPointer: UnsafeMutablePointer<UInt8>?
-            var outputLength = 0
-            let result = session.withUnsafeBytes { bytes in
-                unpeel_native_bridge_remote_mark_read(
-                    handle,
-                    bytes.bindMemory(to: UInt8.self).baseAddress,
-                    bytes.count,
-                    &outputPointer,
-                    &outputLength
-                )
-            }
-            return try Self.decodeEffect(
-                result: result,
-                pointer: outputPointer,
-                length: outputLength,
-                operation: "mark Session read"
-            )
-        }
+        try await performSessionEffect(
+            sessionID: sessionID,
+            operation: "mark Session read",
+            call: unpeel_native_bridge_remote_mark_read
+        )
+    }
+
+    func markUnread(sessionID: String) async throws -> NativeRemoteEffectReceipt {
+        try await performSessionEffect(
+            sessionID: sessionID,
+            operation: "mark Session unread",
+            call: unpeel_native_bridge_remote_mark_unread
+        )
     }
 
     // MARK: Session organization/lifecycle verbs

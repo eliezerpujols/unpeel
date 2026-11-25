@@ -50,6 +50,7 @@ const OUTPUT_CAPABILITY: &str = "session.output.read";
 const WRITE_CAPABILITY: &str = "session.input.write";
 const RESIZE_DESKTOP_CAPABILITY: &str = "session.resize_desktop";
 const MARK_READ_CAPABILITY: &str = "session.mark_read";
+const MARK_UNREAD_CAPABILITY: &str = "session.mark_unread";
 const APPROVAL_ANSWER_CAPABILITY: &str = "approval.answer";
 const TITLE_SET_CAPABILITY: &str = "session.title.set";
 const PIN_SET_CAPABILITY: &str = "session.pin.set";
@@ -107,6 +108,7 @@ const OUTPUT_PATH: &str = "/mobile/output";
 const WRITE_PATH: &str = "/mobile/write";
 const RESIZE_DESKTOP_PATH: &str = "/mobile/resize-desktop";
 const MARK_READ_PATH: &str = "/mobile/mark-read";
+const MARK_UNREAD_PATH: &str = "/mobile/mark-unread";
 const APPROVAL_ANSWER_PATH: &str = "/mobile/approvals/answer";
 const SESSION_ORGANIZATION_PATH: &str = "/mobile/session-organization";
 const SESSION_ACTION_PATH: &str = "/mobile/session-action";
@@ -344,6 +346,10 @@ pub struct RemoteSessionSummary {
     pub notify_when_done: bool,
     #[serde(default)]
     pub terminal_background_hex: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_when_done_configured: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_notification_at_unix_ms: Option<i64>,
     #[serde(default)]
     pub capabilities: Option<RemoteSessionCapabilities>,
     #[serde(default)]
@@ -984,7 +990,7 @@ struct DesktopResizeClearWire<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct MarkReadWire<'a> {
+struct ReadReceiptWire<'a> {
     #[serde(rename = "sessionID")]
     session_id: &'a str,
 }
@@ -1919,16 +1925,38 @@ impl RemoteSessionBackend {
         &self,
         session_id: &str,
     ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
-        let effect_turn = self.inner.begin_effect();
-        effect_preflight("mark Session read", || validate_session_id(session_id))?;
-        let body = encode_effect_body("mark Session read", &MarkReadWire { session_id })?;
-        self.inner.perform_effect(
-            &effect_turn,
+        self.write_read_receipt(
+            session_id,
             "mark Session read",
             MARK_READ_CAPABILITY,
             MARK_READ_PATH,
-            body,
         )
+    }
+
+    pub fn mark_session_unread(
+        &self,
+        session_id: &str,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        self.write_read_receipt(
+            session_id,
+            "mark Session unread",
+            MARK_UNREAD_CAPABILITY,
+            MARK_UNREAD_PATH,
+        )
+    }
+
+    fn write_read_receipt(
+        &self,
+        session_id: &str,
+        operation: &'static str,
+        capability: &'static str,
+        path: &'static str,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        let effect_turn = self.inner.begin_effect();
+        effect_preflight(operation, || validate_session_id(session_id))?;
+        let body = encode_effect_body(operation, &ReadReceiptWire { session_id })?;
+        self.inner
+            .perform_effect(&effect_turn, operation, capability, path, body)
     }
 
     /// Rename a Session (`session.title.set`). The Host trims the title and
@@ -1986,8 +2014,7 @@ impl RemoteSessionBackend {
         )
     }
 
-    /// Opt a Session in or out of completion delivery through the Host's
-    /// currently registered platform adapter (`session.notify_when_done.set`).
+    /// Persist the Session's completion notification preference on its Host.
     pub fn set_session_notify_when_done(
         &self,
         session_id: &str,
@@ -4902,6 +4929,7 @@ mod tests {
                     WRITE_CAPABILITY,
                     RESIZE_DESKTOP_CAPABILITY,
                     MARK_READ_CAPABILITY,
+                    MARK_UNREAD_CAPABILITY,
                 ]),
             ),
         );
@@ -4951,6 +4979,12 @@ mod tests {
             200,
             br#"{"ok":true}"#.to_vec(),
         ));
+        connection.push(reply_step(
+            expected_effect(generation, MARK_UNREAD_PATH, json!({ "sessionID": "s1" })),
+            generation,
+            200,
+            br#"{"ok":true}"#.to_vec(),
+        ));
         let backend = RemoteSessionBackend::new(connection.clone());
         backend.bootstrap().unwrap();
 
@@ -4995,6 +5029,7 @@ mod tests {
             5
         );
         assert_eq!(backend.mark_session_read("s1").unwrap().request_id(), 6);
+        assert_eq!(backend.mark_session_unread("s1").unwrap().request_id(), 7);
         assert_eq!(connection.remaining(), 0);
         assert!(connection
             .calls()
@@ -5005,6 +5040,7 @@ mod tests {
             connection.timeouts(),
             vec![
                 DEFAULT_BOOTSTRAP_TIMEOUT,
+                DEFAULT_EFFECT_TIMEOUT,
                 DEFAULT_EFFECT_TIMEOUT,
                 DEFAULT_EFFECT_TIMEOUT,
                 DEFAULT_EFFECT_TIMEOUT,

@@ -1415,20 +1415,141 @@ fn put_migrated_pin_groups_first(moved: &[LegacyPinMove]) -> Result<(), String> 
 /// TUI, and the phone agree without one of them owning the flag. The
 /// native app's in-memory `unreadSessionIDs` predates this marker.
 pub fn mark_read(session_id: &str) -> Result<(), String> {
+    write_read_receipt(session_id, ReadReceiptChange::Read)
+}
+
+pub fn mark_unread(session_id: &str) -> Result<(), String> {
+    write_read_receipt(session_id, ReadReceiptChange::Unread)
+}
+
+/// An activity edge while the Session is already visible is not a fresh look.
+pub fn mark_read_on_observed_activity(session_id: &str) -> Result<(), String> {
+    write_read_receipt(session_id, ReadReceiptChange::ObservedActivity)
+}
+
+enum ReadReceiptChange {
+    Read,
+    Unread,
+    ObservedActivity,
+}
+
+fn write_read_receipt(session_id: &str, change: ReadReceiptChange) -> Result<(), String> {
     let dir = session_dir(session_id);
     if !dir.exists() {
         return Err(format!("no session dir for {session_id}"));
     }
-    let tmp = dir.join(".read.json.tmp");
-    let body = serde_json::json!({ "read_at": now_ms() });
-    std::fs::write(&tmp, serde_json::to_vec(&body).map_err(|e| e.to_string())?)
+    let path = dir.join("read.json");
+    let _lock = crate::app_state::lock_exclusive(&path)?;
+    if matches!(change, ReadReceiptChange::ObservedActivity) && marked_unread(session_id) {
+        return Ok(());
+    }
+    let mut body = serde_json::json!({ "read_at": now_ms() });
+    if matches!(change, ReadReceiptChange::Unread) {
+        body["unread"] = true.into();
+    }
+    let own_port = matches!(change, ReadReceiptChange::ObservedActivity)
+        .then(own_listener_port)
+        .flatten();
+    write_session_marker(&path, &body, own_port)
+}
+
+fn write_session_marker(
+    path: &Path,
+    body: &impl serde::Serialize,
+    own_port: Option<u16>,
+) -> Result<(), String> {
+    let tmp = path.with_extension("json.unpeel-tmp");
+    std::fs::write(&tmp, serde_json::to_vec(body).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dir.join("read.json")).map_err(|e| e.to_string())?;
-    crate::state_bus::announce(
-        crate::state_bus::Change::SessionMarkers,
-        own_listener_port(),
-    );
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    crate::state_bus::announce(crate::state_bus::Change::SessionMarkers, own_port);
     Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CompletionNotificationPreference {
+    /// Host time at opt-in. An explicit opt-out has no timestamp.
+    pub enabled_since: Option<u64>,
+}
+
+pub fn completion_notification_preference(
+    session_id: &str,
+) -> Option<CompletionNotificationPreference> {
+    let raw = std::fs::read(session_dir(session_id).join("notify-when-done.json")).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+pub fn set_completion_notification(session_id: &str, enabled: bool) -> Result<(), String> {
+    let path = session_dir(session_id).join("notify-when-done.json");
+    let _lock = crate::app_state::lock_exclusive(&path)?;
+    if completion_notification_preference(session_id)
+        .is_some_and(|preference| preference.enabled_since.is_some() == enabled)
+    {
+        return Ok(());
+    }
+    write_session_marker(
+        &path,
+        &CompletionNotificationPreference {
+            enabled_since: enabled.then(now_ms),
+        },
+        None,
+    )
+}
+
+pub fn can_notify_when_done(command: &str, active_app: bool) -> bool {
+    active_app
+        || crate::runtime_catalog::builtin_runtime_catalog()
+            .by_command_alias_for_current_platform(crate::integrations::command_head(command))
+            .is_some_and(|runtime| {
+                runtime
+                    .capabilities
+                    .contains(&crate::runtime_catalog::RuntimeCapability::NotifyWhenDone)
+            })
+}
+
+/// The on-demand SSH gateway can read a real completion even when no
+/// workspace worker is running to append it to the activity log.
+pub fn durable_completion_at(manifest: &HostedSessionManifest) -> Option<u64> {
+    use std::io::Read;
+
+    if manifest.state != HostedSessionState::Running {
+        return None;
+    }
+    if let Some(program) = &manifest.program_status {
+        return program.state.is_finished().then_some(program.changed_at);
+    }
+    let dir = session_dir(&manifest.session.id);
+    let file = std::fs::File::open(dir.join("last-hook-event.json")).ok()?;
+    let meta = file.metadata().ok()?;
+    let at = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if meta.len() > 64 * 1024 || at < manifest.runtime_launched_at.unwrap_or(0) {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut raw).ok()?;
+    let hook: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    if hook.get("hook_event_name")?.as_str()? != "Stop"
+        || hook
+            .get("unpeel_runtime_generation")
+            .or_else(|| hook.get("unpeelRuntimeGeneration"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|generation| generation != manifest.runtime_launch_generation)
+    {
+        return None;
+    }
+    if crate::hook_cancellation::read_in(&dir).is_some_and(|marker| {
+        marker.runtime_generation == manifest.runtime_launch_generation
+            && at >= marker.cancelled_at
+            && marker.submitted_at.is_none_or(|submitted| submitted > at)
+    }) {
+        return None;
+    }
+    Some(at)
 }
 
 /// The user marked this session unread by hand (`read.json` carries

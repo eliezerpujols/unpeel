@@ -40,11 +40,7 @@ const MAX_TOKEN_BYTES: usize = 256;
 /// Keep this bounded and exact: ordinary Host operations must never be
 /// withdrawn merely because the app closes. Add entries only after the Rust
 /// route delegates that operation through [`PlatformAdapterHub::call`].
-pub const ADAPTER_HOST_CAPABILITIES: &[&str] = &[
-    "push.register",
-    "relay.credentials.recover",
-    "session.notify_when_done.set",
-];
+pub const ADAPTER_HOST_CAPABILITIES: &[&str] = &["push.register", "relay.credentials.recover"];
 
 /// Host-internal platform services. These share the same authenticated,
 /// connection-scoped callback channel but are not Controller operations and
@@ -63,6 +59,8 @@ pub const ADAPTER_SERVICES: &[&str] = &[
     "notification.deliver",
     "overlay.snapshot",
     "overlay.project-color.set",
+    // Accepted from older Mac apps. The Host now persists the preference.
+    "session.notify_when_done.set",
 ];
 
 #[derive(Clone, Debug, Deserialize)]
@@ -396,7 +394,7 @@ mod tests {
             instance_id: "native-test".into(),
             callback_port: port,
             callback_token: "0123456789abcdef0123456789abcdef".into(),
-            capabilities: vec!["session.notify_when_done.set".into()],
+            capabilities: vec!["push.register".into()],
         }
     }
 
@@ -406,17 +404,17 @@ mod tests {
         let mut invalid = registration(42);
         invalid.capabilities = vec!["host.bootstrap".into()];
         assert!(hub.register(1, invalid).unwrap_err().contains("unknown"));
-        assert!(!hub.supports("session.notify_when_done.set"));
+        assert!(!hub.supports("push.register"));
 
         assert_eq!(
             hub.register(7, registration(42)).unwrap(),
-            vec!["session.notify_when_done.set"]
+            vec!["push.register"]
         );
-        assert!(hub.supports("session.notify_when_done.set"));
+        assert!(hub.supports("push.register"));
         let generation = hub.generation();
         assert!(hub.unregister(7));
         assert!(hub.generation() > generation);
-        assert!(!hub.supports("session.notify_when_done.set"));
+        assert!(!hub.supports("push.register"));
     }
 
     #[test]
@@ -463,7 +461,7 @@ mod tests {
             .capabilities
             .retain(|capability| capability != "approval.answer");
         let mut expected = protocol.capabilities.clone();
-        expected.push("session.notify_when_done.set".into());
+        expected.push("push.register".into());
         expected.sort_by_key(|capability| {
             NATIVE_HOST_CAPABILITIES
                 .iter()
@@ -472,7 +470,7 @@ mod tests {
         });
         hub.decorate_protocol(&mut protocol);
         assert!(!protocol.supports("approval.answer"));
-        assert!(protocol.supports("session.notify_when_done.set"));
+        assert!(protocol.supports("push.register"));
         assert_eq!(protocol.capabilities, expected);
     }
 
@@ -521,7 +519,7 @@ mod tests {
         hub.register(9, registration(port)).unwrap();
         let response = hub
             .call(
-                "session.notify_when_done.set",
+                "push.register",
                 serde_json::json!({ "sessionID": "s1", "notifyWhenDone": true }),
             )
             .unwrap();
@@ -530,12 +528,12 @@ mod tests {
         let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
         assert!(request.contains(&format!("POST {PLATFORM_ADAPTER_CALLBACK_PATH}")));
         assert!(request.contains("Authorization: Bearer 0123456789abcdef0123456789abcdef"));
-        assert!(request.contains("\"operation\":\"session.notify_when_done.set\""));
+        assert!(request.contains("\"operation\":\"push.register\""));
 
         let error = hub
-            .call("session.notify_when_done.set", serde_json::json!({}))
+            .call("push.register", serde_json::json!({}))
             .unwrap_err();
         assert!(matches!(error, PlatformAdapterError::Transport(_)));
-        assert!(!hub.supports("session.notify_when_done.set"));
+        assert!(!hub.supports("push.register"));
     }
 }

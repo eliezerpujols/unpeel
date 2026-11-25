@@ -42,9 +42,10 @@ pub struct NotificationRequest<'a> {
     pub title: &'a str,
     pub kind: NotificationKind,
     pub body: Option<&'a str>,
-    /// A finished edge always crosses the adapter. The native preference
-    /// store decides whether this opt-in effect is enabled for the Session.
+    /// A finished edge always crosses the adapter for presence reporting.
     pub requires_notify_when_done: bool,
+    /// Absent for a legacy session whose preference still lives on the Mac.
+    pub notify_when_done: Option<bool>,
     pub send_desktop: bool,
     pub suppress_device_ids: HashSet<String>,
 }
@@ -70,6 +71,7 @@ pub fn deliver(adapters: &PlatformAdapterHub, request: NotificationRequest<'_>) 
             "body": request.body.unwrap_or_else(|| request.kind.default_body()),
             "kind": request.kind.wire(),
             "requiresNotifyWhenDone": request.requires_notify_when_done,
+            "notifyWhenDone": request.notify_when_done,
             "sendDesktop": request.send_desktop,
             "suppressDeviceIDs": suppressed,
         }),
@@ -171,6 +173,7 @@ mod tests {
                 kind: NotificationKind::Done,
                 body: None,
                 requires_notify_when_done: true,
+                notify_when_done: Some(true),
                 send_desktop: true,
                 suppress_device_ids: HashSet::from(["z-phone".into(), "a-phone".into()]),
             },
@@ -181,6 +184,7 @@ mod tests {
             serde_json::from_slice(&captured.lock().unwrap()).unwrap();
         assert_eq!(envelope["operation"], "notification.deliver");
         assert_eq!(envelope["request"]["body"], "Finished");
+        assert_eq!(envelope["request"]["notifyWhenDone"], true);
         assert_eq!(
             envelope["request"]["suppressDeviceIDs"],
             json!(["a-phone", "z-phone"])
@@ -197,6 +201,7 @@ mod tests {
                 kind: NotificationKind::NeedsInput,
                 body: None,
                 requires_notify_when_done: false,
+                notify_when_done: None,
                 send_desktop: true,
                 suppress_device_ids: HashSet::new(),
             },

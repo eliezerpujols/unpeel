@@ -208,20 +208,51 @@ final class DesktopNotifier: NSObject, ObservableObject, UNUserNotificationCente
         workspaceKey: String,
         sessionID: String
     ) {
+        notifyWorkspace(
+            title: sessionTitle,
+            body: "Needs your input — in \(workspaceName)",
+            kind: "workspace_needs_input",
+            workspaceKey: workspaceKey,
+            sessionID: sessionID
+        )
+    }
+
+    func notifyWorkspaceCompletion(
+        sessionTitle: String,
+        workspaceName: String,
+        workspaceKey: String,
+        sessionID: String
+    ) {
+        notifyWorkspace(
+            title: sessionTitle,
+            body: "Finished — in \(workspaceName)",
+            kind: "workspace_done",
+            workspaceKey: workspaceKey,
+            sessionID: sessionID
+        )
+    }
+
+    private func notifyWorkspace(
+        title: String,
+        body: String,
+        kind: String,
+        workspaceKey: String,
+        sessionID: String
+    ) {
         guard authorized else { return }
         let content = UNMutableNotificationContent()
-        content.title = sessionTitle
-        content.body = "Needs your input — in \(workspaceName)"
+        content.title = title
+        content.body = body
         content.sound = .default
         // Collapse repeats per background workspace into one stack.
-        content.threadIdentifier = "workspace-attention:\(workspaceKey)"
+        content.threadIdentifier = "workspace:\(workspaceKey)"
         content.userInfo = [
             "workspaceKey": workspaceKey,
             "sessionID": sessionID,
-            "kind": "workspace_needs_input",
+            "kind": kind,
         ]
         let request = UNNotificationRequest(
-            identifier: "workspace_needs_input:\(workspaceKey):\(sessionID)",
+            identifier: "\(kind):\(workspaceKey):\(sessionID)",
             content: content,
             trigger: nil
         )

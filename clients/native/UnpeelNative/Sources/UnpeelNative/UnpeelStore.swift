@@ -397,10 +397,7 @@ final class UnpeelStore: ObservableObject {
         }
     }
 
-    /// Sessions the user opted into a "finished" push notification for
-    /// (`NativeOverlay.notifyWhenDoneKey`). Surfaced on
-    /// `RemoteSessionSummary.notifyWhenDone` and read by the push dispatcher
-    /// when a session settles (Stop). Persisted; pruned with the session.
+    /// Legacy Local completion opt-ins (`NativeOverlay.notifyWhenDoneKey`).
     @Published private(set) var notifyWhenDoneSessionIDs: Set<String> =
         Set(AppDefaults.shared.stringArray(forKey: NativeOverlay.notifyWhenDoneKey) ?? [])
 
@@ -2962,6 +2959,7 @@ final class UnpeelStore: ObservableObject {
                     body,
                     rawKind,
                     requiresNotifyWhenDone,
+                    notifyWhenDone,
                     sendDesktop,
                     suppressDeviceIDs
                 )):
@@ -2971,9 +2969,10 @@ final class UnpeelStore: ObservableObject {
                         reply(404, #"{"error":"unknown session"}"#)
                         return
                     }
-                    let macObserved = self.observedSessionID == sessionID
+                    let macObserved = self.selectedHostScope == .local
+                        && self.observedSessionID == sessionID
                     let eligible = !requiresNotifyWhenDone
-                        || self.notifyWhenDoneSessionIDs.contains(sessionID)
+                        || (notifyWhenDone ?? self.notifyWhenDoneSessionIDs.contains(sessionID))
                     if eligible {
                         if sendDesktop && !macObserved {
                             DesktopNotifier.shared.notify(
@@ -3466,11 +3465,11 @@ final class UnpeelStore: ObservableObject {
         return findNode(parentID)?.worktrees.map(\.id) ?? []
     }
 
-    /// Opt a session in/out of the "finished" push notification. Persisted to
-    /// the native overlay; the next remote snapshot reflects it, and the push
-    /// dispatcher reads it when the session settles.
+    /// Persist the opt-in on the Session's Host, which projects it back to
+    /// the menu and records future completions for this Mac.
     func setNotifyWhenDone(_ sessionID: String, enabled: Bool) {
-        if routesSessionVerbThroughHost(sessionID) {
+        guard sessionCanNotifyWhenDone(sessionID) else { return }
+        if currentScopeUsesHostControl {
             performRemoteVerb("Couldn't update the notification") { runtime in
                 try await runtime.setNotifyWhenDone(sessionID, enabled: enabled)
             }
@@ -5272,6 +5271,7 @@ final class UnpeelStore: ObservableObject {
         if !NSApp.isActive, commandHintsVisible {
             commandHintsVisible = false
         }
+        remoteHostRuntime.updateManualUnreadObservation(observedSessionID)
         // Selection cannot change any Session's lifecycle state. Persist
         // only if reconciliation actually changes unread membership; the
         // rescan path still requests a full status snapshot below.
@@ -5394,15 +5394,32 @@ final class UnpeelStore: ObservableObject {
         return hold == sessionID
     }
 
+    static func sessionReadVerbAvailable(
+        scope: SelectedHostScope,
+        unread: Bool,
+        supportsOperation: (String) -> Bool
+    ) -> Bool {
+        scope == .local || supportsOperation(
+            unread ? RemoteHostRuntime.HostOperation.markUnread : RemoteHostRuntime.HostOperation.markRead
+        )
+    }
+
     func sessionCanToggleUnread(_ sessionID: String) -> Bool {
-        selectedHostScope == .local
+        Self.sessionReadVerbAvailable(
+            scope: selectedHostScope,
+            unread: !sessionIsUnread(sessionID),
+            supportsOperation: remoteHostRuntime.supportsHostOperation
+        )
     }
 
     /// Sidebar "Mark as Unread": a shared `read.json` receipt flagged
     /// `"unread": true`, which every frontend and the Host treat as unread
     /// until the session is shown again (that writes a plain receipt).
     func markSessionUnread(_ sessionID: String) {
-        guard selectedHostScope == .local else { return }
+        if selectedHostScope != .local {
+            setHostSessionUnread(sessionID, unread: true)
+            return
+        }
         if observedSessionID == sessionID {
             manualUnreadHoldID = sessionID
         }
@@ -5411,11 +5428,16 @@ final class UnpeelStore: ObservableObject {
         showUnreadNow(sessionID, true)
         let ownPort = hookServer?.port
         Self.readReceiptQueue.async {
-            if Self.writeSharedMarker(
-                sessionID,
-                .read,
-                ["read_at": Int64(Date().timeIntervalSince1970 * 1000), "unread": true]
+            let wrote = PresetStateFile.withExclusiveLock(
+                on: Self.sharedMarkerURL(sessionID, .read)
             ) {
+                Self.writeSharedMarker(
+                    sessionID,
+                    .read,
+                    ["read_at": Int64(Date().timeIntervalSince1970 * 1000), "unread": true]
+                )
+            }
+            if wrote == true {
                 Self.announceStateChange("session-markers", ownPort: ownPort)
             }
         }
@@ -5423,6 +5445,10 @@ final class UnpeelStore: ObservableObject {
 
     /// Sidebar "Mark as Read".
     func markSessionRead(_ sessionID: String) {
+        if selectedHostScope != .local {
+            setHostSessionUnread(sessionID, unread: false)
+            return
+        }
         if manualUnreadHoldID == sessionID {
             manualUnreadHoldID = nil
         }
@@ -5430,16 +5456,34 @@ final class UnpeelStore: ObservableObject {
         showUnreadNow(sessionID, false)
     }
 
+    private func setHostSessionUnread(_ sessionID: String, unread: Bool) {
+        let observed = observedSessionID == sessionID
+        guard remoteHostRuntime.setSessionUnread(
+            sessionID, unread: unread, whileObserved: observed
+        ) else { return }
+        if observed && unread {
+            manualUnreadHoldID = sessionID
+        } else if manualUnreadHoldID == sessionID {
+            manualUnreadHoldID = nil
+        }
+        showUnreadNow(sessionID, unread)
+    }
+
     /// The Host's next projection confirms it; until then show the
     /// requested state instead of the Host's previous one.
     private func showUnreadNow(_ sessionID: String, _ unread: Bool) {
-        guard let summary = remoteSummariesByID[sessionID], summary.unread != unread else {
-            unreadOverrides.removeValue(forKey: sessionID)
-            return
-        }
+        guard remoteSummariesByID[sessionID] != nil else { return }
+        let requestedAt = Date()
         objectWillChange.send()
-        unreadOverrides[sessionID] = (unread, Date())
+        unreadOverrides[sessionID] = (unread, requestedAt)
         invalidateSidebarLists()
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, unreadOverrides[sessionID]?.at == requestedAt else { return }
+            objectWillChange.send()
+            unreadOverrides.removeValue(forKey: sessionID)
+            invalidateSidebarLists()
+        }
     }
 
     /// Requested read/unread states the Host hasn't projected yet.
@@ -5449,7 +5493,6 @@ final class UnpeelStore: ObservableObject {
     private func settleUnreadOverrides(_ summaries: [String: RemoteSessionSummary]) {
         unreadOverrides = unreadOverrides.filter { id, override in
             summaries[id].map { $0.unread != override.unread } == true
-                && Date().timeIntervalSince(override.at) < 5
         }
     }
 
@@ -5781,23 +5824,26 @@ final class UnpeelStore: ObservableObject {
         let alertAt = latestAlertAtMs(for: sessionID)
         let ownPort = hookServer?.port
         Self.readReceiptQueue.async {
-            let receipt = Self.readSharedMarker(sessionID, .read)
-            let readAt = (receipt?["read_at"] as? NSNumber)?.int64Value
-            let markedUnread = (receipt?["unread"] as? Bool) == true
-            let settledAt = Self.latestUnreadActivityAt(
-                lifecycleAt: Self.sessionLastRealActivityAtMs(
+            let wrote = PresetStateFile.withExclusiveLock(
+                on: Self.sharedMarkerURL(sessionID, .read)
+            ) {
+                let receipt = Self.readSharedMarker(sessionID, .read)
+                let readAt = (receipt?["read_at"] as? NSNumber)?.int64Value
+                let markedUnread = (receipt?["unread"] as? Bool) == true
+                let settledAt = Self.latestUnreadActivityAt(
+                    lifecycleAt: Self.sessionLastRealActivityAtMs(sessionID, command: command),
+                    alertAt: alertAt
+                )
+                guard forceReceipt || markedUnread
+                    || Self.sharedReadReceiptNeedsRefresh(readAt: readAt, settledAt: settledAt)
+                else { return false }
+                return Self.writeSharedMarker(
                     sessionID,
-                    command: command
-                ),
-                alertAt: alertAt
-            )
-            if forceReceipt || markedUnread
-                || Self.sharedReadReceiptNeedsRefresh(readAt: readAt, settledAt: settledAt),
-               Self.writeSharedMarker(
-                   sessionID,
-                   .read,
-                   ["read_at": Int64(Date().timeIntervalSince1970 * 1000)]
-               ) {
+                    .read,
+                    ["read_at": Int64(Date().timeIntervalSince1970 * 1000)]
+                )
+            }
+            if wrote == true {
                 Self.announceStateChange("session-markers", ownPort: ownPort)
             }
         }
@@ -10135,23 +10181,32 @@ final class UnpeelStore: ObservableObject {
         )
     }
 
-    /// "Notify when done" needs a reliable hook Stop signal; recognized
-    /// hookless agents such as Pi don't get the toggle. Neither do ordinary
-    /// terminals, which have no agent-activity lifecycle at all.
+    static func hostSessionCanNotifyWhenDone(
+        supportsOperation: Bool,
+        capabilities: RemoteSessionCapabilities?
+    ) -> Bool {
+        supportsOperation && capabilities?.notifyWhenDone == true
+    }
+
     func sessionCanNotifyWhenDone(_ sessionID: String) -> Bool {
-        if routesSessionVerbThroughHost(sessionID) {
-            guard remoteHostRuntime.supportsHostOperation(
-                RemoteHostRuntime.HostOperation.notifyWhenDoneSet
-            ) else { return false }
-            // The Local disk catalog cannot infer runtime capabilities from a
-            // platform adapter, but the app already has the exact Session.
-            if selectedHostScope == .local, let session = sessionsByID[sessionID] {
-                return ProviderCapabilities.canNotifyWhenDone(session: session)
-            }
-            return remoteSummary(for: sessionID)?.capabilities?.notifyWhenDone == true
+        if currentScopeUsesHostControl {
+            return Self.hostSessionCanNotifyWhenDone(
+                supportsOperation: remoteHostRuntime.supportsHostOperation(
+                    RemoteHostRuntime.HostOperation.notifyWhenDoneSet
+                ),
+                capabilities: remoteSummary(for: sessionID)?.capabilities
+            )
         }
         guard let session = sessionsByID[sessionID] else { return false }
         return ProviderCapabilities.canNotifyWhenDone(session: session)
+    }
+
+    func sessionNotifyWhenDone(_ sessionID: String) -> Bool {
+        let summary = remoteSummary(for: sessionID)
+        if selectedHostScope == .local, summary?.notifyWhenDoneConfigured != true {
+            return notifyWhenDoneSessionIDs.contains(sessionID)
+        }
+        return summary?.notifyWhenDone == true
     }
 
     /// "Clear attention" is a Controller-local activity-engine escape hatch;
@@ -11484,6 +11539,21 @@ final class UnpeelStore: ObservableObject {
         return selectedHostScope == .local
     }
 
+    func canRenameChildProject(_ project: Project) -> Bool {
+        guard project.parentProjectID != nil else { return false }
+        if project.worktreeBranch != nil { return selectedHostScope.isLocalMachine }
+        return canOrganizeProject(project.id)
+    }
+
+    func canOrganizeProject(_ projectID: String) -> Bool {
+        if routesProjectVerbThroughHost(projectID) {
+            return remoteHostRuntime.supportsHostOperation(
+                RemoteHostRuntime.HostOperation.projectOrganizationSet
+            )
+        }
+        return selectedHostScope == .local
+    }
+
     /// Set a top-level project's sidebar display name (#24). The folder on
     /// disk and the project's path — its identity — never change; blank
     /// falls back to the folder name.
@@ -11531,11 +11601,12 @@ final class UnpeelStore: ObservableObject {
             guard remoteHostRuntime.supportsHostOperation(
                 RemoteHostRuntime.HostOperation.projectNameSet
             ) else { return false }
+            let scope = selectedHostScope
             performRemoteVerb("Couldn't rename the project") { [weak self] runtime in
                 try await runtime.renameProjectGroup(projectID: projectID, displayName: name)
                 // The Host wrote app-state.json; keep the native record in
                 // step so no later mirror or relaunch reverts it.
-                self?.recordHostRenamedNativeProject(projectID, name: name)
+                self?.recordHostRenamedNativeProject(projectID, name: name, scope: scope)
             }
             return true
         }
@@ -11746,6 +11817,7 @@ final class UnpeelStore: ObservableObject {
               project.acceptsSessionDrop
         else { return false }
         if routesProjectVerbThroughHost(projectID) {
+            let scope = selectedHostScope
             performRemoteVerb("Couldn't rename the group") { [weak self] runtime in
                 try await runtime.renameProjectGroup(
                     projectID: projectID,
@@ -11754,7 +11826,7 @@ final class UnpeelStore: ObservableObject {
                 // The Host wrote app-state.json; keep the native record (the
                 // source the mirror pushes from) in step so no later mirror
                 // or relaunch reverts the rename (GitHub #26).
-                self?.recordHostRenamedNativeProject(projectID, name: name)
+                self?.recordHostRenamedNativeProject(projectID, name: name, scope: scope)
             }
             return true
         }
@@ -12237,14 +12309,20 @@ final class UnpeelStore: ObservableObject {
         return parentID
     }
 
-    private func recordHostRenamedNativeProject(_ projectID: String, name: String) {
-        var records = loadNativeProjects()
+    private func recordHostRenamedNativeProject(
+        _ projectID: String, name: String, scope: SelectedHostScope
+    ) {
+        guard scope.isLocalMachine else { return }
+        let defaults = scope == .local
+            ? AppDefaults.shared
+            : AppDefaults.suite(forUnpeelHome: scope.scopedLocalHome)
+        var records = Self.loadNativeProjects(from: defaults)
         guard let index = records.firstIndex(where: { $0.id == projectID }),
               records[index].name != name
         else { return }
         records[index].name = name
         if let data = try? JSONEncoder().encode(records) {
-            AppDefaults.shared.set(data, forKey: Self.nativeProjectsKey)
+            defaults.set(data, forKey: Self.nativeProjectsKey)
         }
     }
 
@@ -16113,7 +16191,9 @@ extension UnpeelStore {
             if previous.unread != next.unread
                 || previous.activity != next.activity
                 || previous.pinned != next.pinned
-                || previous.notifyWhenDone != next.notifyWhenDone {
+                || previous.notifyWhenDone != next.notifyWhenDone
+                || previous.notifyWhenDoneConfigured != next.notifyWhenDoneConfigured
+                || previous.capabilities != next.capabilities {
                 return true
             }
         }
@@ -16885,6 +16965,18 @@ extension UnpeelStore {
                 },
                 foregroundKey: { [weak self] in
                     self?.workspacePoolForegroundKey()
+                },
+                completionAllowed: { [weak self] workspaceKey, sessionID in
+                    // The native platform adapter already delivers for this
+                    // instance's own Host, even while a different workspace is selected.
+                    if workspaceKey == WorkspaceListOrder.localKey(
+                        home: Self.currentInstanceNormalizedHome()
+                    ) {
+                        return false
+                    }
+                    guard let self else { return false }
+                    return self.workspacePoolForegroundKey() != workspaceKey
+                        || self.observedSessionID != sessionID
                 }
             )
         }

@@ -230,6 +230,7 @@ trait RegisteredRemoteBackend: Send + Sync {
         resize: RemoteDesktopResize,
     ) -> Result<u64, NativeRemoteEffectError>;
     fn mark_session_read(&self, session_id: &str) -> Result<u64, NativeRemoteEffectError>;
+    fn mark_session_unread(&self, session_id: &str) -> Result<u64, NativeRemoteEffectError>;
     fn set_session_title(
         &self,
         session_id: &str,
@@ -578,6 +579,13 @@ impl RegisteredRemoteBackend for RegisteredCoreBackend {
     fn mark_session_read(&self, session_id: &str) -> Result<u64, NativeRemoteEffectError> {
         self.backend
             .mark_session_read(session_id)
+            .map(|receipt| receipt.request_id())
+            .map_err(native_remote_effect_error)
+    }
+
+    fn mark_session_unread(&self, session_id: &str) -> Result<u64, NativeRemoteEffectError> {
+        self.backend
+            .mark_session_unread(session_id)
             .map(|receipt| receipt.request_id())
             .map_err(native_remote_effect_error)
     }
@@ -3949,6 +3957,37 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_mark_read(
     finish_remote_effect_ffi(outcome, "mark Session read", out_pointer, out_length)
 }
 
+/// Mark a remote Session unread at most once.
+///
+/// # Safety
+///
+/// A non-empty Session id must point to readable UTF-8 bytes. Both output
+/// pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn unpeel_native_bridge_remote_mark_unread(
+    handle: RemoteHandle,
+    session_id_pointer: *const u8,
+    session_id_length: usize,
+    out_pointer: *mut *mut u8,
+    out_length: *mut usize,
+) -> i32 {
+    const OPERATION: &str = "mark Session unread";
+    remote_session_effect_ffi(
+        handle,
+        session_id_pointer,
+        session_id_length,
+        OPERATION,
+        out_pointer,
+        out_length,
+        |session_id| {
+            let request_id = remote_backend(handle)
+                .map_err(native_not_applied_effect_error(OPERATION))?
+                .mark_session_unread(session_id)?;
+            encode_effect_receipt(OPERATION, request_id)
+        },
+    )
+}
+
 /// Shared body for the `(handle, session_id) → effect receipt` FFI verbs.
 ///
 /// # Safety
@@ -5391,6 +5430,10 @@ mod tests {
             unreachable!("static test backend has no effects")
         }
 
+        fn mark_session_unread(&self, _session_id: &str) -> Result<u64, NativeRemoteEffectError> {
+            unreachable!("static test backend has no effects")
+        }
+
         fn set_session_title(
             &self,
             _session_id: &str,
@@ -5651,6 +5694,14 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(format!("read:{session_id}"));
             Ok(44)
+        }
+
+        fn mark_session_unread(&self, session_id: &str) -> Result<u64, NativeRemoteEffectError> {
+            self.effects
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(format!("unread:{session_id}"));
+            Ok(59)
         }
 
         fn set_session_title(

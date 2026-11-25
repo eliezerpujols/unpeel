@@ -379,13 +379,15 @@ final class RemoteHostRuntime: ObservableObject {
         case fit(sessionID: String, columns: UInt16, rows: UInt16)
         case clearFit(sessionID: String)
         case markRead(sessionID: String)
+        case setUnread(sessionID: String, unread: Bool)
 
         var sessionID: String {
             switch self {
             case let .write(sessionID, _),
                  let .fit(sessionID, _, _),
                  let .clearFit(sessionID),
-                 let .markRead(sessionID):
+                 let .markRead(sessionID),
+                 let .setUnread(sessionID, _):
                 sessionID
             }
         }
@@ -406,6 +408,12 @@ final class RemoteHostRuntime: ObservableObject {
                 try await backend.clearDesktopFit(sessionID: sessionID)
             case let .markRead(sessionID):
                 try await backend.markRead(sessionID: sessionID)
+            case let .setUnread(sessionID, unread):
+                if unread {
+                    try await backend.markUnread(sessionID: sessionID)
+                } else {
+                    try await backend.markRead(sessionID: sessionID)
+                }
             }
         }
     }
@@ -514,6 +522,7 @@ final class RemoteHostRuntime: ObservableObject {
     private var writeInFlightQueueEpoch: UInt64?
     static let maximumDeferredTerminalInputBytes = 64 * 1024
     private var pendingMarkReadSessionIDs: Set<String> = []
+    private var manualUnreadHoldID: String?
     /// A failed route may still have a mark-read effect unwinding. No route
     /// may reconsider those ids until this tail settles and a bootstrap that
     /// started afterward proves the Host still reports them unread.
@@ -1200,6 +1209,25 @@ final class RemoteHostRuntime: ObservableObject {
             return
         }
         enqueueEffect(.markRead(sessionID: sessionID))
+    }
+
+    @discardableResult
+    func setSessionUnread(_ sessionID: String, unread: Bool, whileObserved: Bool) -> Bool {
+        guard enqueueEffect(.setUnread(sessionID: sessionID, unread: unread)) else {
+            return false
+        }
+        if unread && whileObserved {
+            manualUnreadHoldID = sessionID
+        } else if manualUnreadHoldID == sessionID {
+            manualUnreadHoldID = nil
+        }
+        return true
+    }
+
+    func updateManualUnreadObservation(_ observedSessionID: String?) {
+        if observedSessionID != manualUnreadHoldID {
+            manualUnreadHoldID = nil
+        }
     }
 
     private func connect(
@@ -1922,6 +1950,7 @@ final class RemoteHostRuntime: ObservableObject {
         terminalInputOrderingUncertain = false
         writeInFlightQueueEpoch = nil
         pendingMarkReadSessionIDs.removeAll()
+        manualUnreadHoldID = nil
         markReadRecoveryBarrier = nil
         markReadsSuppressedUntilRecovery.removeAll()
         markReadAwaitingSnapshotClearSessionIDs.removeAll()
@@ -2166,6 +2195,7 @@ final class RemoteHostRuntime: ObservableObject {
 
     private func transitionSelectedSession(to nextSessionID: String?) {
         guard selectedSessionID != nextSessionID else { return }
+        updateManualUnreadObservation(nextSessionID)
         selectedSessionID = nextSessionID
         if let nextSessionID,
            let key = connection?.transport.continuityKey.paneFallbackKey {
@@ -2642,7 +2672,8 @@ final class RemoteHostRuntime: ObservableObject {
             guard connection.desktopFits.snapshot().contains(sessionID) else {
                 return false
             }
-        } else if !Self.supportsOutput(in: snapshot) {
+        } else if !Self.effectDoesNotRequireSelection(effect),
+                  !Self.supportsOutput(in: snapshot) {
             return false
         }
 
@@ -2668,6 +2699,8 @@ final class RemoteHostRuntime: ObservableObject {
             appendWriteBatches(sessionID: sessionID, data: data)
         case let .markRead(sessionID):
             guard pendingMarkReadSessionIDs.insert(sessionID).inserted else { return false }
+            queuedEffects.append(QueuedEffect(effect: effect))
+        case .setUnread:
             queuedEffects.append(QueuedEffect(effect: effect))
         case let .fit(sessionID, columns, rows):
             if case let .fit(lastID, _, _)? = queuedEffects.last?.effect,
@@ -2955,6 +2988,14 @@ final class RemoteHostRuntime: ObservableObject {
         case let .markRead(sessionID):
             pendingMarkReadSessionIDs.remove(sessionID)
             markReadAwaitingSnapshotClearSessionIDs.insert(sessionID)
+        case let .setUnread(sessionID, unread):
+            if unread {
+                markReadAwaitingSnapshotClearSessionIDs.remove(sessionID)
+                failedAutomaticMarkReadSessionIDs.remove(sessionID)
+            } else {
+                markReadAwaitingSnapshotClearSessionIDs.insert(sessionID)
+            }
+            requestImmediateRefresh()
         }
     }
 
@@ -3256,7 +3297,8 @@ final class RemoteHostRuntime: ObservableObject {
     /// Mark-read only while the Host still reports the row unread and no
     /// earlier mark-read for it is awaiting its snapshot or has failed.
     func requestMarkReadIfNeeded(_ sessionID: String) {
-        guard snapshot?.sessions.first(where: { $0.id == sessionID })?.unread == true,
+        guard manualUnreadHoldID != sessionID,
+              snapshot?.sessions.first(where: { $0.id == sessionID })?.unread == true,
               !markReadAwaitingSnapshotClearSessionIDs.contains(sessionID),
               !failedAutomaticMarkReadSessionIDs.contains(sessionID)
         else { return }
@@ -3265,7 +3307,7 @@ final class RemoteHostRuntime: ObservableObject {
 
     private static func effectDoesNotRequireSelection(_ effect: RemoteEffect) -> Bool {
         switch effect {
-        case .clearFit, .markRead: true
+        case .clearFit, .markRead, .setUnread: true
         case .write, .fit: false
         }
     }
@@ -3278,7 +3320,9 @@ final class RemoteHostRuntime: ObservableObject {
         switch effect {
         case .write: capability = "session.input.write"
         case .fit, .clearFit: capability = "session.resize_desktop"
-        case .markRead: capability = "session.mark_read"
+        case .markRead: capability = HostOperation.markRead
+        case let .setUnread(_, unread):
+            capability = unread ? HostOperation.markUnread : HostOperation.markRead
         }
         return snapshot?.hostProtocol?.supports(capability) == true
     }
@@ -3406,6 +3450,8 @@ final class RemoteHostRuntime: ObservableObject {
             && lhs.worktreeBranch == rhs.worktreeBranch
             && lhs.parentSessionID == rhs.parentSessionID
             && lhs.notifyWhenDone == rhs.notifyWhenDone
+            && lhs.notifyWhenDoneConfigured == rhs.notifyWhenDoneConfigured
+            && lhs.completionNotificationAtUnixMs == rhs.completionNotificationAtUnixMs
             && lhs.terminalBackgroundHex == rhs.terminalBackgroundHex
             && lhs.capabilities == rhs.capabilities
             && lhs.spinnerColorHex == rhs.spinnerColorHex
@@ -3467,6 +3513,8 @@ extension RemoteHostRuntime {
         static let projectSet = "session.project.set"
         static let pushRegister = "push.register"
         static let notifyWhenDoneSet = "session.notify_when_done.set"
+        static let markRead = "session.mark_read"
+        static let markUnread = "session.mark_unread"
         static let approvalAnswer = "approval.answer"
     }
 

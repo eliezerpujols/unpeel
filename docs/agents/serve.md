@@ -255,6 +255,26 @@ auto-stop skips <id>: unread attention (waiting on the user; never
 auto-stopped unseen)` / `no resumable conversation …` / `idle for less than
 the cutoff` / `pinned` / …), so "why did this never stop" is one grep.
 
+### Session receipts and completion notifications (protocol minor 26)
+
+`POST /mobile/mark-unread` (`session.mark_unread`) accepts `sessionID`
+and writes the shared `read.json` receipt with `unread: true`. The existing
+`POST /mobile/mark-read` (`session.mark_read`) replaces it with a plain
+receipt. Both announce on the state bus and bootstrap projects the updated
+unread state.
+
+`session.notify_when_done.set` accepts `notifyWhenDone` on
+`POST /mobile/session-organization` regardless of native adapter registration.
+The Host persists the preference in the Session directory. Bootstrap
+projects the opt-in, whether it has been configured on the Host
+(`notifyWhenDoneConfigured`), provider support
+(`capabilities.notifyWhenDone`), and the latest authoritative completion
+after opt-in (`completionNotificationAtUnixMs`, when available). A bare SSH
+gateway can read a terminal program's completion report or the current
+runtime's durable Stop hook. Controllers deliver to their own notification
+surface. The native adapter continues to deliver for main Local and to read
+its legacy Local opt-ins until they are updated on the Host.
+
 ### Multi-folder projects (protocol minor 25)
 
 A project may list several folders (`Project.folders`, first = primary =
@@ -548,12 +568,9 @@ Calls go from the worker to
 `POST http://127.0.0.1:<callbackPort>/_unpeel/platform-adapter/call` with the
 ephemeral bearer. The callback envelope is versioned and names one operation;
 the app validates its bounded type before applying the platform effect; the
-Rust Host retains resource ownership and semantic validation. Three public
-operations and ten internal services/ownership markers currently cross this
-boundary:
+Rust Host retains resource ownership and semantic validation. Public
+operations and internal services cross this boundary:
 
-- `session.notify_when_done.set` keeps Local UI intent on the ordinary Host
-  verb while only the native preference half runs in Swift;
 - `push.register` keeps the authenticated `/mobile/push-token` route in the
   Rust Host and delegates its locked APNs-token persistence to the app;
 - `relay.credentials.recover` keeps the authenticated public route in Rust

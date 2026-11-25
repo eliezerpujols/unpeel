@@ -1076,6 +1076,7 @@ fn replay_protected(request: &ControllerRequest) -> bool {
             | ("POST", "/mobile/resize")
             | ("POST", "/mobile/request-screenshot")
             | ("POST", "/mobile/mark-read")
+            | ("POST", "/mobile/mark-unread")
             | ("POST", "/mobile/artifact-delete")
     )
 }
@@ -1827,6 +1828,28 @@ fn route_uncached(
             // Session removed between bootstrap and tap still returns 200.
             // Existing dirs get the shared marker plus state-bus announce.
             let _ = session_ops::mark_read(&session_id);
+            json!({ "ok": true })
+        }
+        ("POST", "/mobile/mark-unread") => {
+            let result = body_session_id(&request.body).and_then(|session_id| {
+                if session_host::load_manifest(&session_id).is_none() {
+                    return Err(ControllerApiError {
+                        status: 404,
+                        message: "unknown session".into(),
+                    });
+                }
+                session_ops::mark_unread(&session_id).map_err(|message| ControllerApiError {
+                    status: 500,
+                    message,
+                })
+            });
+            if let Err(error) = result {
+                return Some(ControllerResponse {
+                    id: request.id.clone(),
+                    status: error.status,
+                    body: json!({ "error": error.message }),
+                });
+            }
             json!({ "ok": true })
         }
         ("POST", "/mobile/session-order") => {

@@ -1959,7 +1959,7 @@ struct TerminalPaneContainer: View {
         }
 
         if store.sessionCanNotifyWhenDone(entry.id) {
-            let enabled = store.notifyWhenDoneSessionIDs.contains(entry.id)
+            let enabled = store.sessionNotifyWhenDone(entry.id)
             menu.addItem(controller.item(
                 "Notify when done",
                 state: enabled ? .on : .off

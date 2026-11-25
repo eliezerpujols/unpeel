@@ -65,6 +65,7 @@ class HostLaunch:
                     status.get("pid") == self.process.pid
                     and local_socket
                     and os.path.exists(local_socket)
+                    and status.get("directPort")
                 ):
                     return status
             except (FileNotFoundError, OSError, ValueError):

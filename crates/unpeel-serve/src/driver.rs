@@ -1202,7 +1202,7 @@ impl HostRuntime {
                         // A Controller rendering the terminal at the edge is
                         // observing it. Advance the shared receipt once so a
                         // later presence expiry cannot resurrect stale unread.
-                        let _ = unpeel_core::session_ops::mark_read(&row.id);
+                        let _ = unpeel_core::session_ops::mark_read_on_observed_activity(&row.id);
                         self.unread_ids.remove(&row.id);
                     } else {
                         self.unread_ids.insert(row.id.clone());
@@ -1838,7 +1838,7 @@ impl HostRuntime {
             false,
             at,
         ) {
-            let _ = unpeel_core::session_ops::mark_read(session_id);
+            let _ = unpeel_core::session_ops::mark_read_on_observed_activity(session_id);
             self.unread_ids.remove(session_id);
         } else {
             self.unread_ids.insert(session_id.to_string());
@@ -1897,6 +1897,12 @@ impl HostRuntime {
                 kind,
                 body,
                 requires_notify_when_done,
+                notify_when_done: if requires_notify_when_done {
+                    unpeel_core::session_ops::completion_notification_preference(&row.id)
+                        .map(|preference| preference.enabled_since.is_some())
+                } else {
+                    None
+                },
                 send_desktop: !any_controller,
                 suppress_device_ids,
             },

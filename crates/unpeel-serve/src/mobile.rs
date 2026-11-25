@@ -1527,7 +1527,6 @@ fn handle_with_effects(
     request: &Request,
     principal: &ControllerPrincipal,
     snapshot: &SharedSnapshot,
-    mark_read: &Sender<String>,
     hook_port: Option<u16>,
     resizes: &MobileResizes,
     approvals: &Arc<crate::approvals::ApprovalHub>,
@@ -1602,11 +1601,6 @@ fn handle_with_effects(
                 if let Ok(mut guard) = resizes.lock() {
                     guard.insert(session_id, Instant::now());
                 }
-            }
-        }
-        if response.status == 200 && request.path == "/mobile/mark-read" {
-            if let Some(session_id) = body_session_id(&controller_request.body) {
-                let _ = mark_read.send(session_id);
             }
         }
         // `max_dim` is optional native ImageIO enrichment. The shared core
@@ -1710,20 +1704,6 @@ fn handle_with_effects(
             if !published && unpeel_core::session_host::load_manifest(&session_id).is_none() {
                 return (404, error_body("unknown session"));
             }
-            // Preserve the shipped Host resource/effect ordering when no
-            // native adapter is live: resolve and type-check the Session
-            // first, then reject the platform-only field before any shared
-            // title/pin/project/stop write can land. A registration can
-            // still disappear after this preflight; that later callback
-            // failure is effect-unknown and Controllers must refresh.
-            if notify_when_done.is_some()
-                && !platform_adapters.supports("session.notify_when_done.set")
-            {
-                return (
-                    501,
-                    error_body("notifyWhenDone is not supported by this Host"),
-                );
-            }
             if let Some(target) = project_id.as_deref() {
                 // Known target, and inside the Session's own checkout: the
                 // shared guard every Host kind applies. Clearing back to the
@@ -1811,29 +1791,16 @@ fn handle_with_effects(
                     );
                 }
             }
-            // This remains a Host operation: shared Host semantics land first,
-            // then only the platform-owned notification preference crosses a
-            // live connection-scoped adapter. A callback failure after a
-            // compound patch is effect-unknown, matching the route's existing
-            // cross-file contract; Controllers refresh and never auto-replay.
-            if let Some(notify_when_done) = notify_when_done {
-                let response = platform_adapters.call(
-                    "session.notify_when_done.set",
-                    serde_json::json!({
-                        "sessionID": session_id,
-                        "notifyWhenDone": notify_when_done,
-                    }),
-                );
-                match response {
-                    Ok(response) if response.status == 200 => {}
-                    Ok(response) => return (response.status, response.body.to_string()),
-                    Err(PlatformAdapterError::Unavailable) => {
-                        return (
-                            501,
-                            error_body("notifyWhenDone is not supported by this Host"),
-                        )
-                    }
-                    Err(error) => return (503, error_body(&error.to_string())),
+            if let Some(enabled) = notify_when_done {
+                if let Err(error) =
+                    unpeel_core::session_ops::set_completion_notification(&session_id, enabled)
+                {
+                    return (
+                        500,
+                        error_body(&format!(
+                            "organization update effect unknown; refresh Host state: {error}"
+                        )),
+                    );
                 }
             }
             (200, r#"{"ok":true}"#.into())
@@ -2168,7 +2135,6 @@ fn handle_authenticated_with_effects(
         request,
         principal,
         snapshot,
-        mark_read,
         hook_port,
         resizes,
         approvals,
@@ -4053,6 +4019,46 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
 
     #[test]
     fn headless_adapter_runs_the_shared_conformance_fixture() {
+        const TEST_HOME: &str = "UNPEEL_CONFORMANCE_FIXTURE_HOME";
+        let Some(home) = std::env::var_os(TEST_HOME) else {
+            let home = tempfile::Builder::new()
+                .prefix("up-hc-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mobile::tests::headless_adapter_runs_the_shared_conformance_fixture",
+                ])
+                .env(TEST_HOME, home.path())
+                .env("UNPEEL_HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr),
+            );
+            return;
+        };
+        assert_eq!(std::env::var_os("UNPEEL_HOME"), Some(home));
+        let dir = unpeel_core::app_paths::app_sessions_root().join("conformance-session");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({
+                "session": {
+                    "id": "conformance-session", "project_id": "conformance-project",
+                    "label": "Claude", "command": "claude",
+                },
+                "cwd": "/tmp",
+                "state": "running",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
         let fixture: ConformanceFixture =
             serde_json::from_str(include_str!("../../../protocol/host-conformance-v1.json"))
                 .expect("valid host conformance fixture");
@@ -4157,6 +4163,21 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
                 None,
             );
             assert_eq!(status, case.expected.tui, "conformance case {}", case.id);
+            let session_id = "conformance-session";
+            if case.id == "mark-unread.valid" {
+                assert!(unpeel_core::session_ops::marked_unread(session_id));
+                assert!(unpeel_core::session_ops::read_marker(session_id).is_some());
+            }
+            if case.id == "mark-read.valid" {
+                assert!(!unpeel_core::session_ops::marked_unread(session_id));
+                assert!(unpeel_core::session_ops::read_marker(session_id).is_some());
+            }
+            if case.id == "organization.notify-enabled" {
+                let preference =
+                    unpeel_core::session_ops::completion_notification_preference(session_id)
+                        .unwrap();
+                assert!(preference.enabled_since.is_some());
+            }
             if case.id == "bootstrap.valid" {
                 let response: serde_json::Value =
                     serde_json::from_str(&body).expect("bootstrap response json");

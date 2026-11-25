@@ -16,6 +16,8 @@ final class WorkspacePoolTests: XCTestCase {
     private var excluded: Set<String> = []
     private var foreground: String?
     private var notifications: [(title: String, workspace: String, key: String, session: String)] = []
+    private var completions: [String] = []
+    private var observingCompletion = false
     private var factoryCalls: [String] = []
 
     override func tearDown() async throws {
@@ -26,6 +28,8 @@ final class WorkspacePoolTests: XCTestCase {
         excluded = []
         foreground = nil
         notifications = []
+        completions = []
+        observingCompletion = false
         factoryCalls = []
     }
 
@@ -54,13 +58,53 @@ final class WorkspacePoolTests: XCTestCase {
             },
             notifyAttention: { [weak self] title, workspace, key, session in
                 self?.notifications.append((title, workspace, key, session))
+            },
+            notifyCompletion: { [weak self] _, _, key, session in
+                self?.completions.append("\(key):\(session)")
             }
         )
         pool.start(
             targetsProvider: { [weak self] in self?.targets ?? [] },
             excludedKeys: { [weak self] in self?.excluded ?? [] },
-            foregroundKey: { [weak self] in self?.foreground }
+            foregroundKey: { [weak self] in self?.foreground },
+            completionAllowed: { [weak self] _, _ in self?.observingCompletion == false }
         )
+    }
+
+    func testWorkspaceCompletionsUseHostEdgesAcrossForegroundAndBackground() {
+        makePool()
+        func record(capturedAt: Int64, finishedAt: Int64?) {
+            let session = RemoteSessionSummary(
+                id: "research",
+                projectID: "project",
+                title: "Research",
+                command: "claude",
+                createdAtUnixMs: 1,
+                status: .running,
+                activity: .idle,
+                notifyWhenDone: true,
+                completionNotificationAtUnixMs: finishedAt
+            )
+            let snapshot = RemoteBootstrapSnapshot(
+                macID: "host", macName: "Host", folders: [], projects: [], presets: [],
+                sessions: [session], capturedAtUnixMs: capturedAt
+            )
+            pool.noteExternalSnapshot(snapshot, forKey: "scope", name: "Research workspace")
+        }
+
+        record(capturedAt: 10, finishedAt: 9)
+        XCTAssertTrue(completions.isEmpty, "First contact is silent")
+        foreground = "scope"
+        record(capturedAt: 20, finishedAt: 19)
+        record(capturedAt: 21, finishedAt: 19)
+        XCTAssertEqual(completions, ["scope:research"])
+        observingCompletion = true
+        record(capturedAt: 30, finishedAt: 29)
+        XCTAssertEqual(completions.count, 1)
+        observingCompletion = false
+        foreground = nil
+        record(capturedAt: 40, finishedAt: 39)
+        XCTAssertEqual(completions, ["scope:research", "scope:research"])
     }
 
     private static func stubKey(for transport: RemoteHostTransport) -> String {
@@ -630,6 +674,10 @@ private actor StubPoolBackend: NativeRemoteBackendProtocol {
     }
 
     func markRead(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
+        throw StubPoolError.unexpected
+    }
+
+    func markUnread(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
         throw StubPoolError.unexpected
     }
 

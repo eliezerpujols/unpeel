@@ -84,6 +84,7 @@ enum PlatformAdapterCall: Equatable {
         body: String,
         kind: String,
         requiresNotifyWhenDone: Bool,
+        notifyWhenDone: Bool? = nil,
         sendDesktop: Bool,
         suppressDeviceIDs: [String]
     )
@@ -681,6 +682,15 @@ final class HookServer: @unchecked Sendable {
             let sessionID = rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
             let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
             let bodyText = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
+            let notifyWhenDone: Bool?
+            if let raw = request["notifyWhenDone"], !(raw is NSNull) {
+                guard CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID(),
+                      let preference = raw as? Bool
+                else { return .failure(.invalidEnvelope) }
+                notifyWhenDone = preference
+            } else {
+                notifyWhenDone = nil
+            }
             guard !sessionID.isEmpty,
                   sessionID.utf8.count <= 128,
                   !sessionID.contains("/"),
@@ -712,6 +722,7 @@ final class HookServer: @unchecked Sendable {
                 body: bodyText,
                 kind: kind,
                 requiresNotifyWhenDone: requiresNotifyWhenDone,
+                notifyWhenDone: notifyWhenDone,
                 sendDesktop: sendDesktop,
                 suppressDeviceIDs: suppressed
             ))

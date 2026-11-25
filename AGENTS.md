@@ -244,6 +244,7 @@ Detail lives in `docs/agents/clients/` (`dev-builds.md`, `terminal.md`,
   the sidebar picker scopes the same sidebar, terminal, and verbs to it; the
   only visible difference is the green bottom Host button with the Host's
   name. No forked remote view hierarchies.
+- **Session and project features work in every Host scope.** See [Feature parity across workspaces](docs/agents/clients/workspaces.md#feature-parity-across-workspaces) for the rule and accepted gaps.
 - **Perceived speed over latency numbers.** No flash, no blank frames, no
   layout jump: keep the already-scanned disk view visible while the Host
   connects, pre-warm surfaces, and never let a reconnect visibly end a

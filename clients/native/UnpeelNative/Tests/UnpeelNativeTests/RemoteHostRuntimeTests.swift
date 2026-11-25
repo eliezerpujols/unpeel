@@ -7,6 +7,70 @@ import UnpeelShared
 
 @MainActor
 final class RemoteHostRuntimeTests: XCTestCase {
+    func testSessionMenuReadReceiptsAndNotifyRouteToEveryNonLocalHost() async throws {
+        let home = "/tmp/parity-session-menu"
+        let scopes: [SelectedHostScope] = [
+            .localWorkspace(home: home, name: "Host"),
+            .remote(hostID: "paired"),
+            .remote(hostID: "ssh"),
+        ]
+        for scope in scopes {
+            let backend = ControlledRemoteBackend()
+            let runtime = makeRuntime(backend: backend)
+            switch scope {
+            case .localWorkspace:
+                runtime.connectLocalWorkspace(home: home, name: "Host", expectedHostID: "host")
+            case .remote(hostID: "paired"):
+                runtime.connectDirect(
+                    endpoint: URL(string: "https://127.0.0.1:1234")!,
+                    authToken: "test-token",
+                    expectedHostID: "host"
+                )
+            default:
+                runtime.connectSSH(target: "ssh://host", expectedHostID: "host")
+            }
+            await waitUntil { await backend.bootstrapCount == 1 }
+            let sessionID = "session"
+            let provider = RemoteSessionCapabilities(
+                restart: false, notifyWhenDone: true
+            )
+            let session = makeSession(id: sessionID, capabilities: provider)
+            await backend.resolveBootstrap(.success(makeSnapshot(capabilities: [
+                "host.bootstrap", "session.output.read", "session.mark_read", "session.mark_unread",
+                "session.notify_when_done.set",
+            ], sessions: [session])))
+            await waitUntil { runtime.connectionState == .connected(name: "Host") }
+            for unread in [true, false] {
+                XCTAssertTrue(UnpeelStore.sessionReadVerbAvailable(
+                    scope: scope, unread: unread, supportsOperation: runtime.supportsHostOperation
+                ))
+                XCTAssertFalse(UnpeelStore.sessionReadVerbAvailable(
+                    scope: scope, unread: unread, supportsOperation: { _ in false }
+                ))
+                XCTAssertTrue(runtime.setSessionUnread(sessionID, unread: unread, whileObserved: true))
+            }
+            let canSetNotify = runtime.supportsHostOperation(
+                RemoteHostRuntime.HostOperation.notifyWhenDoneSet
+            )
+            XCTAssertTrue(UnpeelStore.hostSessionCanNotifyWhenDone(
+                supportsOperation: canSetNotify, capabilities: session.capabilities
+            ))
+            XCTAssertFalse(UnpeelStore.hostSessionCanNotifyWhenDone(
+                supportsOperation: canSetNotify, capabilities: makeSession(id: "shell").capabilities
+            ))
+            XCTAssertFalse(UnpeelStore.hostSessionCanNotifyWhenDone(
+                supportsOperation: false, capabilities: session.capabilities
+            ))
+            try await runtime.setNotifyWhenDone(sessionID, enabled: true)
+            await waitUntil { await backend.effectCalls.count == 2 }
+            let receipts = await backend.effectCalls
+            XCTAssertEqual(receipts, [.markUnread(sessionID: sessionID), .markRead(sessionID: sessionID)])
+            let organization = await backend.organizationCalls
+            XCTAssertEqual(organization, ["notify:session:true"])
+            runtime.disconnect()
+        }
+    }
+
     /// The Link/Tailscale hint for a paired Mac that Direct cannot reach:
     /// silent while Link carries the connection, otherwise it names Link and
     /// Tailscale, and a Direct-only scope says how to allow Link.
@@ -3100,7 +3164,8 @@ final class RemoteHostRuntimeTests: XCTestCase {
         worktreePath: String? = nil,
         worktreeBranch: String? = nil,
         latestAlertBody: String? = nil,
-        latestAlertAt: Int64? = nil
+        latestAlertAt: Int64? = nil,
+        capabilities: RemoteSessionCapabilities? = nil
     ) -> RemoteSessionSummary {
         RemoteSessionSummary(
             id: id,
@@ -3118,6 +3183,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
             worktreePath: worktreePath,
             worktreeBranch: worktreeBranch,
             lastOutputPreview: preview,
+            capabilities: capabilities,
             latestAlertBody: latestAlertBody,
             latestAlertAtUnixMs: latestAlertAt
         )
@@ -3404,6 +3470,17 @@ private actor ControlledRemoteBackend: NativeRemoteBackendProtocol {
         try await performEffect(.markRead(sessionID: sessionID))
     }
 
+    func markUnread(sessionID: String) async throws -> NativeRemoteEffectReceipt {
+        try await performEffect(.markUnread(sessionID: sessionID))
+    }
+
+    func setSessionNotifyWhenDone(
+        sessionID: String, enabled: Bool
+    ) async throws -> NativeRemoteEffectReceipt {
+        organizationCalls.append("notify:\(sessionID):\(enabled)")
+        return NativeRemoteEffectReceipt(requestID: 910)
+    }
+
     func resolveNextEffect(_ result: Result<NativeRemoteEffectReceipt, Error>) {
         guard !effectContinuations.isEmpty else { return }
         effectContinuations.removeFirst().continuation.resume(with: result)
@@ -3569,6 +3646,7 @@ private enum ControlledEffectCall: Equatable, Sendable {
     case fit(sessionID: String, columns: UInt16, rows: UInt16)
     case clearFit(sessionID: String)
     case markRead(sessionID: String)
+    case markUnread(sessionID: String)
 }
 
 private enum ControlledRemoteBackendError: Error {

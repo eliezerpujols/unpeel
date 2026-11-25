@@ -1846,8 +1846,6 @@ pub fn mobile_snapshot(
                 // know the retired actions.
                 "fork": false,
                 "appendSystemContext": false,
-                // A headless Host can observe completion, but cannot deliver
-                // push yet. Do not offer a toggle whose patch would be 501.
                 "notifyWhenDone": false,
                 // Host resume evidence: Stop leaves a resumable stopped row.
                 "resumable": row.resumable,
@@ -1930,7 +1928,16 @@ pub fn mobile_snapshot(
                     .find(|entry| entry.session_id == row.id)
             })
             .filter(|entry| entry.kind == unpeel_core::activity_log::ActivityLogKind::Alert);
-        sessions.push(session_summary(row, unread, latest_alert));
+        let mut summary = session_summary(row, unread, latest_alert);
+        unpeel_core::controller_host::add_completion_notification_fields(
+            &mut summary,
+            &row.id,
+            &row.command,
+            row.running && row.active_app.is_some(),
+            activity_log,
+            None,
+        );
+        sessions.push(summary);
     }
 
     let app_state = load_app_state();

@@ -127,7 +127,7 @@ impl ControllerHostRuntime {
                 | ("POST", "/mobile/presets")
         );
         let catalog = if needs_catalog {
-            match DiskCatalog::capture() {
+            match DiskCatalog::capture(self.hook_port.is_none()) {
                 Ok(catalog) => Some(catalog),
                 Err(message) => {
                     return ControllerResponse {
@@ -237,7 +237,7 @@ struct DiskCatalog {
 }
 
 impl DiskCatalog {
-    fn capture() -> Result<Self, String> {
+    fn capture(without_worker: bool) -> Result<Self, String> {
         let host_id = crate::relay_uplink::ensure_host_id()?;
         let state = crate::app_state::load()?;
         let menu_attention_detection = state
@@ -400,7 +400,7 @@ impl DiskCatalog {
         for manifest in &manifests {
             let project_id = effective_project_id(manifest, &known_ids);
             let resumable = crate::session_ops::has_resume_evidence(manifest);
-            let summary = session_summary_with_menu_attention(
+            let mut summary = session_summary_with_menu_attention(
                 manifest,
                 &project_id,
                 pinned.contains(&manifest.session.id),
@@ -414,6 +414,14 @@ impl DiskCatalog {
                     .find(|entry| entry.session_id == manifest.session.id)
                     .filter(|entry| entry.kind == crate::activity_log::ActivityLogKind::Alert),
                 menu_attention_detection,
+            );
+            add_completion_notification_fields(
+                &mut summary,
+                &manifest.session.id,
+                &manifest.session.command,
+                manifest.state == HostedSessionState::Running && manifest.active_app.is_some(),
+                Some(&activity_log),
+                without_worker.then_some(manifest),
             );
             // The bootstrap includes the same inactive preview as the Host
             // sidebar.
@@ -2011,6 +2019,41 @@ fn activity_state() -> HashMap<String, Value> {
         .unwrap_or_default()
 }
 
+/// Publish the same completion preference and Host-recorded edge through
+/// disk-backed gateways and the live mobile bootstrap.
+pub fn add_completion_notification_fields(
+    summary: &mut Value,
+    session_id: &str,
+    command: &str,
+    active_app: bool,
+    activity_log: Option<&crate::activity_log::ActivityLogStore>,
+    manifest_without_worker: Option<&HostedSessionManifest>,
+) {
+    use crate::activity_log::ActivityLogKind;
+    use crate::session_ops::{can_notify_when_done, completion_notification_preference};
+
+    summary["capabilities"]["notifyWhenDone"] = can_notify_when_done(command, active_app).into();
+    let Some(preference) = completion_notification_preference(session_id) else {
+        return;
+    };
+    summary["notifyWhenDoneConfigured"] = true.into();
+    summary["notifyWhenDone"] = preference.enabled_since.is_some().into();
+    if let Some(finished_at) = preference.enabled_since.and_then(|since| {
+        let recorded = activity_log.and_then(|log| {
+            log.entries().iter().rev().find(|entry| {
+                entry.session_id == session_id && entry.kind == ActivityLogKind::Finished
+            })
+        });
+        let durable = manifest_without_worker.and_then(crate::session_ops::durable_completion_at);
+        recorded
+            .map(|entry| entry.at)
+            .max(durable)
+            .filter(|at| *at > since)
+    }) {
+        summary["completionNotificationAtUnixMs"] = finished_at.into();
+    }
+}
+
 fn effective_project_id(manifest: &HostedSessionManifest, known: &HashSet<String>) -> String {
     crate::session_ops::project_override_marker(&manifest.session.id)
         .filter(|project_id| known.contains(project_id))
@@ -2616,19 +2659,11 @@ fn organization(request: &ControllerRequest) -> (u16, Value) {
         }
         Some(_) => return (400, json!({ "error": "projectID must be a string" })),
     };
-    if request
-        .body
-        .get("notifyWhenDone")
-        .is_some_and(|value| !value.is_null())
-    {
-        if !request.body["notifyWhenDone"].is_boolean() {
-            return (400, json!({ "error": "notifyWhenDone must be a boolean" }));
-        }
-        return (
-            501,
-            json!({ "error": "notifyWhenDone is not supported by this Host" }),
-        );
-    }
+    let notify_when_done = match request.body.get("notifyWhenDone") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return (400, json!({ "error": "notifyWhenDone must be a boolean" })),
+    };
     if let Some(target) = project_id.as_deref() {
         let manifest_project = session_host::load_manifest(session_id)
             .map(|manifest| manifest.session.project_id)
@@ -2671,7 +2706,11 @@ fn organization(request: &ControllerRequest) -> (u16, Value) {
         Some(true) => crate::session_ops::stop_session(session_id),
         Some(false) | None => Ok(()),
     };
-    match result {
+    match result.and_then(|()| {
+        notify_when_done.map_or(Ok(()), |enabled| {
+            crate::session_ops::set_completion_notification(session_id, enabled)
+        })
+    }) {
         Ok(()) => (200, json!({ "ok": true })),
         Err(message) => (500, json!({ "error": message })),
     }

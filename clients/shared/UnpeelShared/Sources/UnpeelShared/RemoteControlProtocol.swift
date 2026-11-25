@@ -697,9 +697,12 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
     /// the nested "branch" connector in the sidebar. Absent on older Macs ⇒ nil.
     public let parentSessionID: String?
     public let lastOutputPreview: String?
-    /// Whether the user opted this session into a "finished" push notification
-    /// (the Mac-side per-session flag). Absent on older Macs ⇒ false.
+    /// Whether the user opted this session into completion notifications.
     public let notifyWhenDone: Bool
+    /// Missing for sessions whose legacy Local preference is still on the Mac.
+    public let notifyWhenDoneConfigured: Bool?
+    /// Latest Host-recorded completion after opt-in, in the Host's clock.
+    public let completionNotificationAtUnixMs: Int64?
     /// The provider TUI's resolved DARK background color (0xRRGGBB), for
     /// tinting the phone's terminal chrome to match — e.g. opencode/grok read
     /// their theme from config files only the Mac can see. Nil = the default
@@ -767,6 +770,8 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         parentSessionID: String? = nil,
         lastOutputPreview: String? = nil,
         notifyWhenDone: Bool = false,
+        notifyWhenDoneConfigured: Bool? = nil,
+        completionNotificationAtUnixMs: Int64? = nil,
         terminalBackgroundHex: Int? = nil,
         capabilities: RemoteSessionCapabilities? = nil,
         spinnerColorHex: Int? = nil,
@@ -803,6 +808,8 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         self.parentSessionID = parentSessionID
         self.lastOutputPreview = lastOutputPreview
         self.notifyWhenDone = notifyWhenDone
+        self.notifyWhenDoneConfigured = notifyWhenDoneConfigured
+        self.completionNotificationAtUnixMs = completionNotificationAtUnixMs
         self.terminalBackgroundHex = terminalBackgroundHex
         self.capabilities = capabilities
         self.spinnerColorHex = spinnerColorHex
@@ -827,6 +834,7 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         case updatedAtUnixMs, status, activity
         case unread, pinned, worktreePath, worktreeBranch, parentSessionID, lastOutputPreview
         case notifyWhenDone, terminalBackgroundHex, capabilities
+        case notifyWhenDoneConfigured, completionNotificationAtUnixMs
         case spinnerColorHex
         case activeAppID, activeAppName, activeAppTintHex
         case hostStartedAtUnixMs
@@ -862,6 +870,10 @@ public struct RemoteSessionSummary: Codable, Equatable, Identifiable, Sendable {
         parentSessionID = try c.decodeIfPresent(String.self, forKey: .parentSessionID)
         lastOutputPreview = try c.decodeIfPresent(String.self, forKey: .lastOutputPreview)
         notifyWhenDone = try c.decodeIfPresent(Bool.self, forKey: .notifyWhenDone) ?? false
+        notifyWhenDoneConfigured = try c.decodeIfPresent(Bool.self, forKey: .notifyWhenDoneConfigured)
+        completionNotificationAtUnixMs = try c.decodeIfPresent(
+            Int64.self, forKey: .completionNotificationAtUnixMs
+        )
         terminalBackgroundHex = try c.decodeIfPresent(Int.self, forKey: .terminalBackgroundHex)
         capabilities = try c.decodeIfPresent(RemoteSessionCapabilities.self, forKey: .capabilities)
         spinnerColorHex = try c.decodeIfPresent(Int.self, forKey: .spinnerColorHex)

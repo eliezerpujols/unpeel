@@ -43,6 +43,30 @@ fn receive(stdout: &mut impl std::io::Read) -> TunnelResponse {
     parse_tunnel_response(&frame.payload).unwrap()
 }
 
+fn rpc(
+    stdin: &mut impl Write,
+    stdout: &mut impl Read,
+    mut request: TunnelRequest,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    if !body.is_null() {
+        request.body = serde_json::to_vec(&body).unwrap();
+    }
+    send(stdin, &request);
+    let response = receive(stdout);
+    assert_eq!((response.id, response.status), (request.id, 200));
+    serde_json::from_slice(&response.body).unwrap()
+}
+
+fn session_row<'a>(snapshot: &'a serde_json::Value, session_id: &str) -> &'a serde_json::Value {
+    snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id)
+        .unwrap_or_else(|| panic!("Session {session_id} missing from bootstrap"))
+}
+
 fn json_string_field(body: &[u8], key: &str) -> String {
     let body = std::str::from_utf8(body).unwrap();
     let marker = format!("\"{key}\":\"");
@@ -90,6 +114,16 @@ fn real_gateway_bootstraps_pages_output_and_dispatches_concurrently() {
     )
     .unwrap();
     std::fs::write(session_dir.join("output.bin"), b"hello").unwrap();
+    let completion_dir = home.join("app-sessions/s2");
+    std::fs::create_dir_all(&completion_dir).unwrap();
+    std::fs::write(
+        completion_dir.join("manifest.json"),
+        br#"{
+          "session":{"id":"s2","project_id":"p1","label":"Claude","command":"claude","created_at":1},
+          "cwd":"/tmp","state":"running","runtime_launch_generation":1
+        }"#,
+    )
+    .unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_unpeel-host"))
         .arg(REMOTE_STDIO_ARG)
@@ -221,6 +255,79 @@ fn real_gateway_bootstraps_pages_output_and_dispatches_concurrently() {
         String::from_utf8_lossy(&removed.body)
     );
     assert!(wait_until(Duration::from_secs(5), || !created_dir.exists()));
+
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        request(11, "POST", "/mobile/mark-unread"),
+        serde_json::json!({ "sessionID": "s1" }),
+    );
+    let unread = rpc(
+        &mut stdin,
+        &mut stdout,
+        request(12, "GET", "/mobile/bootstrap"),
+        serde_json::Value::Null,
+    );
+    assert_eq!(session_row(&unread, "s1")["unread"], true);
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        request(13, "POST", "/mobile/mark-read"),
+        serde_json::json!({ "sessionID": "s1" }),
+    );
+    let read = rpc(
+        &mut stdin,
+        &mut stdout,
+        request(14, "GET", "/mobile/bootstrap"),
+        serde_json::Value::Null,
+    );
+    assert_eq!(session_row(&read, "s1")["unread"], false);
+
+    // A standalone SSH gateway has no worker activity log. An actual
+    // durable Stop hook after opt-in must still project a completion.
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        request(15, "POST", "/mobile/session-organization"),
+        serde_json::json!({ "sessionID": "s2", "notifyWhenDone": true }),
+    );
+    let before = rpc(
+        &mut stdin,
+        &mut stdout,
+        request(16, "GET", "/mobile/bootstrap"),
+        serde_json::Value::Null,
+    );
+    let row = session_row(&before, "s2");
+    assert_eq!(row["capabilities"]["notifyWhenDone"], true);
+    assert_eq!(row["notifyWhenDone"], true);
+    assert!(row.get("completionNotificationAtUnixMs").is_none());
+    let stop_path = completion_dir.join("last-hook-event.json");
+    std::fs::write(
+        &stop_path,
+        br#"{"hook_event_name":"Stop","unpeel_runtime_generation":1}"#,
+    )
+    .unwrap();
+    let preference: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(completion_dir.join("notify-when-done.json")).unwrap(),
+    )
+    .unwrap();
+    let completed_at = preference["enabled_since"].as_u64().unwrap() + 1;
+    std::fs::File::options()
+        .write(true)
+        .open(stop_path)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_millis(completed_at))
+        .unwrap();
+    let completed = rpc(
+        &mut stdin,
+        &mut stdout,
+        request(17, "GET", "/mobile/bootstrap"),
+        serde_json::Value::Null,
+    );
+    assert_eq!(
+        session_row(&completed, "s2")["completionNotificationAtUnixMs"],
+        completed_at
+    );
 
     drop(stdin);
     let mut trailing_stdout = Vec::new();

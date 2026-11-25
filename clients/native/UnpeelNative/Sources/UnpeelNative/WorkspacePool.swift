@@ -58,7 +58,7 @@ final class WorkspacePool: ObservableObject {
     typealias BackendFactory = @MainActor (
         RemoteHostTransport
     ) throws -> any NativeRemoteBackendProtocol
-    typealias AttentionNotifier = @MainActor (
+    typealias WorkspaceNotifier = @MainActor (
         _ sessionTitle: String,
         _ workspaceName: String,
         _ workspaceKey: String,
@@ -93,7 +93,9 @@ final class WorkspacePool: ObservableObject {
     private let immediateRefreshThrottleSeconds: TimeInterval
     private let maxLiveRemoteConnections: Int
     private let backendFactory: BackendFactory
-    private let notifyAttention: AttentionNotifier
+    private let notifyAttention: WorkspaceNotifier
+    private let notifyCompletion: WorkspaceNotifier
+    private var completionAllowed: (@MainActor (String, String) -> Bool) = { _, _ in true }
 
     private var targetsProvider: (@MainActor () -> [Target])?
     private var excludedKeys: (@MainActor () -> Set<String>) = { [] }
@@ -197,8 +199,16 @@ final class WorkspacePool: ObservableObject {
         backendFactory: @escaping BackendFactory = { transport in
             try RemoteHostBackendFactory.make(transport)
         },
-        notifyAttention: @escaping AttentionNotifier = { title, workspace, key, sessionID in
+        notifyAttention: @escaping WorkspaceNotifier = { title, workspace, key, sessionID in
             DesktopNotifier.shared.notifyWorkspaceAttention(
+                sessionTitle: title,
+                workspaceName: workspace,
+                workspaceKey: key,
+                sessionID: sessionID
+            )
+        },
+        notifyCompletion: @escaping WorkspaceNotifier = { title, workspace, key, sessionID in
+            DesktopNotifier.shared.notifyWorkspaceCompletion(
                 sessionTitle: title,
                 workspaceName: workspace,
                 workspaceKey: key,
@@ -214,6 +224,7 @@ final class WorkspacePool: ObservableObject {
         self.maxLiveRemoteConnections = max(1, maxLiveRemoteConnections)
         self.backendFactory = backendFactory
         self.notifyAttention = notifyAttention
+        self.notifyCompletion = notifyCompletion
     }
 
     // MARK: - Lifecycle
@@ -227,13 +238,15 @@ final class WorkspacePool: ObservableObject {
     func start(
         targetsProvider: @escaping @MainActor () -> [Target],
         excludedKeys: @escaping @MainActor () -> Set<String>,
-        foregroundKey: @escaping @MainActor () -> String?
+        foregroundKey: @escaping @MainActor () -> String?,
+        completionAllowed: @escaping @MainActor (String, String) -> Bool = { _, _ in true }
     ) {
         guard !started else { return }
         started = true
         self.targetsProvider = targetsProvider
         self.excludedKeys = excludedKeys
         self.foregroundKey = foregroundKey
+        self.completionAllowed = completionAllowed
         maintenanceTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -610,6 +623,10 @@ final class WorkspacePool: ObservableObject {
         if let cached = snapshots[key], cached.isEquivalent(to: snapshot) {
             return
         }
+        if let previous = snapshots[key], previous.macID == snapshot.macID,
+           previous.capturedAtUnixMs <= snapshot.capturedAtUnixMs {
+            notifyNewCompletions(snapshot, after: previous, key: key, name: name)
+        }
         // Set the derived cache first: @Published emits willChange before the
         // snapshot assignment, and observers must see an aligned pair on the
         // following runloop turn.
@@ -649,6 +666,26 @@ final class WorkspacePool: ObservableObject {
             attentionKeys.insert(key)
         } else if !hasAttention, attentionKeys.contains(key) {
             attentionKeys.remove(key)
+        }
+    }
+
+    private func notifyNewCompletions(
+        _ snapshot: RemoteBootstrapSnapshot,
+        after previous: RemoteBootstrapSnapshot,
+        key: String,
+        name: String
+    ) {
+        let previousCompletions = previous.sessions.reduce(into: [String: Int64]()) { times, session in
+            times[session.id] = session.completionNotificationAtUnixMs
+        }
+        for session in snapshot.sessions {
+            guard session.notifyWhenDone,
+                  let finishedAt = session.completionNotificationAtUnixMs,
+                  finishedAt > (previousCompletions[session.id] ?? 0),
+                  completionAllowed(key, session.id)
+            else { continue }
+            let title = session.title.isEmpty ? session.command : session.title
+            notifyCompletion(title, name, key, session.id)
         }
     }
 

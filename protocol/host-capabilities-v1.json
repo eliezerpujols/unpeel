@@ -2,13 +2,21 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 25,
+    "minor": 26,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 26,
+        "summary": "Hosts accept a manual unread receipt and persist the per-session completion notification preference across all transports. Bootstrap can report a completion recorded after opt-in.",
+        "capabilities": [
+          "session.mark_unread",
+          "session.notify_when_done.set"
+        ]
+      },
       {
         "minor": 25,
         "release": "0.7.8",
@@ -266,6 +274,13 @@
       "tui": true
     },
     {
+      "id": "session.mark_unread",
+      "method": "POST",
+      "path": "/mobile/mark-unread",
+      "native": true,
+      "tui": true
+    },
+    {
       "id": "session.metrics.read",
       "method": "GET",
       "path": "/mobile/metrics",
@@ -277,7 +292,7 @@
       "method": "POST",
       "path": "/mobile/session-organization#notifyWhenDone",
       "native": true,
-      "tui": false
+      "tui": true
     },
     {
       "id": "session.order.set",
