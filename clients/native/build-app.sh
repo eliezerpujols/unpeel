@@ -78,7 +78,10 @@ SWIFT_PATH_REMAP_FLAGS=(
 # the app in its pre-26 compatibility mode: no Liquid Glass popovers or
 # menus. Keep the native engine while the toolchain still offers it; the
 # check after the build fails loudly if the SDK stamp regresses anyway.
-if swift build --help 2>/dev/null | grep -q 'native.*Native Build System'; then
+# Capture the help first: under pipefail, `grep -q` exiting early can SIGPIPE
+# `swift build --help`, fail the pipeline, and silently pick swiftbuild.
+SWIFT_BUILD_HELP="$(swift build --help 2>/dev/null || true)"
+if grep -q 'native.*Native Build System' <<<"$SWIFT_BUILD_HELP"; then
   SWIFT_PATH_REMAP_FLAGS+=(--build-system native)
 fi
 
