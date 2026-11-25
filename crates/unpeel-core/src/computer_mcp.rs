@@ -42,7 +42,8 @@ const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel brow
     Use the computer tool in the app the user names. Use it in a real browser only when the user asks for that browser \
     and Let agents control any app is on. Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. \
     Prefer get_app_state with the app bundle ID and act on its numbered Accessibility elements. Use screenshots for visual checks \
-    and the latest screenshot's pixels for coordinate fallback. Never send money, trade, \
+    and the latest screenshot's pixels for coordinate fallback. Window results report on_current_space. The window must be \
+    on this desktop to receive input and can stay behind other windows. Never send money, trade, \
     buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them.";
 
@@ -767,6 +768,8 @@ struct CapturedWindow {
     id: u32,
     title: String,
     bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_current_space: Option<bool>,
 }
 
 impl CapturedWindow {
@@ -820,6 +823,9 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
                     return Err("Mac app returned invalid window metadata".into());
                 }
                 metadata["windows"] = json!(windows);
+            }
+            if let Some(on_current_space) = window.on_current_space {
+                metadata["on_current_space"] = json!(on_current_space);
             }
             metadata["window"] = json!(window);
         }
@@ -1076,6 +1082,26 @@ mod tests {
         );
         response["ax_tree"] = json!("a".repeat(MAX_AX_TREE_BYTES + 1));
         assert!(perform_result("get_app_state", response, Some(path)).is_err());
+    }
+
+    #[test]
+    fn window_results_preserve_current_space_for_selected_and_catalog_windows() {
+        let path = Path::new("/tmp/computer-window.png");
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../protocol/computer-use-v1.json")).unwrap();
+        let windows = fixture["window_results"].as_array().unwrap();
+        for window in windows {
+            let response = json!({
+                "ok": true, "screenshot_path": path, "width": 100, "height": 100, "scale": 1.0,
+                "ax_tree": "0 AXWindow", "window": window, "windows": windows,
+            });
+            for action in ["screenshot", "get_app_state"] {
+                let metadata = perform_result(action, response.clone(), Some(path)).unwrap();
+                assert_eq!(metadata["on_current_space"], window["on_current_space"]);
+                assert_eq!(metadata["window"], *window);
+                assert_eq!(metadata["windows"], fixture["window_results"]);
+            }
+        }
     }
 
     #[test]

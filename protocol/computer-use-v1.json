@@ -25,5 +25,9 @@
     {"action": "scroll", "app": "com.apple.Safari", "element": 2, "scroll_direction": "down", "scroll_amount": 21},
     {"action": "perform_action", "app": "com.apple.Safari", "element": 0, "ax_action": "AXRaise"},
     {"action": "open_app", "text": "Safari", "activate": true}
+  ],
+  "window_results": [
+    {"id": 76, "title": "Search Result", "bundle_id": "com.apple.Safari", "on_current_space": true},
+    {"id": 77, "title": "Reel", "bundle_id": "com.apple.Safari", "on_current_space": false}
   ]
 }

@@ -214,8 +214,8 @@ state after navigation or a UI change.
 - `press` and `click` invoke a control's default press action. `set_value`
   replaces the text of a writable control. `focus` sets focus within that app.
   If a web press leaves the observed state unchanged, the tool may post a
-  click to the same window and control. Click results report the dispatched
-  method in `delivered_via` when available.
+  click to the same window and control. The tool reports `pid_click` for a
+  web fallback only after it observes a change.
 - `scroll` with `app` and `element` uses the Accessibility scroll control.
   Pass `scroll_direction` and `scroll_amount` from 1 to 20 steps.
 - `perform_action` takes `ax_action`, such as `AXShowMenu`. Actions that raise
@@ -224,7 +224,11 @@ state after navigation or a UI change.
 Use screenshots for visual checks. `screenshot` with `app` captures just that
 app's top window, even behind other windows or on another display. Use the
 returned `windows` list to find an ID and pass it as `window`. `get_app_state`
-accepts the same window selector. Use `{"action":"screenshot","display":1}`
+accepts the same window selector. Both return `on_current_space` for the
+selected window and each window in the list. Input requires the window's
+desktop to be active, and the window can stay behind other windows.
+Minimized windows also report `on_current_space: false` and must be restored.
+Use `{"action":"screenshot","display":1}`
 for the whole display or omit both selectors for the main display. Click
 coordinates use the latest image's pixels with the origin at the top left.
 

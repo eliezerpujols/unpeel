@@ -235,8 +235,7 @@ enum ComputerAXTree {
     ) -> Element? {
         func matchesFrame(_ element: Element) -> Bool {
             guard let frame = bounds(element) else { return false }
-            return abs(frame.minX - window.bounds.minX) <= 2 && abs(frame.minY - window.bounds.minY) <= 2
-                && abs(frame.width - window.bounds.width) <= 2 && abs(frame.height - window.bounds.height) <= 2
+            return window.matchesFrame(frame)
         }
         let listed = windows.filter(matchesFrame)
         let candidates = listed.isEmpty ? fallback().filter(matchesFrame) : listed

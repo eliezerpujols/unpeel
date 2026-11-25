@@ -8,6 +8,10 @@ enum ComputerClickMethod: String, Encodable {
 
 @MainActor
 enum ComputerWebClick {
+    enum Effect: Equatable {
+        case changed, unchanged, unobserved
+    }
+
     private struct Observation: Equatable {
         let tree: String
         let url: String?
@@ -34,7 +38,7 @@ enum ComputerWebClick {
             if snapshot.focused == CFHash(element) { snapshot.focused = baseline.focused }
             return snapshot
         }
-        guard try await showsNoEffect(before: baseline, observe: observe) else { return .axPress }
+        guard try await effect(since: baseline, observe: observe) == .unchanged else { return .axPress }
         try check()
         try Task.checkCancellation()
         let point = CGPoint(x: frame.midX, y: frame.midY)
@@ -44,36 +48,69 @@ enum ComputerWebClick {
             throw ComputerError("The web element moved or changed after AXPress. Refresh its app state before clicking again.")
         }
         try click(point, ComputerPointerDelivery(pid: pid, window: .init(id: window.id, bounds: window.bounds)))
-        if try await showsNoEffect(before: baseline, observe: observe) {
-            throw ComputerError("The web control did not respond to AXPress or the window-targeted click.")
+        return try await confirmProcessClick(since: baseline, observe: observe)
+    }
+
+    static func processClick(
+        in window: ComputerWindow, at element: AXUIElement?, dispatch: () throws -> Void
+    ) async throws -> ComputerClickMethod {
+        guard let pid = window.app.pid else { throw ComputerError("The window has no target process.") }
+        func observe() -> Observation? {
+            observation(window: window, document: nil, element: element, pid: pid)
+        }
+        guard let baseline = observe() else {
+            throw ComputerError("Could not read this window’s state to verify the click.")
+        }
+        try dispatch()
+        return try await confirmProcessClick(since: baseline) {
+            guard var snapshot = observe() else { return nil }
+            if let element, snapshot.focused == CFHash(element) { snapshot.focused = baseline.focused }
+            return snapshot
+        }
+    }
+
+    static func confirmProcessClick<State: Equatable>(
+        since baseline: State, observe: () -> State?,
+        pause: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) async throws -> ComputerClickMethod {
+        guard try await effect(since: baseline, observe: observe, pause: pause) == .changed else {
+            throw ComputerError("The page did not respond to the click")
         }
         return .pidClick
     }
 
-    static func showsNoEffect<State: Equatable>(
-        before: State, observe: () -> State?,
+    static func effect<State: Equatable>(
+        since baseline: State, observe: () -> State?,
         pause: (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
-    ) async throws -> Bool {
-        // Check more than once so a queued web update has time to appear.
-        // A failed observation is inconclusive and must not replay the input.
+    ) async throws -> Effect {
+        var observedBoth = true
         for delay in [Duration.milliseconds(160), .milliseconds(330)] {
             try await pause(delay)
-            guard let after = observe(), after == before else { return false }
+            if let after = observe() {
+                if after != baseline { return .changed }
+            } else {
+                observedBoth = false
+            }
         }
-        return true
+        return observedBoth ? .unchanged : .unobserved
     }
 
-    private static func observation(window: ComputerWindow, document: AXUIElement, element: AXUIElement, pid: pid_t) -> Observation? {
-        guard ComputerAccessibility.role(of: document) == "AXWebArea",
-              let tree = try? ComputerAXTree.read(window: window, firstID: 0), tree.includesWebArea else { return nil }
+    private static func observation(
+        window: ComputerWindow, document: AXUIElement?, element: AXUIElement?, pid: pid_t
+    ) -> Observation? {
+        guard let tree = try? ComputerAXTree.read(window: window, firstID: 0),
+              document == nil || tree.includesWebArea else { return nil }
         func text(_ attribute: String, from node: AXUIElement) -> String? {
             let value = ComputerAccessibility.attribute(attribute, of: node)
             return (value as? URL)?.absoluteString ?? (value as? String) ?? (value as? NSNumber)?.stringValue
         }
+        let url = document.flatMap { text(kAXURLAttribute, from: $0) } ?? tree.elements.lazy
+            .first { ComputerAccessibility.role(of: $0) == "AXWebArea" }
+            .flatMap { text(kAXURLAttribute, from: $0) }
         let app = AXUIElementCreateApplication(pid)
         let focused = ComputerAccessibility.elementAttribute(kAXFocusedUIElementAttribute, of: app, in: pid)
         return Observation(
-            tree: tree.text, url: text(kAXURLAttribute, from: document), value: text(kAXValueAttribute, from: element),
+            tree: tree.text, url: url, value: element.flatMap { text(kAXValueAttribute, from: $0) },
             focused: focused.map { CFHash($0) }
         )
     }

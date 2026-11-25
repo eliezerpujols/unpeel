@@ -317,6 +317,7 @@ final class ComputerPlatformAdapter {
             throw ComputerError(ComputerPermissions.accessibilityMessage)
         }
         func point(_ pixel: CGPoint?, resolved: CGPoint?) throws -> CGPoint {
+            if let window = frames[request.sessionID]?.window { try ComputerWindows.requireInput(to: window) }
             // Recheck explicit pixels against the current frame. Pin implicit
             // cursor actions to the approved point even if the cursor moved
             // while the approval prompt was on screen.
@@ -337,6 +338,7 @@ final class ComputerPlatformAdapter {
             let (window, element) = try elements.element(session: request.sessionID, bundleID: action.app, id: action.id)
             let app = try ComputerTargetLookup.keyboard(app: action.app)
             guard window.app.matches(app) else { throw ComputerError("The app relaunched. Call get_app_state again.") }
+            if !performing { try ComputerWindows.requireInput(to: window) }
             return .element(window, element)
         case .zoom:
             guard let window = frames[request.sessionID]?.window else { return nil }
@@ -344,7 +346,9 @@ final class ComputerPlatformAdapter {
             guard app.matches(window.app) else { throw ComputerError("The app relaunched. Take a new screenshot.") }
             return .window(app, id: window.id, includesTree: false)
         case .type, .key:
-            return .keyboard(try ComputerTargetLookup.keyboard(app: request.keyboardApp))
+            let app = try ComputerTargetLookup.keyboard(app: request.keyboardApp)
+            if !performing { try ComputerWindows.requireKeyboardInput(to: app, captured: frames[request.sessionID]?.window) }
+            return .keyboard(app)
         case let .openApp(name):
             return .launch(try ComputerApps.resolveLaunch(name))
         case let .click(_, _, pixel), let .mouseMove(pixel):
@@ -407,16 +411,17 @@ final class ComputerPlatformAdapter {
             guard case let .element(action) = request.action, let pid = window.app.pid else {
                 throw ComputerError("The element has no target process.")
             }
-            let liveWindow = ComputerWindow(id: window.id, title: window.title, bounds: try window.liveBounds(), app: window.app)
-            guard ComputerAXTree.contains(element, in: liveWindow) else {
-                throw ComputerError("The element is no longer in this window. Call get_app_state again.")
-            }
             func checkElement() throws {
                 let current = try ComputerTargetLookup.keyboard(app: action.app)
                 try check(current)
                 try authorize(request, target: current)
+                try ComputerWindows.requireInput(to: window)
             }
             try checkElement()
+            let liveWindow = ComputerWindow(id: window.id, title: window.title, bounds: try window.liveBounds(), app: window.app)
+            guard ComputerAXTree.contains(element, in: liveWindow) else {
+                throw ComputerError("The element is no longer in this window. Call get_app_state again.")
+            }
             let bounds = ComputerAXTree.bounds(of: element)?.intersection(liveWindow.bounds)
             if action.operation == .press || action.operation == .perform(kAXPressAction) {
                 method = try await ComputerWebClick.press(
@@ -434,7 +439,11 @@ final class ComputerPlatformAdapter {
             }
         case let .keyboard(target):
             guard let pid = target.pid else { throw ComputerError("The target app has no process.") }
-            let checkKeyboard = { try check(ComputerTargetLookup.keyboard(app: request.keyboardApp)) }
+            func checkKeyboard() throws {
+                let current = try ComputerTargetLookup.keyboard(app: request.keyboardApp)
+                try check(current)
+                try ComputerWindows.requireKeyboardInput(to: current, captured: frames[request.sessionID]?.window)
+            }
             switch request.action {
             case let .type(text): try await input.type(text, to: pid, checkTarget: checkKeyboard)
             case let .key(key, duration):
@@ -444,6 +453,7 @@ final class ComputerPlatformAdapter {
             }
         case let .pointer(target, point, end):
             func checkPoint(_ position: CGPoint) throws {
+                if let window = frames[request.sessionID]?.window { try ComputerWindows.requireInput(to: window) }
                 try check(pointer(at: position, session: request.sessionID).app)
             }
             let actual = try pointer(at: point, session: request.sessionID)
@@ -533,6 +543,17 @@ final class ComputerPlatformAdapter {
                 }
                 if case .press = click { return .axPress }
             case let .process(delivery):
+                if target.app.isSafari {
+                    let window = captured ?? ComputerWindow(
+                        id: delivery.window.id, title: "", bounds: delivery.window.bounds, app: target.app
+                    )
+                    return try await ComputerWebClick.processClick(in: window, at: target.hit?.element) {
+                        try checkPoint(point)
+                        try authorize(request, target: target.app)
+                        try ComputerWindows.requireInput(to: window)
+                        try input.click(button, count: count, at: point, delivery: delivery, windowScoped: captured != nil)
+                    }
+                }
                 try input.click(button, count: count, at: point, delivery: delivery, windowScoped: captured != nil)
                 return .pidClick
             case .unavailable:

@@ -172,18 +172,38 @@ final class ComputerEngineTests: XCTestCase {
 
     @MainActor
     func testWebPressFallbackRequiresTwoStableObservations() async throws {
-        func unchanged(_ states: [String?]) async throws -> Bool {
+        func effect(_ states: [String?]) async throws -> ComputerWebClick.Effect {
             var pending = states
-            return try await ComputerWebClick.showsNoEffect(
-                before: "initial", observe: { pending.removeFirst() }, pause: { _ in }
+            return try await ComputerWebClick.effect(
+                since: "initial", observe: { pending.removeFirst() }, pause: { _ in }
             )
         }
-        let noEffect = try await unchanged(["initial", "initial"])
-        let delayedEffect = try await unchanged(["initial", "updated"])
-        let unknown = try await unchanged([nil])
-        XCTAssertTrue(noEffect)
-        XCTAssertFalse(delayedEffect)
-        XCTAssertFalse(unknown)
+        let noEffect = try await effect(["initial", "initial"])
+        let delayedEffect = try await effect(["initial", "updated"])
+        let unknown = try await effect([nil, "initial"])
+        XCTAssertEqual(noEffect, .unchanged)
+        XCTAssertEqual(delayedEffect, .changed)
+        XCTAssertEqual(unknown, .unobserved)
+    }
+
+    @MainActor
+    func testPIDClickRequiresPositiveEvidenceAfterDispatch() async throws {
+        func confirm(_ states: [Int?]) async throws -> ComputerClickMethod {
+            var pending = states
+            return try await ComputerWebClick.confirmProcessClick(
+                since: 0, observe: { pending.removeFirst() }, pause: { _ in }
+            )
+        }
+        let method = try await confirm([nil, 1])
+        XCTAssertEqual(method, .pidClick)
+        for states: [Int?] in [[0, 0], [nil, 0], [nil, nil]] {
+            do {
+                _ = try await confirm(states)
+                XCTFail("A click with no observed effect reported success")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, "The page did not respond to the click")
+            }
+        }
     }
 
     func testWindowAndElementRequestsMatchTheDesktopProtocol() throws {
@@ -206,6 +226,16 @@ final class ComputerEngineTests: XCTestCase {
             let name = try XCTUnwrap(fields["action"] as? String)
             let request = fields.merging(["screenshot_path": path]) { first, _ in first }
             XCTAssertThrowsError(try parse(name, request).get(), "\(fields)")
+        }
+        for fields in try XCTUnwrap(fixture["window_results"] as? [[String: Any]]) {
+            let window = ComputerWindow(
+                id: try XCTUnwrap(fields["id"] as? CGWindowID),
+                title: try XCTUnwrap(fields["title"] as? String), bounds: .zero,
+                app: ComputerTarget(name: "Safari", bundleID: try XCTUnwrap(fields["bundle_id"] as? String), pid: 42),
+                onCurrentSpace: try XCTUnwrap(fields["on_current_space"] as? Bool)
+            )
+            let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(window))
+            XCTAssertEqual(encoded as? NSDictionary, fields as NSDictionary)
         }
         let app = "com.apple.Safari"
         let state = try parse("get_app_state", ["app": app, "window": 76, "screenshot_path": path]).get()
@@ -345,8 +375,43 @@ final class ComputerEngineTests: XCTestCase {
             let windows = ComputerWindows.orderedWindows(
                 [menu, wrongOwner, document], onscreenIDs: onscreen, windowInfo: { quartz[$0] ?? [] }
             )
-            XCTAssertEqual(windows, [document])
+            XCTAssertEqual(windows.map(\.id), [document.id])
+            XCTAssertEqual(windows.first?.onCurrentSpace, onscreen.contains(document.id))
         }
+    }
+
+    func testInputRequiresCurrentSpaceAndDistinguishesMinimizedWindows() throws {
+        let safari = ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 677)
+        typealias Space = ComputerWindows.Space
+        try Space(listed: true, onscreen: true).requireInput(to: safari)
+        try Space(listed: true, onscreen: nil).requireInput(to: safari)
+        for space in [Space(listed: false, onscreen: true), Space(listed: true, onscreen: false)] {
+            XCTAssertThrowsError(try space.requireInput(to: safari)) {
+                XCTAssertEqual(
+                    $0.localizedDescription,
+                    "Safari's window is on another desktop. Move it to this desktop (it can stay behind other windows) and retry."
+                )
+            }
+        }
+        XCTAssertThrowsError(try Space(listed: false, onscreen: false, minimized: true).requireInput(to: safari)) {
+            XCTAssertEqual($0.localizedDescription, "Safari's window is minimized. Restore it and retry.")
+        }
+    }
+
+    func testKeyboardSpaceUsesTheFocusedWindowEvenWhenTheAppHasAnotherWindowOnThisSpace() {
+        let safari = ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 677)
+        let current = ComputerWindow(
+            id: 113, title: "Start Page", bounds: CGRect(x: 0, y: 33, width: 900, height: 600), app: safari,
+            onCurrentSpace: true
+        )
+        let other = ComputerWindow(
+            id: 114, title: "Reel", bounds: current.bounds, app: safari, onCurrentSpace: false
+        )
+        XCTAssertEqual(ComputerWindows.keyboardSpace(frame: current.bounds, title: current.title, windows: [current, other]), .current)
+        XCTAssertEqual(ComputerWindows.keyboardSpace(frame: other.bounds, title: other.title, windows: [current, other]), .other)
+        XCTAssertEqual(ComputerWindows.keyboardSpace(frame: other.bounds, title: nil, windows: [current, other]), .unverified)
+        XCTAssertEqual(ComputerWindows.keyboardSpace(frame: nil, title: nil, windows: [other]), .other)
+        XCTAssertEqual(ComputerWindows.keyboardSpace(frame: nil, title: nil, windows: []), .current)
     }
 
     @MainActor
