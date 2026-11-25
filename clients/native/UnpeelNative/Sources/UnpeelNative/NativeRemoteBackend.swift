@@ -178,7 +178,7 @@ protocol NativeRemoteBackendProtocol: Sendable {
         -> NativeRemoteEffectReceipt
     func setSessionNotifyWhenDone(sessionID: String, enabled: Bool) async throws
         -> NativeRemoteEffectReceipt
-    func answerApproval(id: String, approved: Bool) async throws
+    func answerApproval(id: String, approved: Bool, remember: Bool) async throws
         -> NativeRemoteEffectReceipt
     /// File the Session under another project/group (`session.project.set`).
     func setSessionProject(sessionID: String, projectID: String) async throws
@@ -306,7 +306,7 @@ extension NativeRemoteBackendProtocol {
         )
     }
 
-    func answerApproval(id: String, approved: Bool) async throws
+    func answerApproval(id: String, approved: Bool, remember: Bool) async throws
         -> NativeRemoteEffectReceipt
     {
         throw NativeRemoteBackendError(
@@ -1185,21 +1185,22 @@ final class NativeRemoteBackend: @unchecked Sendable {
 
     func answerApproval(
         id: String,
-        approved: Bool
+        approved: Bool,
+        remember: Bool
     ) async throws -> NativeRemoteEffectReceipt {
         let handle = try currentIdentityValidatedHandle()
         let approval = Data(id.utf8)
-        let approvedFlag: Int32 = approved ? 1 : 0
         return try await Self.runBlocking(priority: .userInitiated) {
             try Task.checkCancellation()
             var outputPointer: UnsafeMutablePointer<UInt8>?
             var outputLength = 0
             let result = approval.withUnsafeBytes { bytes in
-                unpeel_native_bridge_remote_approval_answer(
+                unpeel_native_bridge_remote_approval_answer_with_scope(
                     handle,
                     bytes.bindMemory(to: UInt8.self).baseAddress,
                     bytes.count,
-                    approvedFlag,
+                    approved ? 1 : 0,
+                    remember ? 1 : 0,
                     &outputPointer,
                     &outputLength
                 )

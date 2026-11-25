@@ -58,25 +58,23 @@ final class ComputerContainmentTests: XCTestCase {
         )
     }
 
-    func testRetirementAlsoAppliesToOlderHostsAdvertisingComputerUse() {
-        XCTAssertFalse(UnpeelFeatureFlags.computerUseControllable(hostAdvertisesAvailability: true))
-        XCTAssertFalse(UnpeelFeatureFlags.computerUseControllable(hostAdvertisesAvailability: false))
-        XCTAssertFalse(UnpeelFeatureFlags.computerUseControllable(hostAdvertisesAvailability: nil))
+    func testComputerTabIsVisibleForLocalScopes() {
+        XCTAssertTrue(SettingsTab.visibleCases.contains(.computer))
+        XCTAssertTrue(SettingsTab.visibleCases(computerUseControllable: true).contains(.computer))
+        XCTAssertFalse(SettingsTab.visibleCases(computerUseControllable: false).contains(.computer))
     }
 
-    func testComputerTabIsHiddenForEveryHost() {
-        XCTAssertFalse(SettingsTab.visibleCases(computerUseControllable: true).contains(.computer))
-        // Release build + this Mac's local scope → hidden, exactly as today.
-        // (`visibleCases` without the Host flag is the local-scope path; the
-        // test runner is not a development bundle.)
-        XCTAssertEqual(
-            SettingsTab.visibleCases(computerUseControllable: false).contains(.computer),
-            UnpeelFeatureFlags.isAvailable(.computerUse)
-        )
-        XCTAssertEqual(
-            SettingsTab.visibleCases.contains(.computer),
-            SettingsTab.visibleCases(computerUseControllable: false).contains(.computer)
-        )
+    func testComputerAccessReadsTheLiveWorkspaceSetting() throws {
+        let cases: [(Any?, ComputerAccess)] = [
+            (nil, .off), ("off", .off), ("ask", .ask), ("allow", .allow),
+            ("unknown", .off), (true, .off),
+        ]
+        for (value, expected) in cases {
+            var state: [String: Any] = ["projects": [], "computer_default_access": "allow"]
+            state["computer_use"] = value
+            let data = try JSONSerialization.data(withJSONObject: state)
+            XCTAssertEqual(try JSONDecoder().decode(AppStateFile.self, from: data).computerUse, expected)
+        }
     }
 
     func testComputerUseExperimentWriteKeepsSiblingGatesAndUnknownKeys() throws {

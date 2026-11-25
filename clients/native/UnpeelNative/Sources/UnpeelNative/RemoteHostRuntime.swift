@@ -3578,12 +3578,12 @@ extension RemoteHostRuntime {
         }
     }
 
-    func answerApproval(_ id: String, approved: Bool) async throws {
+    func answerApproval(_ id: String, approved: Bool, remember: Bool) async throws {
         try await performOrganizationVerb(
             capability: HostOperation.approvalAnswer,
             operation: approved ? "allow approval" : "deny approval"
         ) { backend in
-            _ = try await backend.answerApproval(id: id, approved: approved)
+            _ = try await backend.answerApproval(id: id, approved: approved, remember: remember)
         }
     }
 

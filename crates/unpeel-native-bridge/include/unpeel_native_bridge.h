@@ -363,6 +363,17 @@ int32_t unpeel_native_bridge_remote_approval_answer(
     size_t *out_length
 );
 
+/* remember is zero for one-time computer approval, non-zero for a session grant. */
+int32_t unpeel_native_bridge_remote_approval_answer_with_scope(
+    unpeel_native_bridge_remote_handle_t handle,
+    const uint8_t *approval_id_pointer,
+    size_t approval_id_length,
+    int32_t approved,
+    int32_t remember,
+    uint8_t **out_pointer,
+    size_t *out_length
+);
+
 int32_t unpeel_native_bridge_remote_session_stop(
     unpeel_native_bridge_remote_handle_t handle,
     const uint8_t *session_id_pointer,

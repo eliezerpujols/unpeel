@@ -153,10 +153,10 @@ public final class RemotePreviewStore {
     /// Answer a pending approval on the Mac. 409 means it was answered on the
     /// desktop or another device first — the prompt is gone either way, so
     /// that is not an error. Any other failure re-arms the prompt.
-    public func answerApproval(id: String, approved: Bool) async {
+    public func answerApproval(id: String, approved: Bool, remember: Bool? = nil) async {
         answeredApprovalIDs.insert(id)
         do {
-            try await client.answerApproval(id: id, approved: approved)
+            try await client.answerApproval(id: id, approved: approved, remember: remember)
         } catch let error as RemoteMacClientError where error.statusCode == 409 {
             // Already handled elsewhere — nothing to surface.
         } catch {

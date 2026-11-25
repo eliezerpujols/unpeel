@@ -101,7 +101,8 @@ final class MCPApprovalPresentationTests: XCTestCase {
             targetSessionID: target,
             targetAppID: nil,
             targetAppName: nil,
-            requestedAt: Date()
+            requestedAt: Date(),
+            allowsOnce: kind == .computer
         )
     }
 

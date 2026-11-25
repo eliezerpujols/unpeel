@@ -59,6 +59,7 @@ struct PlatformPresentedApproval: Equatable {
     let callerSessionID: String
     let targetSessionID: String?
     let requestedAtUnixMs: Int64
+    let allowsOnce: Bool
 }
 
 enum PlatformAdapterCall: Equatable {
@@ -515,7 +516,8 @@ final class HookServer: @unchecked Sendable {
                     body: bodyText,
                     callerSessionID: callerSessionID,
                     targetSessionID: target,
-                    requestedAtUnixMs: requested.int64Value
+                    requestedAtUnixMs: requested.int64Value,
+                    allowsOnce: value["allowsOnce"] as? Bool == true
                 ))
             }
             return .success(.presentApprovals(approvals))

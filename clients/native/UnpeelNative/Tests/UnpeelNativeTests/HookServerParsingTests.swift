@@ -204,7 +204,7 @@ final class HookServerParsingTests: XCTestCase {
         )
 
         let approvals = Data(
-            #"{"version":1,"operation":"approval.present","request":{"approvals":[{"id":"approval-1","kind":"write","title":"Allow write?","body":"Session A → Session B","callerSessionID":"session-a","targetSessionID":"session-b","requestedAtUnixMs":1234}]}}"#.utf8
+            #"{"version":1,"operation":"approval.present","request":{"approvals":[{"id":"approval-1","kind":"write","title":"Allow write?","body":"Session A → Session B","callerSessionID":"session-a","targetSessionID":"session-b","requestedAtUnixMs":1234},{"id":"approval-2","kind":"computer","title":"Allow computer use?","body":"Session A wants to use this Mac.","callerSessionID":"session-a","requestedAtUnixMs":1235,"allowsOnce":true}]}}"#.utf8
         )
         XCTAssertEqual(
             HookServer.platformAdapterCall(from: approvals),
@@ -216,7 +216,18 @@ final class HookServerParsingTests: XCTestCase {
                     body: "Session A → Session B",
                     callerSessionID: "session-a",
                     targetSessionID: "session-b",
-                    requestedAtUnixMs: 1234
+                    requestedAtUnixMs: 1234,
+                    allowsOnce: false
+                ),
+                PlatformPresentedApproval(
+                    id: "approval-2",
+                    kind: "computer",
+                    title: "Allow computer use?",
+                    body: "Session A wants to use this Mac.",
+                    callerSessionID: "session-a",
+                    targetSessionID: nil,
+                    requestedAtUnixMs: 1235,
+                    allowsOnce: true
                 ),
             ]))
         )

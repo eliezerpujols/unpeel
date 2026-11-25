@@ -522,12 +522,8 @@ struct AppStateFile: Decodable {
     /// `app_presentations` — semantic Host bindings projected by each
     /// Controller into its own local pane/detail layout.
     let appPresentations: AppPresentationsFile?
-    /// `computer_default_access` (state.rs) — the app-wide Computer MCP mode.
-    /// Absent ⇒ ask (the shipped default); explicit junk ⇒ off.
-    let computerDefaultAccess: ComputerAccess
-    /// `computer_approvals` (state.rs) — session ids the user approved for
-    /// computer use under Ask. Absent ⇒ empty.
-    let computerApprovals: [String]
+    /// Live Computer MCP access for this workspace. Absent ⇒ off.
+    let computerUse: ComputerAccess
     /// `browser_approvals` (state.rs) — session ids the user approved for
     /// browser use under Ask. Absent ⇒ empty.
     let browserApprovals: [String]
@@ -586,8 +582,7 @@ struct AppStateFile: Decodable {
         case mcpWriteApprovals = "mcp_write_approvals"
         case mcpAppOpenApprovals = "mcp_app_open_approvals"
         case appPresentations = "app_presentations"
-        case computerDefaultAccess = "computer_default_access"
-        case computerApprovals = "computer_approvals"
+        case computerUse = "computer_use"
         case browserApprovals = "browser_approvals"
         case mcpWorktreeAccess = "mcp_worktree_access"
         case mcpAutoAddBrowserScreenshots = "mcp_auto_add_browser_screenshots"
@@ -651,18 +646,8 @@ struct AppStateFile: Decodable {
         appPresentations = (try? container.decodeIfPresent(
             AppPresentationsFile.self, forKey: .appPresentations
         )) ?? nil
-        // Absent ⇒ ask (the shipped default); explicit junk parses to off so
-        // a malformed value never silently broadens access.
-        if let rawComputerAccess = ((try? container.decodeIfPresent(
-            String.self, forKey: .computerDefaultAccess
-        )) ?? nil) {
-            computerDefaultAccess = ComputerAccess.fromStateString(rawComputerAccess)
-        } else {
-            computerDefaultAccess = .ask
-        }
-        computerApprovals = ((try? container.decodeIfPresent(
-            [String].self, forKey: .computerApprovals
-        )) ?? nil) ?? []
+        computerUse = (try? container.decode(String.self, forKey: .computerUse))
+            .map(ComputerAccess.fromStateString) ?? .off
         browserApprovals = ((try? container.decodeIfPresent(
             [String].self, forKey: .browserApprovals
         )) ?? nil) ?? []
@@ -856,12 +841,7 @@ enum BrowserAccess: String, CaseIterable, Identifiable {
     }
 }
 
-/// Computer MCP access (state.rs `ComputerAccess`): the app-wide mode for the
-/// cua-driver-backed `computer` domain. Unlike the browser (isolated per
-/// session), computer use reads and drives the user's real apps, so the
-/// shipped default is `ask` — a one-time per-session approval alert. Lenient
-/// parse: an explicit unknown value is `off` (junk never broadens access);
-/// absence defaults to `ask` at the decode site.
+/// Workspace access to the Mac's computer-use adapter.
 enum ComputerAccess: String, CaseIterable, Identifiable {
     case off
     case ask
@@ -872,7 +852,7 @@ enum ComputerAccess: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .off: return "Off"
-        case .ask: return "Ask each session"
+        case .ask: return "Ask"
         case .allow: return "Allow"
         }
     }
@@ -880,13 +860,13 @@ enum ComputerAccess: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .off: return "No computer control for any session."
-        case .ask: return "Each session's first computer action asks you once."
-        case .allow: return "All sessions can control this Mac without asking."
+        case .ask: return "Approve each action or allow access for the session."
+        case .allow: return "Sessions in this workspace can control this Mac without asking."
         }
     }
 
     static func fromStateString(_ raw: String) -> ComputerAccess {
-        switch raw.trimmingCharacters(in: .whitespaces).lowercased() {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "ask": return .ask
         case "allow": return .allow
         default: return .off

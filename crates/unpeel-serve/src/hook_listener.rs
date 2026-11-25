@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use unpeel_core::app_paths;
 
-use crate::approvals::{already_granted, persist_grant, ApprovalHub, ApprovalOutcome};
+use crate::approvals::{
+    already_granted, persist_grant, session_display_name, ApprovalHub, ApprovalOutcome,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(125);
 
@@ -68,19 +70,6 @@ impl HookEventMessage {
 
     pub fn is_app_alert(&self) -> bool {
         self.app_alert.is_some()
-    }
-}
-
-/// Human-readable name for an approval dialog: the Session's label when its
-/// manifest is readable, else the short id. The raw ids stay in the body.
-fn session_display_name(session_id: &str) -> String {
-    let label = unpeel_core::session_host::load_manifest(session_id)
-        .map(|manifest| manifest.session.label.trim().to_owned())
-        .unwrap_or_default();
-    if label.is_empty() {
-        session_id[..8.min(session_id.len())].to_owned()
-    } else {
-        format!("“{label}”")
     }
 }
 
@@ -314,18 +303,22 @@ fn handle_mcp(
                 approve(ApprovalOutcome::Approved, stream);
                 return;
             }
-            let outcome = hub.request(
-                kind,
-                format!(
-                    "Allow {kind} access for session {}?",
-                    session_display_name(&session_id)
-                ),
-                session_id.clone(),
-                session_id.clone(),
-                None,
-                APPROVAL_TIMEOUT,
-            );
-            if outcome.approved() {
+            let outcome = if kind == "computer" {
+                hub.request_computer(&session_id)
+            } else {
+                hub.request(
+                    kind,
+                    format!(
+                        "Allow {kind} access for session {}?",
+                        session_display_name(&session_id)
+                    ),
+                    session_id.clone(),
+                    session_id.clone(),
+                    None,
+                    APPROVAL_TIMEOUT,
+                )
+            };
+            if outcome == ApprovalOutcome::Approved {
                 persist_grant(kind, &session_id, None);
             }
             approve(outcome, stream);

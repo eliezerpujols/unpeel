@@ -741,12 +741,7 @@ final class UnpeelStore: ObservableObject {
     /// disable. There is no per-session override; this is the single switch.
     @Published private(set) var browserDefaultAccess: BrowserAccess = .on
 
-    /// App-wide Computer MCP access (`computer_default_access`) and the
-    /// remembered per-session approvals (`computer_approvals`). The unified
-    /// MCP server reads both from app-state.json per call, so changes apply
-    /// live; the app owns the writes.
-    @Published private(set) var computerDefaultAccess: ComputerAccess = .ask
-    @Published private(set) var computerApprovals: [String] = []
+    @Published private var localComputerUseAccess: ComputerAccess = .off
     /// Remembered per-session browser approvals (`browser_approvals`), used
     /// only while `browserDefaultAccess == .ask`.
     @Published private(set) var browserApprovals: [String] = []
@@ -4783,62 +4778,30 @@ final class UnpeelStore: ObservableObject {
         }
     }
 
-    // MARK: - Computer MCP access (Settings → Computer)
-    //
-    // Same persistence contract as browser access: the unified MCP server
-    // reads `computer_default_access` and `computer_approvals` from
-    // app-state.json per call, so every change here applies live.
+    // MARK: - Computer use
 
-    /// Set the app-wide Computer access mode. Off applies live through the
-    /// per-call gate; enabling reaches existing sessions at their next
-    /// natural restart (domain advertising is launch-time). The engine
-    /// daemon follows the mode: it runs exactly while access isn't Off.
-    func setDefaultComputerAccess(_ access: ComputerAccess) {
-        guard access != computerDefaultAccess else { return }
-        computerDefaultAccess = access
-        let value = access.rawValue
-        mutateAppStateJSON { root in
-            root["computer_default_access"] = value
+    var canEditComputerUse: Bool { scopedLocalUnpeelDir != nil }
+
+    var computerUseAccess: ComputerAccess {
+        if selectedHostScope == .local { return localComputerUseAccess }
+        return loadScopedAppState()?.computerUse ?? .off
+    }
+
+    func setComputerUseAccess(_ access: ComputerAccess) {
+        guard access != computerUseAccess else { return }
+        guard editScopedAppStateAnnouncing({ $0["computer_use"] = access.rawValue }) else {
+            ToastCenter.shared.show(
+                "Couldn’t save computer use access",
+                systemImage: "exclamationmark.triangle"
+            )
+            return
         }
-        rescan()
-    }
-
-    private func persistComputerApprovals() {
-        let snapshot = computerApprovals
-        mutateAppStateJSON { root in
-            root["computer_approvals"] = snapshot
+        if selectedHostScope == .local {
+            localComputerUseAccess = access
+        } else {
+            scopedAppStateCache = nil
+            objectWillChange.send()
         }
-    }
-
-    /// Remember the user's "Allow" answer for one session (Ask mode). Lives
-    /// until the session is removed; follows a restart's new session id.
-    func approveComputerAccess(sessionID: String) {
-        guard !computerApprovals.contains(sessionID) else { return }
-        computerApprovals.append(sessionID)
-        persistComputerApprovals()
-    }
-
-    /// Revoke one remembered approval (Settings ▸ Computer). The session's
-    /// next computer action asks again.
-    func revokeComputerApproval(sessionID: String) {
-        guard computerApprovals.contains(sessionID) else { return }
-        computerApprovals.removeAll { $0 == sessionID }
-        persistComputerApprovals()
-    }
-
-    private func pruneComputerApprovals(forRemovedSession sessionID: String) {
-        guard computerApprovals.contains(sessionID) else { return }
-        computerApprovals.removeAll { $0 == sessionID }
-        persistComputerApprovals()
-    }
-
-    /// A restart mints a new session id; keep the remembered approval alive.
-    /// `approved` is captured BEFORE pruneNativeState drops the old id — the
-    /// read-before-prune discipline every carried per-session fact uses.
-    private func carryComputerApproval(approved: Bool, to newID: String) {
-        guard approved, !computerApprovals.contains(newID) else { return }
-        computerApprovals.append(newID)
-        persistComputerApprovals()
     }
 
     // MARK: - Unpeel Link profile (Settings ▸ Remote ▸ Unpeel Link)
@@ -6174,13 +6137,9 @@ final class UnpeelStore: ObservableObject {
         if browserDefault != browserDefaultAccess {
             browserDefaultAccess = browserDefault
         }
-        let computerDefault = stateFile?.computerDefaultAccess ?? .ask
-        if computerDefault != computerDefaultAccess {
-            computerDefaultAccess = computerDefault
-        }
-        let computerApproved = stateFile?.computerApprovals ?? []
-        if computerApproved != computerApprovals {
-            computerApprovals = computerApproved
+        let computerAccess = stateFile?.computerUse ?? .off
+        if computerAccess != localComputerUseAccess {
+            localComputerUseAccess = computerAccess
         }
         let browserApproved = stateFile?.browserApprovals ?? []
         if browserApproved != browserApprovals {
@@ -11410,17 +11369,6 @@ final class UnpeelStore: ObservableObject {
                 announceStateChange("app-state")
             }
         }
-    }
-
-    /// Whether the selected Host advertises a computer-use adapter in its
-    /// bootstrap. Drives Controller-side visibility for non-local scopes
-    /// (decision D2); the local Mac scope never reads it.
-    var selectedHostAdvertisesComputerUse: Bool {
-        guard selectedHostScope != .local else { return false }
-        return UnpeelFeatureFlags.computerUseControllable(
-            hostAdvertisesAvailability: remoteHostRuntime.snapshot?
-                .workspaceSettings?.experimentalSettings?.computerUseAvailable
-        )
     }
 
     /// Write `experimental_features.computer_use` into an `app-state.json`

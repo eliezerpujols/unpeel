@@ -24,6 +24,7 @@ const MAX_TEXT_BYTES: usize = 60 * 1024;
 const MAX_APP_NAME_BYTES: usize = 512;
 const MAX_KEY_BYTES: usize = 128;
 const HOST_TIMEOUT: Duration = Duration::from_secs(40);
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(125);
 // Base64 expands every three bytes to four. Bound the encoded MCP payload.
 const MAX_INLINE_PNG_BYTES: usize = 1_500_000 / 4 * 3;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -261,17 +262,93 @@ fn positive_integer(arguments: &Value, key: &str) -> Result<i32, String> {
         .ok_or_else(|| format!("'{key}' must be a positive 32-bit integer"))
 }
 
-fn require_access(state: &Value) -> Result<(), String> {
-    let mode = state
-        .get("computer_use")
+fn access_mode(value: Option<&Value>) -> Result<ComputerAccess, String> {
+    let mode = value
         .and_then(Value::as_str)
         .map(ComputerAccess::from_state_str)
         .unwrap_or(ComputerAccess::Off);
     match mode {
         ComputerAccess::Off => Err(OFF_MESSAGE.into()),
-        // TODO(RAN-3): Ask for per-session approval before executing.
-        ComputerAccess::Ask | ComputerAccess::Allow => Ok(()),
+        ComputerAccess::Ask | ComputerAccess::Allow => Ok(mode),
     }
+}
+
+fn has_session_approval(state: &Value, session_id: &str) -> bool {
+    state["computer_approvals"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(session_id)))
+}
+
+pub enum ComputerApproval {
+    Once,
+    Session,
+}
+
+static PENDING_APPROVALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Keep one action waiting per session. A one-time answer can then only
+/// release the action that presented the prompt.
+struct PendingApproval<'a>(&'a str);
+
+impl<'a> PendingApproval<'a> {
+    fn begin(session_id: &'a str) -> Result<Self, String> {
+        let mut pending = PENDING_APPROVALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.iter().any(|id| id == session_id) {
+            return Err("This session already has a computer access approval pending.".into());
+        }
+        pending.push(session_id.into());
+        Ok(Self(session_id))
+    }
+}
+
+impl Drop for PendingApproval<'_> {
+    fn drop(&mut self) {
+        PENDING_APPROVALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id| id != self.0);
+    }
+}
+
+fn authorize_action(
+    state: &Value,
+    mode: ComputerAccess,
+    session_id: &str,
+    request_approval: impl FnOnce(&str) -> Result<ComputerApproval, String>,
+) -> Result<(), String> {
+    if mode == ComputerAccess::Allow || has_session_approval(state, session_id) {
+        return Ok(());
+    }
+    let _pending = PendingApproval::begin(session_id)?;
+    // Another request may have recorded an approval since the first read.
+    let state = app_state::load()?;
+    if access_mode(state.get("computer_use"))? == ComputerAccess::Allow
+        || has_session_approval(&state, session_id)
+    {
+        return Ok(());
+    }
+    let approval = request_approval(session_id)?;
+    // A prompt can outlive the session or a change to the workspace policy.
+    require_session(session_id)?;
+    if matches!(approval, ComputerApproval::Session) {
+        app_state::edit(|root| {
+            if access_mode(root.get("computer_use"))? == ComputerAccess::Ask {
+                let approvals = root
+                    .entry("computer_approvals")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .ok_or("Invalid computer approvals in app-state.json")?;
+                if !approvals.iter().any(|id| id.as_str() == Some(session_id)) {
+                    approvals.push(json!(session_id));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    access_mode(app_state::load()?.get("computer_use"))?;
+    Ok(())
 }
 
 /// Computer use rides the existing unified integration. The new live setting
@@ -321,9 +398,11 @@ fn takes_screenshot(action: &str) -> bool {
 /// repeated here so a raw local request cannot bypass the MCP dispatcher.
 pub fn handle_local_call(
     request: &Value,
+    request_approval: impl FnOnce(&str) -> Result<ComputerApproval, String>,
     call_adapter: impl FnOnce(&str, Value) -> Result<Value, String>,
 ) -> Result<Value, String> {
-    require_access(&app_state::load()?)?;
+    let state = app_state::load()?;
+    let mode = access_mode(state.get("computer_use"))?;
     let session_id = request
         .get("session_id")
         .and_then(Value::as_str)
@@ -332,6 +411,7 @@ pub fn handle_local_call(
     let arguments = &request["arguments"];
     let action = action_name(arguments)?;
     let mut body = validate_arguments(action, arguments)?;
+    authorize_action(&state, mode, session_id, request_approval)?;
     if action == "status" {
         return call_adapter(STATUS_OPERATION, json!({}));
     }
@@ -393,7 +473,7 @@ pub(crate) fn tool_content(arguments: &Value) -> Result<Vec<Value>, String> {
     if action == "help" {
         return Ok(vec![json!({"type": "text", "text": help(arguments)?})]);
     }
-    require_access(&app_state::load()?)?;
+    access_mode(app_state::load()?.get("computer_use"))?;
     let session_id = crate::mcp_host::self_session_id()
         .ok_or("Computer use requires an Unpeel terminal session")?;
     let arguments = validate_arguments(action, arguments)?;
@@ -444,7 +524,7 @@ fn call_host(body: &Value) -> Result<Value, String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|error| format!("Could not reach the workspace Host for computer use: {error}"))?;
     stream
-        .set_read_timeout(Some(HOST_TIMEOUT))
+        .set_read_timeout(Some(APPROVAL_TIMEOUT + HOST_TIMEOUT))
         .map_err(|error| error.to_string())?;
     stream
         .set_write_timeout(Some(HOST_TIMEOUT))
@@ -632,13 +712,16 @@ mod tests {
             json!({"computer_use": "unknown"}),
             json!({"computer_use": true}),
         ] {
-            assert_eq!(require_access(&state).unwrap_err(), OFF_MESSAGE);
+            assert_eq!(
+                access_mode(state.get("computer_use")).unwrap_err(),
+                OFF_MESSAGE
+            );
         }
         for state in [
             json!({"computer_use": "allow"}),
             json!({"computer_use": "ask"}),
         ] {
-            assert!(require_access(&state).is_ok());
+            assert!(access_mode(state.get("computer_use")).is_ok());
         }
     }
 

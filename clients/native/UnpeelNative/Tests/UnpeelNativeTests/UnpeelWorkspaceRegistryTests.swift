@@ -110,7 +110,6 @@ final class UnpeelWorkspaceRegistryTests: XCTestCase {
             XCTAssertTrue(SettingsTab.hostScopedCases.contains(tab), "\(tab) follows the scope picker")
         }
         XCTAssertFalse(SettingsTab.visibleCases.contains(.presets))
-        XCTAssertFalse(SettingsTab.visibleCases.contains(.computer))
         let visible = SettingsTab.visibleCases
         XCTAssertEqual(visible.firstIndex(of: .agents).map { $0 + 1 }, visible.firstIndex(of: .plugins))
     }

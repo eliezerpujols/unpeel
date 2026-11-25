@@ -12,6 +12,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use unpeel_core::computer_mcp::{ComputerApproval, APPROVAL_TIMEOUT};
+
 pub struct PendingApproval {
     pub id: String,
     pub kind: String,
@@ -20,7 +22,7 @@ pub struct PendingApproval {
     pub caller_session_id: String,
     pub target_session_id: Option<String>,
     pub requested_at: u64,
-    responder: Sender<bool>,
+    responder: Sender<ApprovalOutcome>,
 }
 
 #[derive(Default)]
@@ -41,17 +43,48 @@ fn now_ms() -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
+    ApprovedOnce,
     Declined,
     TimedOut,
 }
 
 impl ApprovalOutcome {
     pub fn approved(self) -> bool {
-        self == ApprovalOutcome::Approved
+        matches!(self, Self::Approved | Self::ApprovedOnce)
     }
 }
 
 impl ApprovalHub {
+    pub fn request_computer(self: &Arc<Self>, session_id: &str) -> ApprovalOutcome {
+        self.request(
+            "computer",
+            format!(
+                "Allow {} to use this Mac?",
+                session_display_name(session_id)
+            ),
+            "This lets the agent see the screen and control apps on this Mac.".into(),
+            session_id.into(),
+            None,
+            APPROVAL_TIMEOUT,
+        )
+    }
+
+    pub fn request_computer_action(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<ComputerApproval, String> {
+        match self.request_computer(session_id) {
+            ApprovalOutcome::Approved => Ok(ComputerApproval::Session),
+            ApprovalOutcome::ApprovedOnce => Ok(ComputerApproval::Once),
+            ApprovalOutcome::Declined => {
+                Err("The user denied computer access for this action.".into())
+            }
+            ApprovalOutcome::TimedOut => {
+                Err("The computer access approval prompt timed out.".into())
+            }
+        }
+    }
+
     /// Queue a request and block until answered or `timeout`. The caller is
     /// an HTTP handler thread, so blocking here is the contract — the MCP
     /// host is itself blocking on our response.
@@ -64,7 +97,8 @@ impl ApprovalHub {
         target_session_id: Option<String>,
         timeout: Duration,
     ) -> ApprovalOutcome {
-        let (tx, rx): (Sender<bool>, Receiver<bool>) = std::sync::mpsc::channel();
+        let (tx, rx): (Sender<ApprovalOutcome>, Receiver<ApprovalOutcome>) =
+            std::sync::mpsc::channel();
         let id = uuid::Uuid::new_v4().to_string();
         if let Ok(mut guard) = self.pending.lock() {
             guard.push(PendingApproval {
@@ -79,11 +113,9 @@ impl ApprovalHub {
             });
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
-        let outcome = match rx.recv_timeout(timeout) {
-            Ok(true) => ApprovalOutcome::Approved,
-            Ok(false) => ApprovalOutcome::Declined,
-            Err(_) => ApprovalOutcome::TimedOut,
-        };
+        let outcome = rx
+            .recv_timeout(timeout)
+            .unwrap_or(ApprovalOutcome::TimedOut);
         // Drop the entry if it's still queued (timeout path).
         if let Ok(mut guard) = self.pending.lock() {
             let before = guard.len();
@@ -97,16 +129,22 @@ impl ApprovalHub {
 
     /// Answer by id (from the TUI keys or the phone). Returns false when the
     /// id is unknown (already answered or timed out).
-    pub fn answer(&self, id: &str, approved: bool) -> bool {
+    pub fn answer(&self, id: &str, approved: bool, remember: bool) -> bool {
         let Ok(mut guard) = self.pending.lock() else {
             return false;
         };
         let Some(index) = guard.iter().position(|p| p.id == id) else {
             return false;
         };
+        let outcome = match (approved, remember) {
+            (false, _) => ApprovalOutcome::Declined,
+            (true, true) => ApprovalOutcome::Approved,
+            (true, false) if guard[index].kind == "computer" => ApprovalOutcome::ApprovedOnce,
+            (true, false) => return false,
+        };
         let entry = guard.remove(index);
         self.generation.fetch_add(1, Ordering::AcqRel);
-        entry.responder.send(approved).is_ok()
+        entry.responder.send(outcome).is_ok()
     }
 
     /// The front of the queue for the TUI prompt.
@@ -147,6 +185,9 @@ impl ApprovalHub {
                         obj.insert("targetSessionID".into(), target.clone().into());
                     }
                 }
+                if p.kind == "computer" {
+                    value["allowsOnce"] = true.into();
+                }
                 value
             })
             .collect()
@@ -154,6 +195,18 @@ impl ApprovalHub {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+}
+
+/// Human-readable session label for the prompt. Fall back to a short id.
+pub fn session_display_name(session_id: &str) -> String {
+    let label = unpeel_core::session_host::load_manifest(session_id)
+        .map(|manifest| manifest.session.label.trim().to_owned())
+        .unwrap_or_default();
+    if label.is_empty() {
+        session_id.chars().take(8).collect()
+    } else {
+        format!("“{label}”")
     }
 }
 
@@ -288,7 +341,7 @@ mod tests {
         assert!(queued_generation > 0);
         let id = queued["id"].as_str().expect("approval id");
 
-        assert!(hub.answer(id, true));
+        assert!(hub.answer(id, true, true));
         assert_eq!(
             waiter.join().expect("request thread should finish"),
             ApprovalOutcome::Approved
@@ -347,7 +400,7 @@ mod tests {
         assert_eq!(queued["kind"], "write");
         assert_eq!(queued["callerSessionID"], "a");
         assert_eq!(queued["targetSessionID"], "b");
-        assert!(hub.answer(queued["id"].as_str().unwrap(), false));
+        assert!(hub.answer(queued["id"].as_str().unwrap(), false, true));
         assert_eq!(waiter.join().unwrap(), ApprovalOutcome::Declined);
 
         // A non-object body is left alone rather than corrupted.

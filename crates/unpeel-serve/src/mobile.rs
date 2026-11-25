@@ -1956,7 +1956,12 @@ fn handle_approval_answer(
     ) else {
         return (400, error_body("request failed"));
     };
-    if approvals.answer(id, approved) {
+    let remember = match body.get("remember") {
+        None => true,
+        Some(serde_json::Value::Bool(remember)) => *remember,
+        Some(_) => return (400, error_body("remember must be a boolean")),
+    };
+    if approvals.answer(id, approved, remember) {
         (200, r#"{"ok":true}"#.into())
     } else {
         (409, error_body("approval no longer pending"))

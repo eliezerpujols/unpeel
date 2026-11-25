@@ -717,18 +717,14 @@ impl Default for BrowserSettings {
     }
 }
 
-/// Computer Use access for the Unpeel Computer MCP domain (cua-driver engine).
-/// Unlike the browser — isolated per session by construction — computer use
-/// sees the user's real screen and drives the real mouse/keyboard, so the
-/// default is `Ask`: each session needs a one-time user approval (remembered
-/// in `computer_approvals`, pruned/carried with the session). `Allow` skips
-/// the prompt app-wide; `Off` is the master disable.
+/// Workspace access to the Mac app's computer-use adapter. `computer_use`
+/// defaults to Off. The enum's Ask default preserves legacy state decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputerAccess {
     /// No computer tools for any session.
     Off,
-    /// Every session's first computer action asks the user for approval.
+    /// Prompt unless the user has granted access for the session.
     #[default]
     Ask,
     /// All sessions get the computer tools without prompting.

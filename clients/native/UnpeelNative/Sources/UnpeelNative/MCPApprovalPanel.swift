@@ -64,11 +64,8 @@ final class FloatingPromptPanelController {
     }
 }
 
-/// In-pane Allow / Don't Allow card for one pending MCP approval. No
-/// click-away: this is a privilege grant, so the only exits are the two
-/// explicit answers (or a paired controller answering first). Return and
-/// Escape are swallowed while this pane is focused so they never reach the
-/// terminal underneath.
+/// In-pane card for one pending MCP approval. Return and Escape are
+/// swallowed while focused so they never reach the terminal underneath.
 struct McpApprovalPaneOverlay: View {
     @ObservedObject var store: UnpeelStore
     let approval: PendingMcpApproval
@@ -109,15 +106,20 @@ struct McpApprovalPaneOverlay: View {
                 HStack(spacing: 8) {
                     Spacer()
                     McpApprovalDialogButton(
-                        label: "Don't Allow",
+                        label: approval.allowsOnce ? "Deny" : "Don’t Allow",
                         prominent: false,
                         action: {
                             store.answerMcpApproval(id: approval.id, approved: false)
                         }
                     )
+                    if approval.allowsOnce {
+                        McpApprovalDialogButton(label: "Allow once", prominent: true) {
+                            store.answerMcpApproval(id: approval.id, approved: true, remember: false)
+                        }
+                    }
                     McpApprovalDialogButton(
-                        label: "Allow",
-                        prominent: true,
+                        label: approval.allowsOnce ? "Allow for this session" : "Allow",
+                        prominent: !approval.allowsOnce,
                         action: {
                             store.answerMcpApproval(id: approval.id, approved: true)
                         }
@@ -132,7 +134,9 @@ struct McpApprovalPaneOverlay: View {
         .background(
             McpApprovalKeyMonitor(
                 enabled: capturesKeys,
-                onAllow: { store.answerMcpApproval(id: approval.id, approved: true) },
+                onAllow: {
+                    store.answerMcpApproval(id: approval.id, approved: true, remember: !approval.allowsOnce)
+                },
                 onDeny: { store.answerMcpApproval(id: approval.id, approved: false) }
             )
         )

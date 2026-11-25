@@ -92,10 +92,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     }
 
     static var visibleCases: [SettingsTab] {
-        visibleCases(computerUseControllable: false)
+        visibleCases(computerUseControllable: true)
     }
 
-    /// The legacy availability argument cannot restore a retired settings tab.
     static func visibleCases(computerUseControllable: Bool) -> [SettingsTab] {
         allCases.filter { tab in
             switch tab {
@@ -104,9 +103,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             // the access page exists while either is on.
             case .agentAccess:
                 return UnpeelFeatureFlags.isEnabled(.sessionsMcp) || UnpeelFeatureFlags.isEnabled(.browserMcp)
-            // Keep the saved enum case readable, but never show its old panel.
-            case .computer, .presets:
-                return false
+            case .computer: return computerUseControllable
+            case .presets: return false
             case .workspaces: return UnpeelFeatureFlags.isEnabled(.workspaces)
             // Git worktrees is a Features toggle; its panel only exists while
             // the feature is on (same live gate as the sidebar folders).
@@ -209,7 +207,7 @@ struct SettingsSidebarPanel: View {
                         // registry (create/open/remove). It sits directly
                         // under the dropdown, outside any workspace's own
                         // settings.
-                        if SettingsTab.visibleCases(computerUseControllable: store.selectedHostAdvertisesComputerUse).contains(.workspaces) {
+                        if visibleTabs.contains(.workspaces) {
                             SettingsNavRow(
                                 title: SettingsTab.workspaces.title,
                                 leadingIcon: SettingsTab.workspaces.icon,
@@ -222,7 +220,7 @@ struct SettingsSidebarPanel: View {
                         // The ACTIVE workspace's settings. Host-backed tabs
                         // stay visible for SSH/headless Hosts; capability and
                         // additive-payload checks happen in the content pane.
-                        ForEach(SettingsTab.visibleCases(computerUseControllable: store.selectedHostAdvertisesComputerUse).filter { $0 != .workspaces }) { tab in
+                        ForEach(visibleTabs.filter { $0 != .workspaces }) { tab in
                             SettingsNavRow(
                                 title: tab.title,
                                 leadingIcon: tab.icon,
@@ -251,13 +249,11 @@ struct SettingsSidebarPanel: View {
     }
 
     private var selectedTab: SettingsTab {
-        if SettingsTab.visibleCases(computerUseControllable: store.selectedHostAdvertisesComputerUse).contains(store.settingsTab) {
-            return store.settingsTab
-        }
-        // The selected tab's gate (Mobile dev flag, Sessions MCP experiment)
-        // turned off — fall back to the first tab. Workspaces leads the enum
-        // but is itself gated, so resolve through visibleCases.
-        return SettingsTab.visibleCases(computerUseControllable: store.selectedHostAdvertisesComputerUse).first ?? .presets
+        resolvedSettingsTab(store)
+    }
+
+    private var visibleTabs: [SettingsTab] {
+        SettingsTab.visibleCases(computerUseControllable: store.canEditComputerUse)
     }
 
     /// The scope dropdown: the SAME workspace picker as the sidebar footer
@@ -2072,6 +2068,9 @@ struct SettingsContentHost: View {
             } else if selectedTab == .git {
                 GitSettingsPanel(store: store, runtime: store.remoteHostRuntime)
                     .id(store.selectedHostScope.paneScopeID)
+            } else if selectedTab == .computer, store.canEditComputerUse {
+                ComputerUseSettingsPanel(store: store)
+                    .id(store.selectedHostScope.paneScopeID)
             } else if selectedTab == .mobile {
                 // Pairing follows the scope (one pairing = one workspace);
                 // the panel itself branches on the selected scope kind.
@@ -2184,7 +2183,7 @@ struct SettingsContentHost: View {
         case .agentAccess:
             AgentAccessSettingsPanel(store: store)
         case .computer:
-            EmptyView() // Old saved selection falls back through visibleCases.
+            ComputerUseSettingsPanel(store: store)
         case .features:
             FeaturesSettingsPanel(store: store)
         case .mobile:
@@ -2214,7 +2213,7 @@ struct SettingsContentHost: View {
 @MainActor
 func resolvedSettingsTab(_ store: UnpeelStore) -> SettingsTab {
     let visible = SettingsTab.visibleCases(
-        computerUseControllable: store.selectedHostAdvertisesComputerUse
+        computerUseControllable: store.canEditComputerUse
     )
     if visible.contains(store.settingsTab) {
         return store.settingsTab

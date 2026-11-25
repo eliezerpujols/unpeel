@@ -257,6 +257,7 @@ trait RegisteredRemoteBackend: Send + Sync {
         &self,
         _approval_id: &str,
         _approved: bool,
+        _remember: bool,
     ) -> Result<u64, NativeRemoteEffectError> {
         Err(NativeRemoteEffectError {
             result: ERROR_REMOTE,
@@ -618,9 +619,14 @@ impl RegisteredRemoteBackend for RegisteredCoreBackend {
         &self,
         approval_id: &str,
         approved: bool,
+        remember: bool,
     ) -> Result<u64, NativeRemoteEffectError> {
-        self.backend
-            .answer_approval(approval_id, approved)
+        let receipt = if approved && !remember {
+            self.backend.allow_approval_once(approval_id)
+        } else {
+            self.backend.answer_approval(approval_id, approved)
+        };
+        receipt
             .map(|receipt| receipt.request_id())
             .map_err(native_remote_effect_error)
     }
@@ -1987,10 +1993,11 @@ fn answer_remote_approval(
     handle: RemoteHandle,
     approval_id: &str,
     approved: bool,
+    remember: bool,
 ) -> Result<Vec<u8>, NativeRemoteEffectError> {
     let request_id = remote_backend(handle)
         .map_err(native_not_applied_effect_error("approval answer"))?
-        .answer_approval(approval_id, approved)?;
+        .answer_approval(approval_id, approved, remember)?;
     encode_effect_receipt("approval answer", request_id)
 }
 
@@ -4086,6 +4093,34 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_approval_answer(
     out_pointer: *mut *mut u8,
     out_length: *mut usize,
 ) -> i32 {
+    unpeel_native_bridge_remote_approval_answer_with_scope(
+        handle,
+        approval_id_pointer,
+        approval_id_length,
+        approved,
+        1,
+        out_pointer,
+        out_length,
+    )
+}
+
+/// Answer a Host-owned approval. A zero `remember` allows just the pending
+/// computer action when the prompt advertises `allowsOnce`.
+///
+/// # Safety
+///
+/// A non-empty approval id must point to readable UTF-8 bytes. Both output
+/// pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn unpeel_native_bridge_remote_approval_answer_with_scope(
+    handle: RemoteHandle,
+    approval_id_pointer: *const u8,
+    approval_id_length: usize,
+    approved: i32,
+    remember: i32,
+    out_pointer: *mut *mut u8,
+    out_length: *mut usize,
+) -> i32 {
     remote_session_effect_ffi(
         handle,
         approval_id_pointer,
@@ -4093,7 +4128,7 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_approval_answer(
         "approval answer",
         out_pointer,
         out_length,
-        |approval_id| answer_remote_approval(handle, approval_id, approved != 0),
+        |approval_id| answer_remote_approval(handle, approval_id, approved != 0, remember != 0),
     )
 }
 

@@ -536,11 +536,11 @@ public struct RemoteMacClient: Sendable {
     /// Answer a pending MCP approval prompt on the Mac (Allow / Don't Allow).
     /// The Mac answers 409 when the prompt is no longer pending — answered on
     /// the desktop or another device first.
-    public func answerApproval(id: String, approved: Bool) async throws {
+    public func answerApproval(id: String, approved: Bool, remember: Bool? = nil) async throws {
         _ = try await perform(
             path: "approvals/answer",
             method: "POST",
-            body: try encoder.encode(RemoteApprovalAnswerRequest(id: id, approved: approved))
+            body: try encoder.encode(RemoteApprovalAnswerRequest(id: id, approved: approved, remember: remember))
         )
     }
 

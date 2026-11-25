@@ -13,9 +13,9 @@ enum ComputerPermissions {
     )!
 
     static let screenRecordingMessage =
-        "Unpeel needs Screen Recording permission. Enable it in System Settings → Privacy & Security → Screen Recording."
+        "Unpeel needs Screen Recording permission. Grant it in Unpeel Settings ▸ Computer use."
     static let accessibilityMessage =
-        "Unpeel needs Accessibility permission. Enable it in System Settings → Privacy & Security → Accessibility."
+        "Unpeel needs Accessibility permission. Grant it in Unpeel Settings ▸ Computer use."
 
     @MainActor
     @discardableResult

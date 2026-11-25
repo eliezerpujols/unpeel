@@ -156,7 +156,10 @@ other session** (reworked 2026-08-31):
   (`ApprovalHub::decorate_bootstrap`; before 0.7.3 that path could answer
   prompts but was never told about them, so a scoped workspace showed no
   prompt anywhere). Answers go through `POST /mobile/approvals/answer` /
-  the live `approval.answer` gateway route; first answer wins. A prompt
+  the live `approval.answer` gateway route; first answer wins. Computer use
+  prompts advertise `allowsOnce: true`. An answer with `approved: true` and
+  `remember: false` releases only the waiting action. Omitting `remember`
+  grants access for the session. A prompt
   nobody answers within the Host's 125 s window resolves as `timedOut: true`
   (not a decline): the MCP host tells the agent nothing was sent and to ask
   the user, instead of "the user declined". `mcp_app_open_approvals`

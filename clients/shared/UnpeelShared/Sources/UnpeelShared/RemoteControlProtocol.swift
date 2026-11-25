@@ -1550,6 +1550,8 @@ public struct RemotePendingApproval: Codable, Equatable, Sendable, Identifiable 
     /// Write approvals only: the session being written into.
     public let targetSessionID: String?
     public let requestedAtUnixMs: Int64
+    /// The Host accepts a one-time answer for this prompt.
+    public let allowsOnce: Bool?
 
     /// Session that should show the in-pane prompt and the attention badge.
     /// Write grants present on the destination so the user sees where input
@@ -1569,7 +1571,8 @@ public struct RemotePendingApproval: Codable, Equatable, Sendable, Identifiable 
         body: String,
         callerSessionID: String,
         targetSessionID: String? = nil,
-        requestedAtUnixMs: Int64
+        requestedAtUnixMs: Int64,
+        allowsOnce: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -1578,6 +1581,7 @@ public struct RemotePendingApproval: Codable, Equatable, Sendable, Identifiable 
         self.callerSessionID = callerSessionID
         self.targetSessionID = targetSessionID
         self.requestedAtUnixMs = requestedAtUnixMs
+        self.allowsOnce = allowsOnce
     }
 }
 
@@ -2724,10 +2728,13 @@ public struct RemoteSessionActionRequest: Codable, Equatable, Sendable {
 public struct RemoteApprovalAnswerRequest: Codable, Equatable, Sendable {
     public let id: String
     public let approved: Bool
+    /// Omitting this preserves the session grant used by existing controllers.
+    public let remember: Bool?
 
-    public init(id: String, approved: Bool) {
+    public init(id: String, approved: Bool, remember: Bool? = nil) {
         self.id = id
         self.approved = approved
+        self.remember = remember
     }
 }
 

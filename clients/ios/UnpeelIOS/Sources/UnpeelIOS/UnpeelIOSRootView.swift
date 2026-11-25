@@ -730,21 +730,24 @@ struct ApprovalPromptOverlay: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
-                HStack(spacing: 10) {
-                    Button {
-                        Task { await store.answerApproval(id: approval.id, approved: false) }
-                    } label: {
-                        Text("Don't Allow")
-                            .frame(maxWidth: .infinity)
+                Group {
+                    if approval.allowsOnce == true {
+                        VStack(spacing: 8) {
+                            answerButton("Allow once", approved: true, remember: false)
+                                .buttonStyle(.borderedProminent)
+                            answerButton("Allow for this session", approved: true)
+                                .buttonStyle(.bordered)
+                            answerButton("Deny", approved: false)
+                                .buttonStyle(.bordered)
+                        }
+                    } else {
+                        HStack(spacing: 10) {
+                            answerButton("Don’t Allow", approved: false)
+                                .buttonStyle(.bordered)
+                            answerButton("Allow", approved: true)
+                                .buttonStyle(.borderedProminent)
+                        }
                     }
-                    .buttonStyle(.bordered)
-                    Button {
-                        Task { await store.answerApproval(id: approval.id, approved: true) }
-                    } label: {
-                        Text("Allow")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
                 }
                 .padding(.top, 4)
             }
@@ -754,6 +757,15 @@ struct ApprovalPromptOverlay: View {
             .padding(.horizontal, 28)
         }
         .environment(\.colorScheme, .dark)
+    }
+
+    private func answerButton(_ label: String, approved: Bool, remember: Bool? = nil) -> some View {
+        Button {
+            Task { await store.answerApproval(id: approval.id, approved: approved, remember: remember) }
+        } label: {
+            Text(label)
+                .frame(maxWidth: .infinity)
+        }
     }
 
     private static func icon(for kind: String) -> String {

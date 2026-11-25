@@ -272,7 +272,7 @@ fn serve_connection(
             return handle_platform_adapter_control(id, request, &platform_adapters);
         }
         if request.path == computer_mcp::LOCAL_COMPUTER_PATH {
-            return handle_computer_call(request, &platform_adapters);
+            return handle_computer_call(request, &platform_adapters, &approvals);
         }
         if let Some(response) =
             crate::mobile::handle_local_live_route(&request, &approvals, &pairing, &snapshot)
@@ -409,6 +409,7 @@ fn serve_connection(
 fn handle_computer_call(
     request: unpeel_core::relay_wire::TunnelRequest,
     hub: &PlatformAdapterHub,
+    approvals: &Arc<crate::approvals::ApprovalHub>,
 ) -> (u16, Vec<u8>) {
     if request.method != "POST" {
         return (405, br#"{"error":"method not allowed"}"#.to_vec());
@@ -416,18 +417,22 @@ fn handle_computer_call(
     let Ok(body) = serde_json::from_slice(&request.body) else {
         return (400, br#"{"error":"invalid computer request"}"#.to_vec());
     };
-    let result = computer_mcp::handle_local_call(&body, |operation, body| {
-        let response = hub.call(operation, body).map_err(|error| match error {
-            PlatformAdapterError::Unavailable => {
-                "Computer use requires a Mac app with a connected computer adapter".into()
+    let result = computer_mcp::handle_local_call(
+        &body,
+        |session_id| approvals.request_computer_action(session_id),
+        |operation, body| {
+            let response = hub.call(operation, body).map_err(|error| match error {
+                PlatformAdapterError::Unavailable => {
+                    "Computer use requires a Mac app with a connected computer adapter".into()
+                }
+                other => other.to_string(),
+            })?;
+            if !(200..300).contains(&response.status) {
+                return Err(computer_mcp::adapter_error(&response.body));
             }
-            other => other.to_string(),
-        })?;
-        if !(200..300).contains(&response.status) {
-            return Err(computer_mcp::adapter_error(&response.body));
-        }
-        Ok(response.body)
-    });
+            Ok(response.body)
+        },
+    );
     let response =
         result.unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": error }));
     (200, response.to_string().into_bytes())

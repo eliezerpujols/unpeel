@@ -47,6 +47,7 @@ struct PendingMcpApproval: Identifiable, Equatable {
     let targetAppID: String?
     let targetAppName: String?
     let requestedAt: Date
+    let allowsOnce: Bool
 
     /// Session that should show the in-pane prompt and the attention badge.
     /// Write grants present on the destination so the user sees where input
@@ -125,7 +126,8 @@ extension UnpeelStore {
                 body: item.body,
                 callerSessionID: item.callerSessionID,
                 targetSessionID: item.targetSessionID,
-                requestedAtUnixMs: item.requestedAtUnixMs
+                requestedAtUnixMs: item.requestedAtUnixMs,
+                allowsOnce: item.allowsOnce == true
             )
         }, scoped: true)
     }
@@ -173,7 +175,8 @@ extension UnpeelStore {
                 targetAppName: nil,
                 requestedAt: Date(
                     timeIntervalSince1970: Double(item.requestedAtUnixMs) / 1_000
-                )
+                ),
+                allowsOnce: item.allowsOnce
             )
             owned.insert(item.id)
             pendingMcpApprovals.append(approval)
@@ -194,7 +197,7 @@ extension UnpeelStore {
     /// longer pending (already answered elsewhere) — remote callers surface
     /// that as "handled on another device" instead of an error.
     @discardableResult
-    func answerMcpApproval(id: String, approved: Bool) -> Bool {
+    func answerMcpApproval(id: String, approved: Bool, remember: Bool = true) -> Bool {
         guard let index = pendingMcpApprovals.firstIndex(where: { $0.id == id }) else {
             return false
         }
@@ -206,7 +209,7 @@ extension UnpeelStore {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.remoteHostRuntime.answerApproval(id, approved: approved)
+                    try await self.remoteHostRuntime.answerApproval(id, approved: approved, remember: remember)
                     self.pendingMcpApprovals.removeAll { $0.id == id }
                     self.scopedHostMcpApprovalIDs.remove(id)
                     self.hostMcpApprovalMessages.removeValue(forKey: id)
@@ -234,7 +237,7 @@ extension UnpeelStore {
                     )
                     backend = local
                     _ = try await local.bootstrap()
-                    _ = try await local.answerApproval(id: id, approved: approved)
+                    _ = try await local.answerApproval(id: id, approved: approved, remember: remember)
                     self.pendingMcpApprovals.removeAll { $0.id == id }
                     self.hostOwnedMcpApprovalIDs.remove(id)
                     self.hostMcpApprovalMessages.removeValue(forKey: id)
@@ -335,11 +338,7 @@ extension UnpeelStore {
         case .computer:
             return (
                 "Allow “\(sessionDisplayName(approval.callerSessionID))” to control this Mac?",
-                "The agent will be able to read app windows and click and type into them "
-                    + "in the background — your real apps, including anything sensitive "
-                    + "they show. It won't move your cursor or steal focus. Allowing "
-                    + "remembers this session until it is removed — manage approvals in "
-                    + "Settings ▸ Computer."
+                "This lets the agent see the screen and control apps on this Mac."
             )
         case .appOpen:
             let appName = approval.targetAppName ?? approval.targetAppID ?? "an App"

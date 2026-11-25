@@ -160,8 +160,6 @@ enum UnpeelFeatureFlags {
 
     static func computerUseAvailable(infoDictionary: [String: Any]?) -> Bool { false }
 
-    static func computerUseControllable(hostAdvertisesAvailability: Bool?) -> Bool { false }
-
     static func isAvailable(_ feature: AppFeature) -> Bool {
         feature != .computerUse
     }

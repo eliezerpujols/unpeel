@@ -1015,6 +1015,8 @@ struct SessionNotifyWhenDoneWire<'a> {
 struct ApprovalAnswerWire<'a> {
     id: &'a str,
     approved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remember: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -2018,6 +2020,24 @@ impl RemoteSessionBackend {
         approval_id: &str,
         approved: bool,
     ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        self.send_approval_answer(approval_id, approved, None)
+    }
+
+    /// Allow only the pending computer action. Callers must check that the
+    /// prompt advertises `allowsOnce` before sending this additive field.
+    pub fn allow_approval_once(
+        &self,
+        approval_id: &str,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        self.send_approval_answer(approval_id, true, Some(false))
+    }
+
+    fn send_approval_answer(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        remember: Option<bool>,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
         const OPERATION: &str = "approval answer";
         let effect_turn = self.inner.begin_effect();
         effect_preflight(OPERATION, || {
@@ -2032,6 +2052,7 @@ impl RemoteSessionBackend {
             &ApprovalAnswerWire {
                 id: approval_id,
                 approved,
+                remember,
             },
         )?;
         self.inner.perform_effect(
@@ -7190,6 +7211,16 @@ mod tests {
             200,
             br#"{"ok":true}"#.to_vec(),
         ));
+        connection.push(reply_step(
+            expected_effect(
+                generation,
+                APPROVAL_ANSWER_PATH,
+                json!({ "id": "approval-2", "approved": true, "remember": false }),
+            ),
+            generation,
+            200,
+            br#"{"ok":true}"#.to_vec(),
+        ));
         let backend = RemoteSessionBackend::new(connection.clone());
         backend.bootstrap().unwrap();
         assert_eq!(
@@ -7198,6 +7229,13 @@ mod tests {
                 .unwrap()
                 .request_id(),
             2
+        );
+        assert_eq!(
+            backend
+                .allow_approval_once("approval-2")
+                .unwrap()
+                .request_id(),
+            3
         );
         assert!(backend.answer_approval("", false).is_err());
         assert_eq!(connection.remaining(), 0);
