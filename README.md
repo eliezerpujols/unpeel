@@ -2,10 +2,9 @@
 
 Unpeel is an **agent-first terminal multiplexer**, written in Rust. Sessions
 keep running on your own machines, know when the agent inside them needs you,
-and give that agent a browser and its sibling sessions to work
-with. This repository is the whole product apart from the website and the
-operated Link service: the server, the Mac app, and the iPhone/iPad app,
-built from one tree at one version.
+and give that agent a browser, native app control on macOS, and access to its
+sibling sessions. The server, Mac app, and iPhone/iPad app are built from one
+tree at one version. The website and operated Link service live elsewhere.
 
 **Why this multiplexer**
 
@@ -19,10 +18,9 @@ built from one tree at one version.
   you are holding. Resume re-runs the agent with its own conversation id
   after a crash or a Host upgrade.
 - 🧰 **Built-in MCP tools.** Every session has the single `unpeel` MCP server:
-  an isolated real browser with screenshots as reviewable artifacts,
-  presets and worktrees, and the session gallery. The browser engine is
-  Host-installed and pinned; nothing to set
-  up per agent.
+  an isolated browser for websites, permission-controlled computer use for
+  native Mac apps, presets and worktrees, and the session gallery. The Host
+  installs the pinned browser engine. Both tools save reviewable screenshots.
 - 💬 **Agents can talk to each other.** From inside a session an agent can
   list its siblings, read their screens and transcripts, wait for one to go
   idle, and send text to another. Reads are open; the first write into
@@ -168,11 +166,12 @@ detected from the parsed viewport.
 an approval-controlled write policy), `agents` (occurrence-bound runtime
 occupants and their transcripts), `workspace` (presets, git worktrees),
 `artifacts` (screenshots as reviewable gallery items), `browser` (a real,
-isolated browser per session driven over CDP), `apps`, and `skills`. Reads are
-open; every write to another session follows the user's policy and asks by
-default; session creation stays user-only. Detail:
-[`docs/agents/sessions-mcp.md`](docs/agents/sessions-mcp.md),
-[`docs/agents/browser-mcp.md`](docs/agents/browser-mcp.md).
+isolated browser per session driven over CDP), `computer` (native Mac app
+control), `apps`, and `skills`. Reads are open. Writes to another session
+follow the user's policy and ask by default. Session creation stays user-only.
+See [session tools](docs/agents/sessions-mcp.md),
+[browser use](docs/agents/browser-mcp.md), and
+[computer use on macOS](docs/agents/sessions-mcp.md#computer-use-on-macos).
 
 ## Clients
 

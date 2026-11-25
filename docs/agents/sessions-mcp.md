@@ -7,7 +7,7 @@ whole server “Sessions MCP” or rename it “Agents MCP”: `sessions` and `a
 are sibling domains with different identities. A Session is the Host-owned
 terminal container; an agent is a recognized runtime occurrence currently
 occupying one. The other domains are `workspace`, `artifacts`, `browser`,
-preview `apps`, and the root `skills` registry.
+`computer`, preview `apps`, and the root `skills` registry.
 
 **Compatibility gate:** Settings ▸ Features ▸ Sessions use
 (`AppFeature.sessionsMcp`, `UNPEEL_DEV_SESSIONS_MCP=1`; shipped, no longer
@@ -191,6 +191,68 @@ Registration per provider (all through the explicitly installed integration,
   manifest per call. The older `UNPEEL_*_MCP_ENABLED` environment grants and
   the runtime-local aliases remain readable for configurations older builds
   wrote around a launch.
+
+## Computer use on macOS
+
+Use `computer` for native Mac apps and the [Unpeel `browser` tool](browser-mcp.md)
+for websites and localhost URLs. An agent's built-in browser and computer-use
+tools fail inside an Unpeel terminal. Call `computer` with `{"action":"help"}`
+for the supported actions or `{"action":"status"}` to check permissions and the
+frontmost app. Take a screenshot before the first step and use each action's
+returned screenshot to check the result. Take a new one if the action returns
+none. Click coordinates use the latest image's pixels with the origin at the
+top left.
+
+Never send money, trade, buy, or transfer funds. Ask the user to do it. Never
+click links in emails or messages. Use the Unpeel browser and check unfamiliar
+URLs with the user before opening them.
+
+The tool uses the existing Unpeel MCP integration. A running session with
+Sessions use or Browser use enabled can reach the workspace Host. The local
+Mac app must be connected as its platform adapter and have macOS Screen
+Recording and Accessibility permissions. Set the mode in **Unpeel Settings ▸
+Computer use**.
+
+- **Off** blocks computer use. **Ask** prompts before screen access. **Allow**
+  grants screen access. In both Ask and Allow, input or opening an app requires
+  a separate grant for that app in the current session.
+- Browsers are read-only through `computer`. Terminals, IDEs, and Unpeel
+  accept only left-click and scroll. Use the control pill or `⌃⌥⌘.` to pause
+  computer use, and resume from the pill or Settings.
+- The workspace Host checks approvals and chooses paths under the session's
+  `artifacts/computer/screenshots/`. The Mac app captures the screenshots and
+  sends the input. The Host logs action metadata in
+  `artifacts/computer/actions.jsonl`. For typed text it records only the length.
+
+### Verify on an isolated Unpeel Dev workspace
+
+On macOS, use a fresh, short private home so the dev app, its Host, and the
+verifier share the same workspace.
+
+```sh
+UNPEEL_HOME="$(mktemp -d /tmp/up-computer.XXXXXX)" bun run dev:native:blank
+```
+
+In that instance, enable Sessions use, set Computer use to Allow, and grant
+Screen Recording and Accessibility. Open a fresh shell session and copy its
+ID with `printenv UNPEEL_SESSION_ID`. In macOS Terminal, run the following from
+the checkout with the home printed by the launcher and that session ID.
+The shell needs `jq` and macOS Automation permission for TextEdit. Approve
+TextEdit in Unpeel Dev when prompted and keep its test window on the main
+display while the check runs.
+
+```sh
+UNPEEL_HOME='/tmp/up-computer.XXXXXX' UNPEEL_SESSION_ID='session ID' \
+  UNPEEL_BIN="$PWD/clients/native/dist/Unpeel.app/Contents/MacOS/unpeel" \
+  scripts/verify-computer.sh
+```
+
+The [verification script](../../scripts/verify-computer.sh) exercises
+`open_app`, screenshot, left-click, typing, and a key press. It checks the
+resulting text, closes the scratch document without saving, and verifies the
+read-only error when `computer` tries to open Safari.
+It skips when the Host or its Mac adapter is unavailable or permissions are
+missing. Screenshots and the TextEdit approval stay in the isolated workspace.
 
 ## The `apps` and root `skills` domains (2026-08-24)
 

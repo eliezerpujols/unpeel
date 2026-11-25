@@ -42,7 +42,7 @@ makes sense for coding, it does not belong here.
 | `generated/` | The client-safe runtime catalog, regenerated from `runtimes/` and shipped in every CLI archive |
 | `packaging/` | Service templates for `unpeel serve install` |
 | `scripts/` | Release, CI, and verification scripts (`release-cli.mjs`, the app publisher, `build-cli-linux.sh`, `verify-*.sh`, `scripts/ci/`) |
-| `docs/agents/` | Deep detail for the areas README links: serve, PTY core, session model, providers, MCP, browser use, releases, the `unpeel` CLI; `docs/agents/clients/` covers the apps |
+| `docs/agents/` | Deep detail for the areas README links: serve, PTY core, session model, providers, MCP, browser use, Mac computer use, releases, the `unpeel` CLI; `docs/agents/clients/` covers the apps |
 
 ## Hard invariants
 
@@ -82,11 +82,12 @@ makes sense for coding, it does not belong here.
   user grants one agent Session the **Create & remove** Agent access role
   (sidebar right-click), and even then it removes only the Sessions it
   created (`spawned_by`).
-- **Engines are Host-owned and pinned.** The browser engine
-  (`protocol/browser-engine-v1.json`) is installed and hash-verified by
-  the Host. The Mac app provides native desktop capture and input through the
-  authenticated platform adapter. The Host owns computer-use policy and
-  screenshot artifact paths. Unpeel never ships or requires a Node runtime.
+- **Use `browser` for websites and `computer` for native Mac apps.** The Host
+  installs and hash-verifies the pinned browser engine
+  (`protocol/browser-engine-v1.json`). For [computer use](docs/agents/sessions-mcp.md#computer-use-on-macos),
+  the Host enforces approvals and owns screenshot paths. The Mac app captures
+  the screen and sends input through its authenticated platform adapter.
+  Unpeel never ships or requires a Node runtime.
 - **A program's own report is the busy/idle authority; hooks are the
   bridge.** A program that speaks the Program Status Protocol (`OSC 7501`,
   `crates/unpeel-core/src/program_status.rs`; Claude Code does) reports
@@ -146,6 +147,7 @@ scripts/ci/check-portable-core.sh          # unpeel-core without the Host (contr
 crates/unpeel-cli/tests/run.sh            # the PTY matrix (real binaries, ~10 min); ./run.sh <filter> for a subset
 scripts/verify-attach.sh                   # attach end to end
 scripts/verify-browser.sh                  # browser engine + MCP (needs Chrome)
+scripts/verify-computer.sh                 # live computer MCP (isolated Unpeel Dev on macOS)
 bun run test:release                       # release/publish scripts
 bun run check:runtimes                     # both generated catalog copies match runtimes/
 scripts/check-notices.sh && scripts/check-links.sh

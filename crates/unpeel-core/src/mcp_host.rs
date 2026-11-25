@@ -565,9 +565,9 @@ fn initialize_result(params: &Value) -> Value {
     worktrees; 'artifacts' publishes review artifacts such as gallery images. \
     'browser' (when present) operates a real browser isolated to this session (own profile and \
     window, closed with the session). When the user asks to open, show, preview, or check a web \
-    page, site, or localhost URL, use 'browser' open — never the `open` command, Safari, \
-    another browser app, or an agent's own built-in browser / Chrome / computer-use tools (they \
-    fail inside an Unpeel terminal, e.g. \"browser access host is unavailable\"): the Unpeel browser is where the user reviews pages and sends Agentation \
+    page, site, or localhost URL, use 'browser' open, never the `open` command, Safari, \
+    another browser app, or the 'computer' tool. The Unpeel browser is where the user \
+    reviews pages and sends Agentation \
     feedback to a session. Core loop: open a URL, snapshot for element refs like \
     @e1, act by ref (click/fill), re-snapshot after navigation or DOM changes — refs go stale. \
     Prefer refs over CSS selectors. Use wait after actions that trigger loads; screenshot saves \
@@ -575,6 +575,11 @@ fn initialize_result(params: &Value) -> Value {
     misbehaves; call {\"action\":\"context\"} if browser tools seem unavailable. Do not paste \
     cookies, tokens, passwords, or downloaded private files into the conversation unless the \
     user explicitly asks. \
+    'computer' (when present) controls native Mac apps. Take a screenshot first and after \
+    each step. Use the latest screenshot's pixels for coordinates. Do not use your own built-in \
+    browser, Chrome, or computer-use tools. They fail inside an Unpeel terminal. Never send money, trade, \
+    buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
+    Use the Unpeel browser and check unfamiliar URLs with the user before opening them. \
     'apps' (when present) discovers the Unpeel Apps installed on this Host: 'list' them, \
     'describe' an app's declared tools plus its optional skill references, and use 'context' \
     to distinguish Apps attached to this agent from other App instances in its project and \
@@ -4781,6 +4786,44 @@ mod tests {
             "method": "notifications/initialized",
         }))
         .is_none());
+    }
+
+    #[test]
+    fn instructions_route_websites_and_native_apps_to_unpeel_tools() {
+        let initialized = initialize_result(&json!({}));
+        let instructions = initialized["instructions"].as_str().unwrap();
+        for expected in [
+            "page, site, or localhost URL, use 'browser' open, never the `open` command, Safari, another browser app, or the 'computer' tool",
+            "'computer' (when present) controls native Mac apps",
+            "Take a screenshot first and after each step",
+            "latest screenshot's pixels",
+            "computer-use tools. They fail inside an Unpeel terminal",
+            "Never send money, trade, buy, or transfer funds. Ask the user to do it",
+            "Never click links in emails or messages",
+            "Use the Unpeel browser and check unfamiliar URLs with the user",
+        ] {
+            assert!(instructions.contains(expected), "missing {expected:?}");
+        }
+
+        let tool = computer_mcp::tool_definition();
+        let description = tool["description"].as_str().unwrap();
+        let help = computer_mcp::tool_content(&json!({"action": "help"})).unwrap();
+        let help = help[0]["text"].as_str().unwrap();
+        for guidance in [description, help] {
+            for expected in [
+                "native Mac apps",
+                "Unpeel browser for websites",
+                "Take a screenshot first and after each step",
+                "latest screenshot's pixels",
+                "Do not use your built-in computer-use tools",
+                "Never send money, trade, buy, or transfer funds",
+                "Ask the user to do it",
+                "Never click links in emails or messages",
+                "check unfamiliar URLs with the user",
+            ] {
+                assert!(guidance.contains(expected), "missing {expected:?}");
+            }
+        }
     }
 
     #[test]

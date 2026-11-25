@@ -37,6 +37,12 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(125);
 const MAX_INLINE_PNG_BYTES: usize = 1_500_000 / 4 * 3;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel browser for websites. \
+    Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. Take a screenshot first and \
+    after each step. Use the latest screenshot's pixels for coordinates. Never send money, trade, \
+    buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
+    Use the Unpeel browser and check unfamiliar URLs with the user before opening them.";
+
 const ACTIONS: &[(&str, &str)] = &[
     ("screenshot", "Capture the current display."),
     ("left_click", "Click at coordinate."),
@@ -87,7 +93,7 @@ const ACTIONS: &[(&str, &str)] = &[
 pub(crate) fn tool_definition() -> Value {
     json!({
         "name": "computer",
-        "description": "See and control the Mac desktop through Unpeel. Call help for action details, status for permissions, and screenshot for the current display.",
+        "description": format!("{USAGE} Call help for action details or status for permissions."),
         "inputSchema": {
             "type": "object",
             "required": ["action"],
@@ -118,7 +124,8 @@ fn help(arguments: &Value) -> Result<String, String> {
         ACTIONS
     };
     let mut lines = vec![
-        "Coordinates use the latest screenshot's pixel space, with origin at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds. Input requires a grant for each app. Use the Unpeel browser tool for browser interaction. Terminals and IDEs only accept left_click and scroll.".to_owned(),
+        USAGE.to_owned(),
+        "The origin is at the top left. Region is [x0, y0, x1, y1]. Wait and hold_key accept up to 30 seconds. Input requires a grant for each app. Terminals and IDEs only accept left_click and scroll.".to_owned(),
     ];
     lines.extend(
         actions
