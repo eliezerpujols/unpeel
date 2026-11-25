@@ -1200,6 +1200,9 @@ final class UnpeelStore: ObservableObject {
     private var scanEntryCacheTitleOverrides: [String: String]?
     private var scanEntryCacheOverrideStamps: [String: FileStamp] = [:]
     private var appStateCache: (stamp: FileStamp, file: AppStateFile?)?
+    /// The scoped local workspace's `app-state.json`, read for its Agent
+    /// access grants (that home's MCP host reads them from there).
+    private var scopedAppStateCache: (path: String, stamp: FileStamp, file: AppStateFile?)?
 
     /// Single `stat(2)` call: much cheaper than FileManager.attributesOfItem
     /// (which builds a full NSDictionary incl. xattrs — it dominated the
@@ -4880,17 +4883,41 @@ final class UnpeelStore: ObservableObject {
     /// use). Applied live: the host re-reads the flag per tool call.
     /// A session's Agent access role: its override, else the app-wide default.
     func agentAccessRole(for sessionID: String) -> McpRole {
-        mcpOrchestrators[sessionID]?.role ?? mcpDefaultAccess
+        if case .localWorkspace = selectedHostScope {
+            let file = loadScopedAppState()
+            return file?.mcpOrchestrators[sessionID]?.role
+                ?? (file?.mcpDefaultAccess ?? .default).role
+        }
+        return mcpOrchestrators[sessionID]?.role ?? mcpDefaultAccess
     }
 
     /// Whether the sidebar offers Agent access for this session: agent
-    /// sessions on this Mac's own Host. The grant lives in the Host's
-    /// app-state.json, which a remote or scoped workspace does not share.
+    /// sessions on this Mac — the machine workspace or another local
+    /// workspace, whose grants live in its own home's app-state.json. A
+    /// remote Host keeps its grants on that machine.
     func canSetAgentAccess(_ sessionID: String) -> Bool {
-        guard selectedHostScope == .local,
-              let session = displaySessionsByID[sessionID]
-        else { return false }
+        switch selectedHostScope {
+        case .local, .localWorkspace: break
+        case .remote: return false
+        }
+        guard let session = displaySessionsByID[sessionID] else { return false }
         return session.isAgentSession
+    }
+
+    /// The scoped local workspace's decoded app-state (stat-cached).
+    private func loadScopedAppState() -> AppStateFile? {
+        guard let url = scopedAppStateFile else { return nil }
+        guard let stamp = Self.statFile(url.path) else {
+            scopedAppStateCache = nil
+            return nil
+        }
+        if let cached = scopedAppStateCache, cached.path == url.path, cached.stamp == stamp {
+            return cached.file
+        }
+        let file = (try? Data(contentsOf: url))
+            .flatMap { try? JSONDecoder().decode(AppStateFile.self, from: $0) }
+        scopedAppStateCache = (url.path, stamp, file)
+        return file
     }
 
     /// Set a session's Agent access role (sidebar right-click ▸ Agent
@@ -4900,6 +4927,23 @@ final class UnpeelStore: ObservableObject {
     /// running agent gains or loses the role without a restart.
     func setAgentAccessRole(_ role: McpRole, for sessionID: String) {
         guard agentAccessRole(for: sessionID) != role else { return }
+        if case .localWorkspace = selectedHostScope {
+            // That workspace's MCP host reads its own home's grants.
+            let scopedDefault = (loadScopedAppState()?.mcpDefaultAccess ?? .default).role
+            let isDefault = role == scopedDefault
+            objectWillChange.send()
+            editScopedAppStateAnnouncing { root in
+                var grants = root["mcp_orchestrators"] as? [String: Any] ?? [:]
+                if isDefault {
+                    grants.removeValue(forKey: sessionID)
+                } else {
+                    grants[sessionID] = ["role": role.rawValue, "reach": "project"]
+                }
+                root["mcp_orchestrators"] = grants
+            }
+            scopedAppStateCache = nil
+            return
+        }
         let isDefault = role == mcpDefaultAccess
         if isDefault {
             mcpOrchestrators.removeValue(forKey: sessionID)
