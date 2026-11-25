@@ -431,6 +431,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHumanReadableCopyright</key> <string>© $(date +%Y) UX Themes AS</string>
     <key>LSMinimumSystemVersion</key>  <string>13.0</string>
     <key>NSHighResolutionCapable</key> <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Unpeel takes screenshots when an agent uses computer control.</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
     <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
 $DEV_BUILD_PLIST_KEYS

@@ -34,6 +34,7 @@ final class PlatformAdapterCallbackTests: XCTestCase {
         server.platformAdapterToken = token
         server.platformAdapterHandler = { _, reply in
             reply(200, #"{"ok":true,"cycle":\#(cycle)}"#)
+            return nil
         }
         return server
     }

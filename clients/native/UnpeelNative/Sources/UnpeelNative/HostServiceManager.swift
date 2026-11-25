@@ -203,7 +203,6 @@ final class HostServiceManager: ObservableObject {
                     "approval.present",
                     "app.open-in-editor",
                     "artifact.thumbnail",
-                    "computer.status",
                     "controller.transport.host-owned",
                     "link.entitlement.refresh",
                     "mobile.e2e-key.reconcile",
@@ -213,7 +212,7 @@ final class HostServiceManager: ObservableObject {
                     "push.register",
                     "relay.credentials.recover",
                     "session.notify_when_done.set",
-                ]
+                ] + ComputerPlatformAdapter.Operation.allCases.map(\.rawValue)
             ))
         } catch {
             server.platformAdapterToken = nil

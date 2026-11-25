@@ -2842,23 +2842,12 @@ final class UnpeelStore: ObservableObject {
                     } catch {
                         reply(500, #"{"error":"native thumbnail failed"}"#)
                     }
+                case let .success(.computerPerform(request)):
+                    reply(200, await ComputerPlatformAdapter.shared.perform(request))
                 case .success(.computerStatus):
-                    let experimental = self.currentWorkspaceSettingsWire().experimentalSettings
-                    let available = experimental?.computerUseAvailable == true
-                    var response: [String: Any] = [
-                        "available": available,
-                        "ready": false,
-                    ]
-                    if let reason = experimental?.computerUseUnavailableReason {
-                        response["reason"] = reason
-                    }
-                    guard let data = try? JSONSerialization.data(withJSONObject: response),
-                          let body = String(data: data, encoding: .utf8)
-                    else {
-                        reply(500, #"{"error":"could not encode Computer Use status"}"#)
-                        return
-                    }
-                    reply(200, body)
+                    reply(200, ComputerPlatformAdapter.shared.status())
+                case .success(.computerApps):
+                    reply(200, ComputerPlatformAdapter.shared.apps())
                 case let .success(.refreshLinkEntitlement(macID)):
                     let available = await RelayUplinkManager.shared
                         .refreshPlatformEntitlement(macID: macID)
