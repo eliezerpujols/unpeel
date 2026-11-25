@@ -251,6 +251,54 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertThrowsError(try frame.screenPoint(for: CGPoint(x: 1200, y: 450)))
     }
 
+    func testWindowSelectionSkipsSafariSurfacesMissingAnExactQuartzMatch() {
+        let safari = ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 677)
+        let menu = ComputerWindow(id: 89, title: "", bounds: CGRect(x: 0, y: 0, width: 1728, height: 33), app: safari)
+        let wrongOwner = ComputerWindow(id: 95, title: "", bounds: menu.bounds, app: safari)
+        let document = ComputerWindow(
+            id: 113, title: "(1) Instagram", bounds: CGRect(x: 0, y: 33, width: 1728, height: 1084), app: safari
+        )
+        func row(for window: ComputerWindow, pid: pid_t = 677) -> [String: Any] {
+            [
+                kCGWindowNumber as String: window.id,
+                kCGWindowOwnerPID as String: pid,
+                kCGWindowBounds as String: window.bounds.dictionaryRepresentation,
+            ]
+        }
+        let quartz: [CGWindowID: [[String: Any]]] = [
+            menu.id: [],
+            wrongOwner.id: [row(for: menu), row(for: wrongOwner, pid: 42)],
+            document.id: [row(for: menu), row(for: document)],
+        ]
+        for onscreen in [[menu.id, document.id], []] {
+            let windows = ComputerWindows.orderedWindows(
+                [menu, wrongOwner, document], onscreenIDs: onscreen, windowInfo: { quartz[$0] ?? [] }
+            )
+            XCTAssertEqual(windows, [document])
+        }
+    }
+
+    @MainActor
+    func testAccessibilityMatchesSafariMainWindowWhenAXWindowsIsEmpty() {
+        let frame = CGRect(x: 0, y: 33, width: 1728, height: 1084)
+        let window = ComputerWindow(
+            id: 113, title: "(1) Instagram", bounds: frame,
+            app: ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 677)
+        )
+        let frames = ["main": frame, "focused": frame.offsetBy(dx: -2000, dy: 0), "alsoMain": frame]
+        func match(listed: [String], fallback: [String]) -> String? {
+            ComputerAXTree.matchingWindow(
+                for: window, windows: listed, bounds: { frames[$0] },
+                title: { $0 == "main" ? "(1) Instagram" : "Another window" },
+                fallback: { fallback }
+            )
+        }
+        XCTAssertEqual(match(listed: [], fallback: ["focused", "main"]), "main")
+        XCTAssertNil(match(listed: [], fallback: ["focused"]))
+        XCTAssertEqual(match(listed: [], fallback: ["alsoMain", "main"]), "main")
+        XCTAssertEqual(match(listed: ["alsoMain"], fallback: ["main"]), "alsoMain")
+    }
+
     @MainActor
     func testUnicodeEventsCarryExactTextAndNoModifiers() throws {
         let input = ComputerInput()

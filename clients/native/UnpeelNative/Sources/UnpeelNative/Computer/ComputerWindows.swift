@@ -21,12 +21,25 @@ struct ComputerWindow: Encodable, Equatable {
     }
 
     func liveBounds() throws -> CGRect {
-        guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
-              let row = info.first, row[kCGWindowOwnerPID as String] as? pid_t == app.pid,
-              let raw = row[kCGWindowBounds as String] as? [String: Any],
-              let rect = CGRect(dictionaryRepresentation: raw as CFDictionary), !rect.isEmpty else {
+        guard let bounds = matchingBounds(in: Self.windowInfo(id)) else {
             throw ComputerError("The app window changed or closed. Refresh its screenshot or app state.")
         }
+        return bounds
+    }
+
+    fileprivate static func windowInfo(_ id: CGWindowID) -> [[String: Any]] {
+        CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]] ?? []
+    }
+
+    fileprivate func matchingBounds(in rows: [[String: Any]]) -> CGRect? {
+        guard let pid = app.pid,
+              let row = rows.first(where: {
+                  $0[kCGWindowNumber as String] as? CGWindowID == id
+                      && $0[kCGWindowOwnerPID as String] as? pid_t == pid
+              }),
+              let raw = row[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: raw as CFDictionary),
+              !rect.isEmpty, !rect.isInfinite else { return nil }
         return rect
     }
 }
@@ -41,22 +54,31 @@ enum ComputerWindows {
                 && window.owningApplication?.bundleIdentifier.caseInsensitiveCompare(app.bundleID) == .orderedSame
                 && window.windowLayer == 0 && window.frame.width > 0 && window.frame.height > 0
         }
-        // Keep the Z order for windows on any active display, then list
-        // remaining shareable windows such as those in another Space.
-        let onscreen = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-        let ids = onscreen.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
-        let order = Dictionary(ids.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
-        let ordered = matches.sorted {
-            (order[$0.windowID] ?? Int.max, $0.windowID) < (order[$1.windowID] ?? Int.max, $1.windowID)
-        }
-        let window = if let id { matches.first { $0.windowID == id } } else { ordered.first }
-        guard let window else { throw ComputerError("No matching window is available in \(app.name).") }
-        func describe(_ window: SCWindow) -> ComputerWindow {
+        let candidates = matches.map { window in
             ComputerWindow(
                 id: window.windowID, title: String((window.title ?? "").unicodeScalars.prefix(400)),
                 bounds: window.frame, app: app
             )
         }
-        return (describe(window), window, ordered.prefix(20).map(describe))
+        let onscreen = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let ids = onscreen.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+        let windows = orderedWindows(candidates, onscreenIDs: ids, windowInfo: ComputerWindow.windowInfo)
+        let selected = if let id { windows.first { $0.id == id } } else { windows.first }
+        guard let selected, let source = matches.first(where: { $0.windowID == selected.id }) else {
+            throw ComputerError("No matching window is available in \(app.name).")
+        }
+        return (selected, source, Array(windows.prefix(20)))
+    }
+
+    static func orderedWindows(
+        _ candidates: [ComputerWindow], onscreenIDs: [CGWindowID], windowInfo: (CGWindowID) -> [[String: Any]]
+    ) -> [ComputerWindow] {
+        // ScreenCaptureKit can list layer-zero auxiliary surfaces, including
+        // Safari's menu bars. Validate each ID with a targeted Quartz query
+        // before including it in the catalog or choosing it for capture.
+        let order = Dictionary(onscreenIDs.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        return candidates.filter { $0.matchingBounds(in: windowInfo($0.id)) != nil }.sorted {
+            (order[$0.id] ?? Int.max, $0.id) < (order[$1.id] ?? Int.max, $1.id)
+        }
     }
 }

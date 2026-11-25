@@ -126,19 +126,36 @@ enum ComputerAXTree {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         let windows = ComputerAccessibility.attribute(kAXWindowsAttribute, of: app) as? [AXUIElement] ?? []
-        let candidates = windows.filter { element in
-            guard let bounds = bounds(of: element) else { return false }
-            return abs(bounds.minX - window.bounds.minX) <= 2 && abs(bounds.minY - window.bounds.minY) <= 2
-                && abs(bounds.width - window.bounds.width) <= 2 && abs(bounds.height - window.bounds.height) <= 2
+        let match = matchingWindow(for: window, windows: windows, bounds: bounds(of:), title: { element in
+            ComputerAccessibility.attribute(kAXTitleAttribute, of: element) as? String
+        }) {
+            // Safari can omit the document from AXWindows while still
+            // exposing it through both window attributes.
+            let main = ComputerAccessibility.elementAttribute(kAXMainWindowAttribute, of: app, in: pid)
+            let focused = ComputerAccessibility.elementAttribute(kAXFocusedWindowAttribute, of: app, in: pid)
+            if let main, let focused, CFEqual(main, focused) { return [main] }
+            return [main, focused].compactMap { $0 }
         }
-        if candidates.count == 1, let match = candidates.first { return match }
-        let titled = candidates.filter {
-            ComputerAccessibility.attribute(kAXTitleAttribute, of: $0) as? String == window.title
-        }
-        guard titled.count == 1, let match = titled.first else {
+        guard let match else {
             throw ComputerError("Could not match the captured window to its Accessibility tree.")
         }
         return match
+    }
+
+    static func matchingWindow<Element>(
+        for window: ComputerWindow, windows: [Element], bounds: (Element) -> CGRect?, title: (Element) -> String?,
+        fallback: () -> [Element]
+    ) -> Element? {
+        func matchesFrame(_ element: Element) -> Bool {
+            guard let frame = bounds(element) else { return false }
+            return abs(frame.minX - window.bounds.minX) <= 2 && abs(frame.minY - window.bounds.minY) <= 2
+                && abs(frame.width - window.bounds.width) <= 2 && abs(frame.height - window.bounds.height) <= 2
+        }
+        let listed = windows.filter(matchesFrame)
+        let candidates = listed.isEmpty ? fallback().filter(matchesFrame) : listed
+        if candidates.count == 1 { return candidates.first }
+        let titled = candidates.filter { title($0) == window.title }
+        return titled.count == 1 ? titled.first : nil
     }
 
     static func contains(_ element: AXUIElement, in window: ComputerWindow) -> Bool {
