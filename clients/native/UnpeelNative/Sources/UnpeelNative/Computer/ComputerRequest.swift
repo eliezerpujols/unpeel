@@ -15,8 +15,30 @@ struct ComputerRequest: Equatable {
         case up, down, left, right
     }
 
+    struct WindowRequest: Equatable {
+        let app: String
+        let id: CGWindowID?
+    }
+
+    struct ElementRequest: Equatable {
+        enum Operation: Equatable {
+            case press
+            case setValue(String)
+            case focus
+            case scroll(ScrollDirection, Int32)
+            case perform(String)
+        }
+
+        let app: String
+        let id: Int
+        let operation: Operation
+    }
+
     enum Action: Equatable {
         case screenshot
+        case windowScreenshot(WindowRequest)
+        case appState(WindowRequest)
+        case element(ElementRequest)
         case zoom(CGRect)
         case click(CGMouseButton, count: Int, at: CGPoint)
         case mouseMove(CGPoint)
@@ -33,9 +55,9 @@ struct ComputerRequest: Equatable {
 
         var needsAccessibility: Bool {
             switch self {
-            case .click, .mouseMove, .drag, .leftMouseDown, .leftMouseUp, .type, .key, .scroll:
+            case .click, .mouseMove, .drag, .leftMouseDown, .leftMouseUp, .type, .key, .scroll, .appState, .element:
                 return true
-            case .screenshot, .zoom, .wait, .cursorPosition, .openApp, .status:
+            case .screenshot, .windowScreenshot, .zoom, .wait, .cursorPosition, .openApp, .status:
                 return false
             }
         }
@@ -53,7 +75,6 @@ struct ComputerRequest: Equatable {
     let screenshotPath: String?
     let displayIndex: Int?
     let keyboardApp: String?
-    let activatesApp: Bool
 
     static func parse(_ fields: [String: Any], resolving: Bool = false) -> Result<Self, ComputerError> {
         do {
@@ -97,23 +118,22 @@ struct ComputerRequest: Equatable {
         }
 
         if ["key", "hold_key", "type"].contains(name), let raw = fields["app"] {
-            guard let app = raw as? String, !app.isEmpty, app.utf8.count <= 255,
-                  app.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
-                      || (97...122).contains($0) || [45, 46, 95].contains($0) })
-            else { throw ComputerError("app must be a running app’s bundle ID.") }
-            keyboardApp = app
+            keyboardApp = try Self.bundleID(raw)
         } else {
             keyboardApp = nil
         }
         if name == "open_app", let raw = fields["activate"] {
             guard let flag = raw as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID()
             else { throw ComputerError("activate must be a boolean.") }
-            activatesApp = flag.boolValue
-        } else {
-            activatesApp = false
+            guard !flag.boolValue else {
+                throw ComputerError("Computer use opens apps in the background. Bring the app forward manually if needed.")
+            }
         }
 
         if name == "screenshot", let raw = fields["display"] {
+            guard fields["app"] == nil, fields["window"] == nil else {
+                throw ComputerError("Choose a display or an app window.")
+            }
             guard let value = Self.number(raw), let index = Int32(exactly: value), index >= 0 else {
                 throw ComputerError("display must be a nonnegative integer index from computer status.")
             }
@@ -122,8 +142,28 @@ struct ComputerRequest: Equatable {
             displayIndex = nil
         }
 
+        func window() throws -> WindowRequest {
+            let id: CGWindowID?
+            if let value = fields["window"] {
+                guard let number = Self.number(value), let window = CGWindowID(exactly: number), window > 0 else {
+                    throw ComputerError("window must be a positive window ID.")
+                }
+                id = window
+            } else {
+                id = nil
+            }
+            return WindowRequest(app: try Self.bundleID(fields["app"]), id: id)
+        }
+
+        func element(_ operation: ElementRequest.Operation) throws -> Action {
+            guard let value = Self.number(fields["element"]), let index = Int32(exactly: value), index >= 0 else {
+                throw ComputerError("element must be an ID from the latest get_app_state for app.")
+            }
+            return .element(ElementRequest(app: try Self.bundleID(fields["app"]), id: Int(index), operation: operation))
+        }
+
         switch name {
-        case "screenshot", "zoom":
+        case "screenshot", "get_app_state", "zoom":
             guard resolving || path != nil else { throw ComputerError("\(name) requires screenshot_path.") }
             if name == "zoom" {
                 let values = try Self.pixels(fields["region"], count: 4, field: "region")
@@ -133,6 +173,11 @@ struct ComputerRequest: Equatable {
                 action = .zoom(CGRect(
                     x: values[0], y: values[1], width: values[2] - values[0], height: values[3] - values[1]
                 ))
+            } else if name == "get_app_state" {
+                guard fields["display"] == nil else { throw ComputerError("Choose a display or an app window.") }
+                action = .appState(try window())
+            } else if fields["app"] != nil || fields["window"] != nil {
+                action = .windowScreenshot(try window())
             } else {
                 action = .screenshot
             }
@@ -157,6 +202,21 @@ struct ComputerRequest: Equatable {
                 throw ComputerError("type requires text.")
             }
             action = .type(text)
+        case "press", "click":
+            action = try element(.press)
+        case "set_value":
+            guard let text = resolving ? "" : fields["text"] as? String,
+                  text.utf8.count <= 60 * 1024, !text.contains("\0") else {
+                throw ComputerError("set_value requires text of at most 61440 UTF-8 bytes without NUL.")
+            }
+            action = try element(.setValue(text))
+        case "focus":
+            action = try element(.focus)
+        case "perform_action":
+            guard let actionName = fields["ax_action"] as? String, ComputerAXActions.isAllowed(actionName) else {
+                throw ComputerError("That Accessibility action is unavailable for background computer use.")
+            }
+            action = try element(.perform(actionName))
         case "key", "hold_key":
             guard let text = resolving ? "space" : fields["text"] as? String else {
                 throw ComputerError("\(name) requires a key name in text.")
@@ -169,7 +229,13 @@ struct ComputerRequest: Equatable {
             guard let value = Self.number(fields["scroll_amount"]),
                   let amount = Int32(exactly: value), amount > 0
             else { throw ComputerError("scroll_amount must be a positive integer.") }
-            action = .scroll(direction, amount: amount, at: try Self.optionalPoint(fields))
+            if fields["element"] != nil {
+                guard fields["coordinate"] == nil else { throw ComputerError("Choose an element or a scroll coordinate.") }
+                guard amount <= 20 else { throw ComputerError("Element scrolling accepts 1 to 20 steps per call.") }
+                action = try element(.scroll(direction, amount))
+            } else {
+                action = .scroll(direction, amount: amount, at: try Self.optionalPoint(fields))
+            }
         case "wait":
             action = .wait(try Self.duration(fields))
         case "status" where resolving:
@@ -187,9 +253,17 @@ struct ComputerRequest: Equatable {
 
         // These actions never produce a screenshot, even if the caller supplies a path.
         switch action {
-        case .wait, .cursorPosition, .status: screenshotPath = nil
+        case .wait, .cursorPosition, .status, .element: screenshotPath = nil
         default: screenshotPath = path
         }
+    }
+
+    private static func bundleID(_ raw: Any?) throws -> String {
+        guard let app = raw as? String, !app.isEmpty, app.utf8.count <= 255,
+              app.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
+                  || (97...122).contains($0) || [45, 46, 95].contains($0) })
+        else { throw ComputerError("app must be a running app’s bundle ID.") }
+        return app
     }
 
     private static func resolvedPoint(_ fields: [String: Any], _ field: String) throws -> CGPoint? {

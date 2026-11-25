@@ -31,6 +31,7 @@ const MAX_DURATION_SECS: f64 = 30.0;
 const MAX_TEXT_BYTES: usize = 60 * 1024;
 const MAX_APP_NAME_BYTES: usize = 512;
 const MAX_KEY_BYTES: usize = 128;
+const MAX_AX_TREE_BYTES: usize = 32 * 1024;
 const HOST_TIMEOUT: Duration = Duration::from_secs(40);
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(125);
 // Base64 expands every three bytes to four. Bound the encoded MCP payload.
@@ -39,15 +40,28 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel browser for websites by default. \
     Use the computer tool in the app the user names. Use it in a real browser only when the user asks for that browser \
-    and Let agents control any app is on. Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. Take a screenshot first and \
-    after each step. Use the latest screenshot's pixels for coordinates. Never send money, trade, \
+    and Let agents control any app is on. Do not use your built-in computer-use tools. They fail inside an Unpeel terminal. \
+    Prefer get_app_state with the app bundle ID and act on its numbered Accessibility elements. Use screenshots for visual checks \
+    and the latest screenshot's pixels for coordinate fallback. Never send money, trade, \
     buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them.";
 
 const ACTIONS: &[(&str, &str)] = &[
     (
         "screenshot",
-        "Capture the main display or the optional display index from status.",
+        "Capture a display, or pass app and optionally window to capture just that app window.",
+    ),
+    (
+        "get_app_state",
+        "Capture app's window and its numbered Accessibility tree. Optionally pass a window ID.",
+    ),
+    ("press", "Press a numbered element with app and element from the latest get_app_state."),
+    ("click", "Alias for press with app and element."),
+    ("set_value", "Set a writable text element's value with app, element, and text. An empty string clears it."),
+    ("focus", "Focus a numbered control within its app without activating the app."),
+    (
+        "perform_action",
+        "Run a supported Accessibility action on app and element using ax_action, such as AXShowMenu. Raising or activating windows is disabled.",
     ),
     ("left_click", "Click at coordinate."),
     ("right_click", "Right-click at coordinate."),
@@ -78,7 +92,7 @@ const ACTIONS: &[(&str, &str)] = &[
     ),
     (
         "scroll",
-        "Scroll by scroll_amount ticks in scroll_direction. Optionally set coordinate.",
+        "Scroll in scroll_direction by scroll_amount. Use app and element for Accessibility scrolling, or coordinate for wheel events.",
     ),
     ("wait", "Wait for duration seconds."),
     ("zoom", "Capture region at full resolution."),
@@ -88,7 +102,7 @@ const ACTIONS: &[(&str, &str)] = &[
     ),
     (
         "open_app",
-        "Open the app named in text without taking focus. Set activate to true to bring it to the foreground.",
+        "Open the app named in text in the background.",
     ),
     (
         "status",
@@ -110,8 +124,10 @@ pub(crate) fn tool_definition() -> Value {
                 "coordinate": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
                 "start_coordinate": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
                 "text": {"type": "string"},
-                "app": {"type": "string", "description": "Running app bundle ID for key, hold_key, or type"},
-                "activate": {"type": "boolean", "description": "Bring the app to the foreground on open_app if true"},
+                "app": {"type": "string", "description": "Running app bundle ID for window capture, Accessibility element actions, or keyboard input"},
+                "window": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Window ID for screenshot or get_app_state when app is supplied"},
+                "element": {"type": "integer", "minimum": 0, "description": "Element ID from the latest get_app_state for app"},
+                "ax_action": {"type": "string", "description": "Accessibility action name from get_app_state, for perform_action only"},
                 "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
                 "scroll_amount": {"type": "integer", "minimum": 1},
                 "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_DURATION_SECS},
@@ -165,6 +181,7 @@ fn action_name(arguments: &Value) -> Result<&str, String> {
 fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> {
     let mut request = Map::new();
     request.insert("action".into(), json!(action));
+    let element_action = uses_element(action, arguments);
     match action {
         "left_click" | "right_click" | "middle_click" | "double_click" | "triple_click"
         | "mouse_move" => {
@@ -190,8 +207,14 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
                 .filter(|direction| matches!(*direction, "up" | "down" | "left" | "right"))
                 .ok_or("'scroll_direction' must be up, down, left, or right")?;
             let amount = positive_integer(arguments, "scroll_amount")?;
+            if element_action && amount > 20 {
+                return Err("Element scrolling accepts 1 to 20 steps per call".into());
+            }
             request.insert("scroll_direction".into(), json!(direction));
             request.insert("scroll_amount".into(), json!(amount));
+            if element_action && arguments.get("coordinate").is_some() {
+                return Err("Choose an element or a scroll coordinate".into());
+            }
             if arguments.get("coordinate").is_some() {
                 request.insert(
                     "coordinate".into(),
@@ -212,6 +235,26 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
                 json!(required_text(arguments, MAX_TEXT_BYTES)?),
             );
         }
+        "set_value" => {
+            let text = arguments
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| text.len() <= MAX_TEXT_BYTES && !text.contains('\0'))
+                .ok_or("'text' must be a string of at most 61440 UTF-8 bytes without NUL")?;
+            request.insert("text".into(), json!(text));
+        }
+        "perform_action" => {
+            let action = arguments
+                .get("ax_action")
+                .and_then(Value::as_str)
+                .ok_or("'ax_action' must name an Accessibility action")?;
+            if !safety::allows_ax_action(action) {
+                return Err(
+                    "That Accessibility action is unavailable for background computer use".into(),
+                );
+            }
+            request.insert("ax_action".into(), json!(action));
+        }
         "open_app" => {
             let app = required_text(arguments, MAX_APP_NAME_BYTES)?.trim();
             if app.is_empty() || app.chars().any(char::is_control) {
@@ -219,10 +262,10 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
             }
             request.insert("text".into(), json!(app));
             if let Some(activate) = arguments.get("activate") {
-                request.insert(
-                    "activate".into(),
-                    json!(activate.as_bool().ok_or("'activate' must be a boolean")?),
-                );
+                if activate.as_bool().ok_or("'activate' must be a boolean")? {
+                    return Err("Computer use opens apps in the background. Bring the app forward manually if needed.".into());
+                }
+                request.insert("activate".into(), json!(false));
             }
         }
         "key" | "hold_key" => {
@@ -237,15 +280,31 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
             }
             request.insert("text".into(), json!(keys));
         }
-        "screenshot" => {
+        "screenshot" | "get_app_state" => {
             if let Some(display) = arguments.get("display") {
+                if action != "screenshot" || arguments.get("app").is_some() {
+                    return Err("Choose a display or an app window".into());
+                }
                 request.insert("display".into(), json!(display_index(display)?));
             }
+            if let Some(window) = arguments.get("window") {
+                let id = window
+                    .as_u64()
+                    .and_then(|id| u32::try_from(id).ok())
+                    .filter(|id| *id > 0)
+                    .ok_or("'window' must be a positive window ID")?;
+                if arguments.get("app").is_none() {
+                    return Err("'window' requires an app bundle ID".into());
+                }
+                request.insert("window".into(), json!(id));
+            }
         }
-        "left_mouse_down" | "left_mouse_up" | "wait" | "cursor_position" | "status" => {}
+        "press" | "click" | "focus" | "left_mouse_down" | "left_mouse_up" | "wait"
+        | "cursor_position" | "status" => {}
         _ => return Err(format!("Unknown computer operation: {action}")),
     }
-    if matches!(action, "key" | "hold_key" | "type") {
+    let requires_app = element_action || action == "get_app_state";
+    if requires_app || matches!(action, "key" | "hold_key" | "type" | "screenshot") {
         if let Some(raw) = arguments.get("app") {
             let app = raw
                 .as_str()
@@ -258,7 +317,17 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
                 })
                 .ok_or("'app' must be a running app’s bundle ID")?;
             request.insert("app".into(), json!(app));
+        } else if requires_app {
+            return Err("'app' must be a running app’s bundle ID".into());
         }
+    }
+    if element_action {
+        let id = arguments
+            .get("element")
+            .and_then(Value::as_u64)
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or("'element' must be an ID from the latest get_app_state for app")?;
+        request.insert("element".into(), json!(id));
     }
     if matches!(action, "wait" | "hold_key") {
         let duration = arguments
@@ -505,15 +574,23 @@ fn screenshot_filename() -> String {
     format!("{last}.png")
 }
 
-fn takes_screenshot(action: &str) -> bool {
-    !matches!(action, "wait" | "cursor_position" | "status")
+fn uses_element(action: &str, body: &Value) -> bool {
+    matches!(
+        action,
+        "press" | "click" | "set_value" | "focus" | "perform_action"
+    ) || (action == "scroll" && body.get("element").is_some())
 }
 
-fn has_app_target(action: &str) -> bool {
-    !matches!(
-        action,
-        "screenshot" | "zoom" | "cursor_position" | "wait" | "status"
-    )
+fn takes_screenshot(action: &str, body: &Value) -> bool {
+    !uses_element(action, body) && !matches!(action, "wait" | "cursor_position" | "status")
+}
+
+fn has_app_target(action: &str, body: &Value) -> bool {
+    match action {
+        "screenshot" => body["app"].is_string(),
+        "zoom" | "cursor_position" | "wait" | "status" => false,
+        _ => true,
+    }
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -540,7 +617,15 @@ fn action_log_entry(action: &str, body: &Value, resolution: &Resolution) -> Valu
         ),
         "action": action,
     });
-    for field in ["coordinate", "start_coordinate", "region", "display"] {
+    for field in [
+        "coordinate",
+        "start_coordinate",
+        "region",
+        "display",
+        "window",
+        "element",
+        "ax_action",
+    ] {
         if let Some(value) = body.get(field) {
             entry[field] = value.clone();
         }
@@ -551,7 +636,7 @@ fn action_log_entry(action: &str, body: &Value, resolution: &Resolution) -> Valu
     if let Some(point) = resolution.screen_end_coordinate {
         entry["screen_end_coordinate"] = json!(point);
     }
-    if action == "type" {
+    if matches!(action, "type" | "set_value") {
         entry["text_length"] = json!(body["text"].as_str().map_or(0, |text| text.chars().count()));
     }
     entry
@@ -595,14 +680,14 @@ pub fn handle_local_call(
     let resolution: Resolution = serde_json::from_value(resolved)
         .map_err(|_| "The Mac app did not resolve the computer action")?;
     let target = resolution.target.as_ref();
-    if has_app_target(action) != target.is_some()
+    if (action != "zoom" && has_app_target(action, &body) != target.is_some())
         || target.is_some_and(|app| !app.is_valid() || action != "open_app" && app.pid.is_none())
     {
         return Err("The Mac app did not identify the target app".into());
     }
     if let Some(app) = body["app"].as_str() {
         if !target.is_some_and(|target| target.bundle_id.eq_ignore_ascii_case(app)) {
-            return Err("The Mac app did not resolve the requested keyboard app".into());
+            return Err("The Mac app did not resolve the requested app".into());
         }
     }
     let control = ControlGeneration::new(resolution.control_generation.clone());
@@ -643,7 +728,7 @@ pub fn handle_local_call(
     }
     body["control_generation"] = json!(resolution.control_generation);
     body["session_name"] = json!(session.session.label);
-    let path = if takes_screenshot(action) {
+    let path = if takes_screenshot(action, &body) {
         let path = session_artifacts::create_computer_screenshot_dir(session_id)?
             .join(screenshot_filename());
         body["screenshot_path"] = json!(path
@@ -654,6 +739,9 @@ pub fn handle_local_call(
         None
     };
     let requested_display = body.get("display").and_then(Value::as_i64);
+    let requested_window = body.get("window").and_then(Value::as_u64);
+    let window_capture =
+        matches!(action, "screenshot" | "get_app_state") && body["app"].is_string();
     let result = call_adapter(PERFORM_OPERATION, body)?;
     if result["ok"].as_bool() == Some(true)
         && requested_display.is_some()
@@ -661,7 +749,33 @@ pub fn handle_local_call(
     {
         return Err("Mac app did not capture the requested display".into());
     }
+    if result["ok"].as_bool() == Some(true)
+        && window_capture
+        && (result["window"]["id"].as_u64().is_none()
+            || requested_window.is_some() && result["window"]["id"].as_u64() != requested_window
+            || result["window"]["bundle_id"]
+                .as_str()
+                .is_none_or(|id| target.is_none_or(|app| !id.eq_ignore_ascii_case(&app.bundle_id))))
+    {
+        return Err("Mac app did not capture the requested app window".into());
+    }
     perform_result(action, result, path.as_deref())
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct CapturedWindow {
+    id: u32,
+    title: String,
+    bundle_id: String,
+}
+
+impl CapturedWindow {
+    fn is_valid(&self) -> bool {
+        self.id > 0
+            && self.title.len() <= 2048
+            && !self.bundle_id.is_empty()
+            && self.bundle_id.len() <= 255
+    }
 }
 
 fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Value, String> {
@@ -679,10 +793,37 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
         if let Some(display) = result.get("display") {
             metadata["display"] = json!(display_index(display)?);
         }
+        if let Some(window) = result.get("window") {
+            let window: CapturedWindow = serde_json::from_value(window.clone())
+                .map_err(|_| "Mac app returned invalid window metadata")?;
+            if !window.is_valid() {
+                return Err("Mac app returned invalid window metadata".into());
+            }
+            if let Some(raw) = result.get("windows") {
+                let windows: Vec<CapturedWindow> = serde_json::from_value(raw.clone())
+                    .map_err(|_| "Mac app returned invalid window metadata")?;
+                if windows.len() > 20
+                    || windows.iter().any(|candidate| {
+                        !candidate.is_valid()
+                            || !candidate.bundle_id.eq_ignore_ascii_case(&window.bundle_id)
+                    })
+                {
+                    return Err("Mac app returned invalid window metadata".into());
+                }
+                metadata["windows"] = json!(windows);
+            }
+            metadata["window"] = json!(window);
+        }
         metadata["scale"] = json!(result["scale"]
             .as_f64()
             .filter(|scale| *scale > 0.0)
             .ok_or("Mac app did not return a valid screenshot scale")?);
+    }
+    if action == "get_app_state" {
+        metadata["ax_tree"] = json!(result["ax_tree"]
+            .as_str()
+            .filter(|tree| !tree.is_empty() && tree.len() <= MAX_AX_TREE_BYTES)
+            .ok_or("Mac app did not return a valid Accessibility tree")?);
     }
     if action == "cursor_position" {
         // Older adapters encoded these as CGFloat. Preserve signed pixels
@@ -728,7 +869,7 @@ pub(crate) fn tool_content(arguments: &Value) -> Result<Vec<Value>, String> {
     let mut result = call_host(&json!({ "session_id": session_id, "arguments": arguments }))?;
     let image = if let Some(path) = result["screenshot_path"]
         .as_str()
-        .filter(|_| takes_screenshot(action))
+        .filter(|_| takes_screenshot(action, &arguments))
     {
         let image = screenshot_content(&session_id, Path::new(path))?;
         if image.is_none() {
@@ -738,7 +879,13 @@ pub(crate) fn tool_content(arguments: &Value) -> Result<Vec<Value>, String> {
     } else {
         None
     };
+    let tree = result
+        .as_object_mut()
+        .and_then(|metadata| metadata.remove("ax_tree"));
     let mut content = vec![json!({"type": "text", "text": result.to_string()})];
+    if let Some(tree) = tree {
+        content.push(json!({"type": "text", "text": tree}));
+    }
     content.extend(image);
     Ok(content)
 }
@@ -851,7 +998,6 @@ mod tests {
             ("open_app", &["text"]),
             ("status", &[]),
         ];
-        assert_eq!(actions.len() + 1, ACTIONS.len()); // Help is local.
         for (action, fields) in actions {
             let mut expected = json!({"action": action});
             for field in *fields {
@@ -867,6 +1013,42 @@ mod tests {
         assert!(help(&json!({"help_for": 1})).is_err());
         assert!(help(&json!({"help_for": "teleport"})).is_err());
         assert!(action_name(&json!({"action": "teleport"})).is_err());
+    }
+
+    #[test]
+    fn window_and_element_arguments_match_the_desktop_protocol() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../protocol/computer-use-v1.json")).unwrap();
+        for input in fixture["valid"].as_array().unwrap() {
+            let action = action_name(input).unwrap();
+            assert_eq!(validate_arguments(action, input).unwrap(), *input);
+        }
+        for input in fixture["invalid"].as_array().unwrap() {
+            let action = action_name(input).unwrap();
+            assert!(validate_arguments(action, input).is_err(), "{input}");
+        }
+        let capture = &fixture["valid"][1];
+        assert!(has_app_target("screenshot", capture));
+        assert!(!has_app_target("screenshot", &fixture["valid"][0]));
+        assert!(takes_screenshot("get_app_state", &fixture["valid"][2]));
+        assert!(!takes_screenshot("press", &fixture["valid"][3]));
+        assert!(!takes_screenshot("scroll", &fixture["valid"][7]));
+        assert!(takes_screenshot("scroll", &json!({"coordinate": [1, 1]})));
+    }
+
+    #[test]
+    fn app_state_preserves_capped_tree_and_window_metadata() {
+        let path = Path::new("/tmp/computer-state.png");
+        let mut response = json!({
+            "ok": true, "screenshot_path": path, "width": 640, "height": 480, "scale": 1.0,
+            "window": {"id": 76, "title": "Instagram", "bundle_id": "com.apple.Safari"},
+            "ax_tree": "Window: Instagram\n0 AXWindow\n  1 AXLink Actions: AXPress",
+        });
+        let metadata = perform_result("get_app_state", response.clone(), Some(path)).unwrap();
+        assert_eq!(metadata["window"], response["window"]);
+        assert_eq!(metadata["ax_tree"], response["ax_tree"]);
+        response["ax_tree"] = json!("a".repeat(MAX_AX_TREE_BYTES + 1));
+        assert!(perform_result("get_app_state", response, Some(path)).is_err());
     }
 
     #[test]
@@ -985,17 +1167,16 @@ mod tests {
         }
         assert!(validate_arguments("type", &json!({"app": "Text Edit", "text": "hello"})).is_err());
         assert!(validate_arguments("key", &json!({"app": true, "text": "space"})).is_err());
-        for activate in [true, false] {
-            let result = validate_arguments(
-                "open_app",
-                &json!({"activate": activate, "text": app, "app": app}),
-            )
-            .unwrap();
-            assert_eq!(
-                result,
-                json!({"action": "open_app", "activate": activate, "text": app})
-            );
-        }
+        let result = validate_arguments(
+            "open_app",
+            &json!({"activate": false, "text": app, "app": app}),
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({"action": "open_app", "activate": false, "text": app})
+        );
+        assert!(validate_arguments("open_app", &json!({"activate": true, "text": app})).is_err());
         assert!(validate_arguments("open_app", &json!({"activate": "true", "text": app})).is_err());
         assert!(validate_arguments("open_app", &json!({"text": app}))
             .unwrap()

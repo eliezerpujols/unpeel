@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "valid": [
+    {"action": "screenshot", "display": 1},
+    {"action": "screenshot", "app": "com.apple.Safari", "window": 76},
+    {"action": "get_app_state", "app": "com.apple.Safari"},
+    {"action": "press", "app": "com.apple.Safari", "element": 0},
+    {"action": "click", "app": "com.apple.Safari", "element": 3},
+    {"action": "set_value", "app": "com.apple.Safari", "element": 9, "text": ""},
+    {"action": "focus", "app": "com.apple.Safari", "element": 9},
+    {"action": "scroll", "app": "com.apple.Safari", "element": 2, "scroll_direction": "down", "scroll_amount": 2},
+    {"action": "perform_action", "app": "com.apple.Safari", "element": 3, "ax_action": "AXShowMenu"}
+  ],
+  "invalid": [
+    {"action": "get_app_state"},
+    {"action": "get_app_state", "app": "com.apple.Safari", "display": 1},
+    {"action": "screenshot", "app": "com.apple.Safari", "display": 1},
+    {"action": "screenshot", "window": 76},
+    {"action": "screenshot", "app": "com.apple.Safari", "window": 0},
+    {"action": "press", "app": "com.apple.Safari", "element": -1},
+    {"action": "press", "app": "com.apple.Safari", "element": true},
+    {"action": "press", "app": "com.apple.Safari", "element": 2147483648},
+    {"action": "click", "element": 3},
+    {"action": "scroll", "app": "com.apple.Safari", "element": 2, "coordinate": [1, 1], "scroll_direction": "down", "scroll_amount": 2},
+    {"action": "scroll", "app": "com.apple.Safari", "element": 2, "scroll_direction": "down", "scroll_amount": 21},
+    {"action": "perform_action", "app": "com.apple.Safari", "element": 0, "ax_action": "AXRaise"},
+    {"action": "open_app", "text": "Safari", "activate": true}
+  ]
+}

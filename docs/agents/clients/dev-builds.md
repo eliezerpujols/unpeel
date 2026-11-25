@@ -116,8 +116,9 @@ again before posting input.
 
 Each app grant or denial lasts for the session. **Ask** also prompts for
 screen access, while **Allow** permits screen access automatically.
-By default, browsers support screenshots only, terminals, IDEs, and Unpeel
-accept left-click and scroll, and other apps support the full action set.
+By default, browsers support screenshots. Terminals, IDEs, and Unpeel
+support app state, left-click, press, and scroll. Other apps support the full
+action set.
 **Let agents control any app** enables full input for every app.
 Allow then skips app approval prompts. Ask keeps session grants. The floating
 pill and the session row identify the session controlling an app. Press
@@ -131,11 +132,18 @@ app, and `displays`. Display 0 is main. Other indices follow the active
 display layout. `computer.apps` lists running apps. `computer.perform` uses
 the session's last PNG as its coordinate space, including after a zoom.
 Its `scale` is image pixels per Quartz screen point on the long axis.
-`screenshot` accepts an optional `display` index and defaults to main.
-Follow-up captures keep the last frame's display. Zoom crops the requested
-region at the display's native resolution. Both cap the image's long edge
-at 1456 pixels. macOS 14 and later use ScreenCaptureKit, with a Quartz
-display capture fallback on macOS 13.
+`screenshot` accepts a `display` index or an `app` bundle ID and optional
+`window` ID. It defaults to the main display. A follow-up capture stays on
+the same display or app window when the source is still valid. Zoom crops at
+native resolution. Images cap their long edge at 1456 pixels. ScreenCaptureKit
+captures windows independently on macOS 14 and later. The app uses Quartz
+capture on macOS 13.
+
+`get_app_state` pairs a window screenshot with a numbered Accessibility tree.
+Element IDs belong to the latest successful state for the session and app.
+The Mac adapter rejects stale IDs and inaccessible actions, with no
+activation or cursor warp fallback. The local request fixtures are in
+[`protocol/computer-use-v1.json`](../../../protocol/computer-use-v1.json).
 
 ### iOS app: build & deploy
 

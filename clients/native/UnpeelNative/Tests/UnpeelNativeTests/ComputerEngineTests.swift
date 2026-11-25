@@ -77,18 +77,17 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertEqual(ComputerControlSnapshot.load(from: file), .unavailable)
     }
 
-    func testOnlyKeyboardActionsAcceptAnExplicitAppAndLaunchIsBackgroundByDefault() throws {
+    func testKeyboardAppAndBackgroundLaunchValidation() throws {
         let textEdit = "com.apple.TextEdit"
         for action in ["key", "hold_key", "type"] {
             let request = try parse(action, ["text": "space", "app": textEdit, "duration": 1]).get()
             XCTAssertEqual(request.keyboardApp, textEdit)
-            XCTAssertFalse(request.activatesApp)
         }
         XCTAssertNil(try parse("left_click", ["app": textEdit, "coordinate": [3, 5]]).get().keyboardApp)
         XCTAssertThrowsError(try parse("type", ["app": "Text Edit", "text": "test"]).get())
-        XCTAssertFalse(try parse("open_app", ["text": textEdit]).get().activatesApp)
-        XCTAssertFalse(try parse("open_app", ["text": textEdit, "activate": false]).get().activatesApp)
-        XCTAssertTrue(try parse("open_app", ["text": textEdit, "activate": true]).get().activatesApp)
+        XCTAssertEqual(try parse("open_app", ["text": textEdit]).get().action, .openApp(textEdit))
+        XCTAssertEqual(try parse("open_app", ["text": textEdit, "activate": false]).get().action, .openApp(textEdit))
+        XCTAssertThrowsError(try parse("open_app", ["text": textEdit, "activate": true]).get())
         XCTAssertThrowsError(try parse("open_app", ["text": textEdit, "activate": "true"]).get())
         XCTAssertThrowsError(try parse("open_app", ["text": textEdit, "activate": 1]).get())
     }
@@ -165,18 +164,91 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertEqual(location, CGPoint(x: 100, y: 1057))
     }
 
-    @MainActor
-    func testOpenWaitsForTheIntendedProcessAndTimesOutIfItDoesNotActivate() async throws {
-        var observations: [pid_t?] = [nil, 24, 42]
-        try await ComputerApps.waitForFrontmost(42, name: "TextEdit") { observations.removeFirst() }
-        XCTAssertTrue(observations.isEmpty)
-
-        do {
-            try await ComputerApps.waitForFrontmost(42, name: "TextEdit", timeout: .zero) { 24 }
-            XCTFail("Expected an activation timeout")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, "TextEdit opened but did not become the frontmost app.")
+    func testWindowAndElementRequestsMatchTheDesktopProtocol() throws {
+        let directory: URL
+        if let override = ProcessInfo.processInfo.environment["UNPEEL_PROTOCOL_DIR"] {
+            directory = URL(fileURLWithPath: override)
+        } else {
+            var root = URL(fileURLWithPath: #filePath)
+            for _ in 0..<6 { root.deleteLastPathComponent() }
+            directory = root.appendingPathComponent("protocol")
         }
+        let data = try Data(contentsOf: directory.appendingPathComponent("computer-use-v1.json"))
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for fields in try XCTUnwrap(fixture["valid"] as? [[String: Any]]) {
+            let name = try XCTUnwrap(fields["action"] as? String)
+            let request = fields.merging(["screenshot_path": path]) { first, _ in first }
+            XCTAssertNoThrow(try parse(name, request).get(), "\(fields)")
+        }
+        for fields in try XCTUnwrap(fixture["invalid"] as? [[String: Any]]) {
+            let name = try XCTUnwrap(fields["action"] as? String)
+            let request = fields.merging(["screenshot_path": path]) { first, _ in first }
+            XCTAssertThrowsError(try parse(name, request).get(), "\(fields)")
+        }
+        let app = "com.apple.Safari"
+        let state = try parse("get_app_state", ["app": app, "window": 76, "screenshot_path": path]).get()
+        XCTAssertEqual(state.action, .appState(.init(app: app, id: 76)))
+        let click = try parse("click", ["app": app, "element": 3]).get()
+        XCTAssertEqual(click.action, .element(.init(app: app, id: 3, operation: .press)))
+        XCTAssertNil(click.screenshotPath)
+        XCTAssertEqual(ComputerAXActions.pressAction(from: ["AXPick", "AXPress"]), "AXPress")
+        XCTAssertEqual(ComputerAXActions.pressAction(from: ["AXPick"]), "AXPick")
+        XCTAssertNil(ComputerAXActions.pressAction(from: ["AXRaise"]))
+        XCTAssertFalse(ComputerAXActions.isAllowed("AXRaise"))
+    }
+
+    func testElementIDsAreScopedAndNeverReusedAfterRefreshOrStop() throws {
+        let safari = ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 42)
+        let chrome = ComputerTarget(name: "Chrome", bundleID: "com.google.Chrome", pid: 51)
+        let bounds = CGRect(x: -800, y: 50, width: 640, height: 360)
+        let first = ComputerWindow(id: 76, title: "Instagram", bounds: bounds, app: safari)
+        let second = ComputerWindow(id: 77, title: "Another tab", bounds: bounds, app: safari)
+        let other = ComputerWindow(id: 78, title: "Chrome", bounds: bounds, app: chrome)
+        var cache = ComputerElementCache<String>()
+        cache.replace(session: "one", window: first, elements: ["window", "Explore"])
+        cache.replace(session: "one", window: other, elements: ["window"])
+        XCTAssertEqual(try cache.element(session: "one", bundleID: "COM.APPLE.SAFARI", id: 1).1, "Explore")
+        XCTAssertThrowsError(try cache.element(session: "two", bundleID: safari.bundleID, id: 1))
+        XCTAssertThrowsError(try cache.element(session: "one", bundleID: chrome.bundleID, id: 1))
+        cache.replace(session: "one", window: second, elements: ["second window"])
+        XCTAssertThrowsError(try cache.element(session: "one", bundleID: safari.bundleID, id: 1))
+        XCTAssertEqual(try cache.element(session: "one", bundleID: safari.bundleID, id: 3).0, second)
+        XCTAssertEqual(try cache.element(session: "one", bundleID: chrome.bundleID, id: 2).0, other)
+        cache.clear()
+        XCTAssertThrowsError(try cache.element(session: "one", bundleID: safari.bundleID, id: 3))
+        XCTAssertEqual(cache.nextID, 4)
+    }
+
+    func testAccessibilityRowsSerializeIndentedStableIDsAndEscapeNewlines() {
+        let row = ComputerAXRow(
+            depth: 2, role: "AXLink", title: "Explore\nInstagram", detail: "Open Explore",
+            value: nil, url: "https://www.instagram.com/explore/", actions: ["AXPress", "AXShowMenu"]
+        )
+        XCTAssertEqual(
+            row.line(id: 12),
+            #"    12 AXLink "Explore\nInstagram" Description: "Open Explore" URL: "https://www.instagram.com/explore/" Actions: AXPress, AXShowMenu"#
+        )
+    }
+
+    func testElementScrollHandlesNormalizedWebKitBarsAndExplicitRanges() {
+        XCTAssertEqual(ComputerAXActions.scrollValue(0, minimum: 0, maximum: 0, steps: 2, increasing: true), 0.1)
+        XCTAssertEqual(ComputerAXActions.scrollValue(35, minimum: 10, maximum: 110, steps: 10, increasing: false), 10)
+        XCTAssertEqual(ComputerAXActions.scrollValue(0.9, minimum: nil, maximum: nil, steps: 4, increasing: true), 1)
+        XCTAssertNil(ComputerAXActions.scrollValue(35, minimum: 0, maximum: 0, steps: 2, increasing: true))
+    }
+
+    func testWindowCoordinatesUseCapturedFrameOnAnotherDisplay() throws {
+        let bounds = CGRect(x: -1400, y: -240, width: 800, height: 600)
+        let window = ComputerWindow(
+            id: 76, title: "Instagram", bounds: bounds,
+            app: ComputerTarget(name: "Safari", bundleID: "com.apple.Safari", pid: 42)
+        )
+        let frame = ComputerScreenshotGeometry(
+            displayID: nil, displayBounds: bounds, screenRect: bounds, width: 1200, height: 900, window: window
+        )
+        XCTAssertEqual(try frame.screenPoint(for: CGPoint(x: 600, y: 450)), CGPoint(x: -1000, y: 60))
+        XCTAssertEqual(frame.pixelPoint(for: CGPoint(x: -1000, y: 60)), CGPoint(x: 600, y: 450))
+        XCTAssertThrowsError(try frame.screenPoint(for: CGPoint(x: 1200, y: 450)))
     }
 
     @MainActor

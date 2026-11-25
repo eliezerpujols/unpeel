@@ -42,25 +42,10 @@ enum ComputerAccessibility {
         clickCandidate(
             at: hit.element, allowsAXAction: allowsAXAction, isTextEdit: isTextEdit,
             roleOf: { CFEqual($0, hit.element) ? hit.role : role(of: $0) },
-            parentOf: { element in
-                guard let value = attribute(kAXParentAttribute, of: element),
-                      CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-                let parent = unsafeDowncast(value, to: AXUIElement.self)
-                var pid: pid_t = 0
-                guard AXUIElementGetPid(parent, &pid) == .success, pid == hit.pid else { return nil }
-                return parent
-            },
+            parentOf: { parent(of: $0, in: hit.pid) },
             isEnabled: { attribute(kAXEnabledAttribute, of: $0) as? Bool != false },
-            canFocus: { element in
-                var settable: DarwinBoolean = false
-                return AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &settable) == .success
-                    && settable.boolValue
-            },
-            canPress: { element in
-                var actions: CFArray?
-                return AXUIElementCopyActionNames(element, &actions) == .success
-                    && ((actions as? [String])?.contains(kAXPressAction) == true)
-            }
+            canFocus: { isSettable(kAXFocusedAttribute, on: $0) },
+            canPress: { actions(on: $0).contains(kAXPressAction) }
         )
     }
 
@@ -106,11 +91,37 @@ enum ComputerAccessibility {
         }
     }
 
-    private static func role(of element: AXUIElement) -> String? {
+    static func role(of element: AXUIElement) -> String? {
         attribute(kAXRoleAttribute, of: element) as? String
     }
 
-    private static func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
+    static func pid(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        return AXUIElementGetPid(element, &pid) == .success && pid > 0 ? pid : nil
+    }
+
+    static func parent(of element: AXUIElement, in pid: pid_t) -> AXUIElement? {
+        elementAttribute(kAXParentAttribute, of: element, in: pid)
+    }
+
+    static func elementAttribute(_ name: String, of element: AXUIElement, in pid: pid_t) -> AXUIElement? {
+        guard let value = attribute(name, of: element), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        let result = unsafeDowncast(value, to: AXUIElement.self)
+        return Self.pid(of: result) == pid ? result : nil
+    }
+
+    static func isSettable(_ name: String, on element: AXUIElement) -> Bool {
+        var settable: DarwinBoolean = false
+        return AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success && settable.boolValue
+    }
+
+    static func actions(on element: AXUIElement) -> [String] {
+        var raw: CFArray?
+        guard AXUIElementCopyActionNames(element, &raw) == .success else { return [] }
+        return raw as? [String] ?? []
+    }
+
+    static func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value

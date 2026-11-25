@@ -35,10 +35,11 @@ struct ComputerPointerTarget {
     let window: ComputerPointerDelivery.Window?
     let hit: ComputerAccessibility.Hit?
     let usesBrowserEngine: Bool
+    var canDeliverToWindow = true
 
     var delivery: ComputerPointerDelivery? {
         let menus = [kAXMenuBarRole, kAXMenuBarItemRole, kAXMenuRole, kAXMenuItemRole]
-        guard let window, let pid = app.pid, hit?.role.map(menus.contains) != true else { return nil }
+        guard canDeliverToWindow, let window, let pid = app.pid, hit?.role.map(menus.contains) != true else { return nil }
         return ComputerPointerDelivery(pid: pid, window: window)
     }
 }

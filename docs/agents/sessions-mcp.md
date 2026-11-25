@@ -202,23 +202,39 @@ tools fail inside an Unpeel terminal. Call `computer` with `{"action":"help"}`
 for the supported actions or `{"action":"status"}` to check permissions, the
 frontmost app, and active displays. `status` lists each display's index,
 origin and size in Quartz screen points, and whether it is the main display.
-Capture a specific display with `{"action":"screenshot","display":1}`. Omit
-`display` to capture the main display. Follow-up action screenshots and zooms
-stay on the selected display while it remains active. Click coordinates use
-the latest image's pixels with the origin at the top left.
+Prefer `{"action":"get_app_state","app":"com.apple.Safari"}`. It returns an
+isolated window screenshot and a capped, numbered Accessibility tree with
+roles, labels, values, URLs, and advertised actions. Use the latest tree for
+the same session and app. For example, if element 7 is the Explore link,
+call `{"action":"press","app":"com.apple.Safari","element":7}`. Refresh app
+state after navigation or a UI change.
 
-`open_app` launches an app in the background by default. Pass
-`{"action":"open_app","text":"TextEdit","activate":true}` to intentionally
-bring it forward. For keyboard input, `key`, `hold_key`, and `type` accept
+- `press` and `click` invoke a control's default press action. `set_value`
+  replaces the text of a writable control. `focus` sets focus within that app.
+- `scroll` with `app` and `element` uses the Accessibility scroll control.
+  Pass `scroll_direction` and `scroll_amount` from 1 to 20 steps.
+- `perform_action` takes `ax_action`, such as `AXShowMenu`. Actions that raise
+  or activate windows are unavailable even if the app advertises them.
+
+Use screenshots for visual checks. `screenshot` with `app` captures just that
+app's top window, even behind other windows or on another display. Use the
+returned `windows` list to find an ID and pass it as `window`. `get_app_state`
+accepts the same window selector. Use `{"action":"screenshot","display":1}`
+for the whole display or omit both selectors for the main display. Click
+coordinates use the latest image's pixels with the origin at the top left.
+
+`open_app` opens an app in the background. For keyboard input, `key`,
+`hold_key`, and `type` accept
 an optional running app bundle ID, such as
 `{"action":"type","app":"com.apple.TextEdit","text":"Hello"}`. Omitting
 `app` targets the current foreground app. Background input requires an
 existing window or control that accepts it. Some macOS shortcuts, including
 menu commands in apps such as TextEdit, only work in the foreground.
 
-Pointer actions use the visible window under the given point. The session
-keeps its own pointer position and leaves the user's cursor and foreground
-app alone. A single left click uses macOS Accessibility to press the nearest
+Coordinate actions use the captured window or the visible window under the
+point in a display capture. A translucent agent cursor shows where an action
+lands while the user's cursor and foreground app stay in place. A single
+left click uses macOS Accessibility to press the nearest
 control that supports it, including links, buttons, checkboxes, and menu
 items. Clicking a focusable text field sets its Accessibility focus for
 follow-up typing with `app`. Other clicks, scrolling, dragging, and button
@@ -239,8 +255,9 @@ Computer use**.
 - **Off** blocks computer use. **Ask** prompts for screen access and app input.
   **Allow** grants screen access and ordinarily requires each app to be approved
   for the session.
-- **Let agents control any app** is off by default. With it off, browsers are
-  read-only and terminals, IDEs, and Unpeel accept only left-click and scroll.
+- **Let agents control any app** is off by default. With it off, browsers
+  support screenshots. Terminals, IDEs, and Unpeel support app state,
+  left-click, press, and scroll.
   Turning it on enables full input in all apps, including browsers signed in to
   your accounts. Ask still prompts for app approval. Allow skips those prompts
   while the setting is on.
@@ -249,7 +266,8 @@ Computer use**.
 - The workspace Host checks approvals and chooses paths under the session's
   `artifacts/computer/screenshots/`. The Mac app captures the screenshots and
   sends the input. The Host logs action metadata in
-  `artifacts/computer/actions.jsonl`. For typed text it records only the length.
+  `artifacts/computer/actions.jsonl`. For typed text and values it records
+  only the length.
 
 ### Verify on an isolated Unpeel Dev workspace
 
@@ -275,10 +293,10 @@ UNPEEL_HOME='/tmp/up-computer.XXXXXX' UNPEEL_SESSION_ID='session ID' \
 ```
 
 The [verification script](../../scripts/verify-computer.sh) exercises
-background and explicit foreground `open_app`, screenshots on every active display, left-click, and typing after
-a keyboard shortcut. It checks the resulting text, closes the scratch
-document without saving, and verifies the
-read-only error when `computer` tries to open Safari.
+background `open_app`, screenshots on every active display, an isolated
+window screenshot, and Accessibility focus and text editing. It checks the
+resulting text and foreground app, closes the scratch document without
+saving, and verifies the read-only error when `computer` tries to open Safari.
 It skips when the Host or its Mac adapter is unavailable or permissions are
 missing. Screenshots and the TextEdit approval stay in the isolated workspace.
 

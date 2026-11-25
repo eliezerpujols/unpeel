@@ -5,11 +5,13 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 struct ComputerScreenshotGeometry: Equatable {
-    let displayID: CGDirectDisplayID
+    let displayID: CGDirectDisplayID?
     let displayBounds: CGRect
     let screenRect: CGRect
     let width: Int
     let height: Int
+    var window: ComputerWindow? = nil
+    var availableWindows: [ComputerWindow]? = nil
 
     private var pixelsPerPointX: CGFloat { CGFloat(width) / screenRect.width }
     private var pixelsPerPointY: CGFloat { CGFloat(height) / screenRect.height }
@@ -93,7 +95,8 @@ enum ComputerScreenshot {
 
     /// Encode a captured display frame, retaining the exact rectangle the PNG represents.
     static func writePNG(
-        _ frame: CGImage, displayID: CGDirectDisplayID, bounds: CGRect, region: CGRect?, to url: URL
+        _ frame: CGImage, displayID: CGDirectDisplayID?, bounds: CGRect, region: CGRect?,
+        window: ComputerWindow? = nil, availableWindows: [ComputerWindow]? = nil, to url: URL
     ) throws -> ComputerScreenshotGeometry {
         let cropped: (image: CGImage, screenRect: CGRect)
         if let region {
@@ -105,7 +108,35 @@ enum ComputerScreenshot {
         try savePNG(image, to: url)
         return ComputerScreenshotGeometry(
             displayID: displayID, displayBounds: bounds, screenRect: cropped.screenRect,
-            width: image.width, height: image.height
+            width: image.width, height: image.height, window: window, availableWindows: availableWindows
+        )
+    }
+
+    static func captureWindow(
+        to path: String, app: ComputerTarget, id: CGWindowID?, region: CGRect? = nil
+    ) async throws -> ComputerScreenshotGeometry {
+        try Task.checkCancellation()
+        let (window, shareableWindow, windows) = try await ComputerWindows.select(for: app, id: id)
+        let frame: CGImage
+        if #available(macOS 14, *) {
+            let filter = SCContentFilter(desktopIndependentWindow: shareableWindow)
+            let configuration = configuration(for: filter, atNativeResolution: region != nil, showsCursor: false)
+            configuration.ignoreShadowsSingleWindow = true
+            configuration.ignoreGlobalClipSingleWindow = true
+            frame = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        } else {
+            guard let image = CGWindowListCreateImage(
+                .null, .optionIncludingWindow, window.id, [.boundsIgnoreFraming, .bestResolution]
+            ) else { throw ComputerError("Could not capture the requested app window.") }
+            frame = image
+        }
+        guard try window.liveBounds() == window.bounds else {
+            throw ComputerError("The app window moved or resized during capture. Take a new screenshot.")
+        }
+        try Task.checkCancellation()
+        return try writePNG(
+            frame, displayID: nil, bounds: window.bounds, region: region,
+            window: window, availableWindows: windows, to: URL(fileURLWithPath: path)
         )
     }
 
@@ -118,6 +149,15 @@ enum ComputerScreenshot {
             throw ComputerError("The requested display is unavailable to ScreenCaptureKit.")
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        let configuration = configuration(for: filter, atNativeResolution: atNativeResolution, showsCursor: true)
+        try Task.checkCancellation()
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+    }
+
+    @available(macOS 14, *)
+    private static func configuration(
+        for filter: SCContentFilter, atNativeResolution: Bool, showsCursor: Bool
+    ) -> SCStreamConfiguration {
         let scale = CGFloat(filter.pointPixelScale)
         let width = Int((filter.contentRect.width * scale).rounded())
         let height = Int((filter.contentRect.height * scale).rounded())
@@ -126,9 +166,8 @@ enum ComputerScreenshot {
         configuration.width = size.width
         configuration.height = size.height
         configuration.preservesAspectRatio = false
-        configuration.showsCursor = true
-        try Task.checkCancellation()
-        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        configuration.showsCursor = showsCursor
+        return configuration
     }
 
     private static func crop(

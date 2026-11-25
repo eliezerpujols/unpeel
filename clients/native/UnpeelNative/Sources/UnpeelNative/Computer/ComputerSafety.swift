@@ -49,10 +49,11 @@ enum ComputerAppTier: Equatable {
     }
 
     static func require(_ action: String, in app: ComputerTarget, unrestricted: Bool) throws {
+        if action == "screenshot" || action == "zoom" { return }
         switch Self(bundleID: app.bundleID, unrestricted: unrestricted) {
         case .read:
             throw ComputerError("\(app.name) is read-only in computer use. Use the Unpeel browser tool to interact with it.")
-        case .click where action != "left_click" && action != "scroll":
+        case .click where !["left_click", "press", "click", "scroll", "get_app_state"].contains(action):
             throw ComputerError("Computer use only allows left-click and scroll in \(app.name).")
         case .click, .full:
             break
@@ -91,8 +92,26 @@ enum ComputerTargetLookup {
         throw ComputerError("Multiple copies of that app are running. Choose the intended copy in the foreground.")
     }
 
-    static func pointer(at point: CGPoint) throws -> ComputerPointerTarget {
-        let window = try frontWindow(at: point)
+    static func pointer(
+        at point: CGPoint, in captured: ComputerWindow? = nil, excluding overlay: CGWindowID? = nil
+    ) throws -> ComputerPointerTarget {
+        if let captured {
+            guard let pid = captured.app.pid, captured.app.matches(try target(NSRunningApplication(processIdentifier: pid))),
+                  captured.bounds.contains(point), try captured.liveBounds() == captured.bounds else {
+                throw ComputerError("The captured window moved or the point is outside it. Take a new screenshot.")
+            }
+            let hit = ComputerAccessibility.hit(at: point, in: pid).flatMap {
+                ComputerAXTree.contains($0.element, in: captured) ? $0 : nil
+            }
+            let top = try? frontWindow(at: point, excluding: overlay)
+            let isTop = top?.info?.id == captured.id && top?.app.matches(captured.app) == true
+            return ComputerPointerTarget(
+                app: captured.app, window: .init(id: captured.id, bounds: captured.bounds), hit: hit,
+                usesBrowserEngine: usesBrowserEngine(captured.app, NSRunningApplication(processIdentifier: pid)),
+                canDeliverToWindow: isTop
+            )
+        }
+        let window = try frontWindow(at: point, excluding: overlay)
         let hit = ComputerAccessibility.hit(at: point)
         if let window, window.usesBrowserEngine {
             // Renderer helpers do not have their own app grant. If the
@@ -122,20 +141,21 @@ enum ComputerTargetLookup {
         return FileManager.default.fileExists(atPath: framework.path)
     }
 
-    private static func frontWindow(at point: CGPoint) throws -> (
+    private static func frontWindow(at point: CGPoint, excluding overlay: CGWindowID?) throws -> (
         app: ComputerTarget, pid: pid_t, info: ComputerPointerDelivery.Window?, usesBrowserEngine: Bool
     )? {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]
         else { throw ComputerError("Could not read the windows on this display.") }
         for window in windows {
-            guard (window[kCGWindowAlpha as String] as? Double ?? 0) > 0,
+            let id = window[kCGWindowNumber as String] as? CGWindowID
+            guard id == nil || id != overlay, (window[kCGWindowAlpha as String] as? Double ?? 0) > 0,
                   let bounds = window[kCGWindowBounds as String] as? [String: Any],
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   rect.contains(point),
                   let pid = window[kCGWindowOwnerPID as String] as? pid_t
             else { continue }
-            let info: ComputerPointerDelivery.Window? = (window[kCGWindowNumber as String] as? CGWindowID).flatMap {
+            let info: ComputerPointerDelivery.Window? = id.flatMap {
                 $0 == kCGNullWindowID ? nil : ComputerPointerDelivery.Window(id: $0, bounds: rect)
             }
             let application = NSRunningApplication(processIdentifier: pid)

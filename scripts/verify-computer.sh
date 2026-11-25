@@ -62,10 +62,9 @@ on run argv
             end repeat
             return
         end if
-        if not frontmost or (count of windows) is 0 then error "TextEdit is not frontmost with an open window."
+        if (count of windows) is 0 then error "TextEdit does not have an open window."
         set scratchDocument to document of front window
         if (path of scratchDocument) is not scratchPath then error "The scratch document is not the front TextEdit window."
-        if operation is "bounds" then return bounds of front window
         if operation is "contents" then return text of scratchDocument as text
     end tell
 end run
@@ -107,10 +106,11 @@ jq -e --arg app "$previous_app" '.frontmost_app.bundle_id == $app' <<< "$backgro
   || fail "Background open changed the foreground app: $background"
 pass "open_app left the foreground app unchanged"
 
-opened=$(frame open_app text=com.apple.TextEdit activate=true)
-jq -e '.frontmost_app.bundle_id == "com.apple.TextEdit"' <<< "$opened" >/dev/null \
-  || fail "open_app did not activate TextEdit: $opened"
-pass "open_app activated TextEdit"
+if refused=$(computer open_app text=com.apple.TextEdit activate=true 2>&1); then
+  fail "computer open_app unexpectedly accepted explicit activation"
+fi
+[[ "$refused" == *"opens apps in the background"* ]] || fail "Unexpected activation error: $refused"
+pass "open_app rejects explicit activation"
 
 if ! automation=$(textedit probe 2>&1); then
   case "$automation" in
@@ -135,47 +135,37 @@ trap 'exit 143' TERM
 : > "$document"
 
 open -g -b com.apple.TextEdit "$document"
-frame open_app text=com.apple.TextEdit activate=true >/dev/null
-# Opening the document and making its window key can finish on different turns.
+found=false
 for ((attempt = 0; attempt < 20; attempt++)); do
-  if bounds=$(textedit bounds 2>/dev/null); then break; fi
+  if contents=$(textedit contents 2>/dev/null); then found=true; break; fi
   sleep 0.1
 done
-[[ -n "$bounds" ]] || fail "Could not locate the scratch TextEdit window."
-# Choose the display with the largest portion of the editable window and use
-# its Quartz origin and screenshot size to convert points to image pixels.
-target=$(jq -ec --arg bounds "$bounds" '
-  ($bounds | split(",") | map(tonumber)) as [$left, $top, $right, $bottom]
-  | [.displays[]
-     | ([.x, $left + 25] | max) as $x0 | ([.x + .width, $right - 25] | min) as $x1
-     | ([.y, $top + 70] | max) as $y0 | ([.y + .height, $bottom - 30] | min) as $y1
-     | select($x1 > $x0 and $y1 > $y0)
-     | {index, area: (($x1 - $x0) * ($y1 - $y0)),
-        fraction: [((($x0 + $x1) / 2 - .x) / .width),
-                   ((($y0 + $y1) / 2 - .y) / .height)]}]
-  | max_by(.area) | select(. != null)
-' <<< "$status") || fail "The editable scratch window is outside the listed displays."
-index=$(jq -er '.index' <<< "$target")
-shot=$(frame screenshot "display=$index")
-coordinate=$(jq -ec --argjson target "$target" '
-  [((.width * $target.fraction[0]) | floor), ((.height * $target.fraction[1]) | floor)]
-' <<< "$shot")
-clicked=$(frame left_click "coordinate=$coordinate")
-jq -e --argjson display "$index" '.display == $display and .frontmost_app.bundle_id == "com.apple.TextEdit"' \
-  <<< "$clicked" >/dev/null || fail "left_click changed apps or the active screenshot display: $clicked"
-pass "left_click kept the scratch window frontmost on display $index"
+[[ "$found" == true && -z "$contents" ]] || fail "Could not locate the empty scratch TextEdit document."
+window_frame=$(frame screenshot app=com.apple.TextEdit)
+window=$(jq -er --arg title "$(basename "$document" .txt)" '
+  .window | select(.bundle_id == "com.apple.TextEdit" and (.title | contains($title))) | .id
+' <<< "$window_frame") || fail "The capture did not identify the scratch TextEdit window."
+pass "captured the scratch window independently"
+
+before=$(computer status | jq -er '.frontmost_app.bundle_id')
+state=$(computer get_app_state app=com.apple.TextEdit "window=$window") || fail "Could not read TextEdit app state."
+metadata=$(sed -n '1p' <<< "$state")
+jq -e --argjson window "$window" --arg previous "$before" '
+  .ok and .window.id == $window and .frontmost_app.bundle_id == $previous
+' <<< "$metadata" >/dev/null || fail "App state changed the foreground app or the selected window."
+editor=$(awk '$1 ~ /^[0-9]+$/ && $2 == "AXTextArea" {print $1; exit}' <<< "$state")
+[[ -n "$editor" ]] || fail "The scratch window has no numbered AXTextArea."
+pass "read the scratch window’s numbered Accessibility tree"
 
 marker="Unpeel computer check 🙂"
-contents=$(textedit contents) || fail "The scratch TextEdit document lost focus."
-[[ -z "$contents" ]] || fail "The scratch document should be empty before typing."
-# A previous shortcut must not leave Command set on the Unicode events.
-frame key text=cmd+a app=com.apple.TextEdit >/dev/null
-frame type app=com.apple.TextEdit "text=${marker}X" >/dev/null
-[[ "$(textedit contents)" == "${marker}X" ]] || fail "TextEdit did not receive the typed text."
-pass "type inserted the test text"
-frame key text=BackSpace >/dev/null
-[[ "$(textedit contents)" == "$marker" ]] || fail "BackSpace did not remove the final character."
-pass "key removed the final character"
+focused=$(computer focus app=com.apple.TextEdit "element=$editor") || fail "Could not focus the editor."
+changed=$(computer set_value app=com.apple.TextEdit "element=$editor" "text=$marker") || fail "Could not set the editor value."
+for response in "$focused" "$changed"; do
+  jq -e --arg previous "$before" '.ok and .frontmost_app.bundle_id == $previous' <<< "$response" >/dev/null \
+    || fail "An Accessibility action changed the foreground app."
+done
+[[ "$(textedit contents)" == "$marker" ]] || fail "TextEdit did not receive the set_value text."
+pass "Accessibility focused and edited the scratch window without changing the foreground app"
 
 if refused=$(computer open_app text=com.apple.Safari 2>&1); then
   fail "computer open_app unexpectedly allowed Safari"

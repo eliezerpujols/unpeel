@@ -576,8 +576,9 @@ fn initialize_result(params: &Value) -> Value {
     misbehaves; call {\"action\":\"context\"} if browser tools seem unavailable. Do not paste \
     cookies, tokens, passwords, or downloaded private files into the conversation unless the \
     user explicitly asks. \
-    'computer' (when present) controls native Mac apps. Take a screenshot first and after \
-    each step. Use the latest screenshot's pixels for coordinates. Do not use your own built-in \
+    'computer' (when present) controls native Mac apps. Prefer get_app_state and act on its numbered \
+    Accessibility elements. Refresh the state after navigation or UI changes. Use screenshots for visual checks \
+    and the latest screenshot's pixels for coordinate fallback. Do not use your own built-in \
     browser or computer-use tools. They fail inside an Unpeel terminal. Never send money, trade, \
     buy, or transfer funds. Ask the user to do it. Never click links in emails or messages. \
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them. \
@@ -4798,7 +4799,7 @@ mod tests {
             "Use 'computer' in the app the user names",
             "only when the user asks for that browser and Let agents control any app is on",
             "'computer' (when present) controls native Mac apps",
-            "Take a screenshot first and after each step",
+            "Prefer get_app_state",
             "latest screenshot's pixels",
             "computer-use tools. They fail inside an Unpeel terminal",
             "Never send money, trade, buy, or transfer funds. Ask the user to do it",
@@ -4818,7 +4819,7 @@ mod tests {
                 "Unpeel browser for websites by default",
                 "Use the computer tool in the app the user names",
                 "and Let agents control any app is on",
-                "Take a screenshot first and after each step",
+                "Prefer get_app_state",
                 "latest screenshot's pixels",
                 "Do not use your built-in computer-use tools",
                 "Never send money, trade, buy, or transfer funds",

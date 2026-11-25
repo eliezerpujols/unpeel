@@ -89,17 +89,48 @@ pub(super) fn check_tier(
     target: &AppTarget,
     unrestricted: bool,
 ) -> Result<(), String> {
+    if matches!(action, "screenshot" | "zoom") {
+        return Ok(());
+    }
     match app_tier(&target.bundle_id, unrestricted) {
         Tier::Read => Err(format!(
             "{} is read-only in computer use. Use the Unpeel browser tool to interact with it.",
             target.name
         )),
-        Tier::Click if !matches!(action, "left_click" | "scroll") => Err(format!(
-            "Computer use only allows left-click and scroll in {}.",
-            target.name
-        )),
+        Tier::Click
+            if !matches!(
+                action,
+                "left_click" | "press" | "click" | "scroll" | "get_app_state"
+            ) =>
+        {
+            Err(format!(
+                "Computer use only allows left-click and scroll in {}.",
+                target.name
+            ))
+        }
         Tier::Click | Tier::Full => Ok(()),
     }
+}
+
+pub(super) fn allows_ax_action(action: &str) -> bool {
+    matches!(
+        action,
+        "AXPress"
+            | "AXPick"
+            | "AXShowMenu"
+            | "AXIncrement"
+            | "AXDecrement"
+            | "AXConfirm"
+            | "AXCancel"
+            | "AXDismiss"
+            | "AXScrollUp"
+            | "AXScrollDown"
+            | "AXScrollLeft"
+            | "AXScrollRight"
+            | "AXScrollToVisible"
+            | "AXShowDefaultUI"
+            | "AXShowAlternateUI"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

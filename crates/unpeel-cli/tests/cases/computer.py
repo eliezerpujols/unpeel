@@ -186,7 +186,7 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
             elif envelope["operation"] == "computer.resolve":
                 control = Path(case.home.path("computer-control.json"))
                 value["control_generation"] = json.loads(control.read_text())["generation"] if control.exists() else "initial"
-                if args["action"] in {"left_click", "type"}:
+                if args["action"] in {"left_click", "type"} or "app" in args:
                     value["target"] = {**target, "pid": 42}
                 if args["action"] == "open_app":
                     value["target"] = {**target, "pid": None}
@@ -196,13 +196,16 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                 value["coordinate"] = [10.1, 19.5]
             elif args["action"] == "wait":
                 time.sleep(args["duration"])
-            else:
+            elif "screenshot_path" in args:
                 path = Path(args["screenshot_path"])
                 path.write_bytes(large_png() if args["action"] == "zoom" else PNG)
                 value.update(screenshot_path=str(path), width=1, height=1, scale=1.0)
-                if args["action"] == "open_app" and args.get("activate") is True:
-                    value["frontmost_app"] = target
-                if args["action"] == "screenshot":
+                if args.get("app") and args["action"] in {"screenshot", "get_app_state"}:
+                    value["window"] = {"id": 76, "title": "Scratch", "bundle_id": target["bundle_id"]}
+                    value["windows"] = [value["window"]]
+                    if args["action"] == "get_app_state":
+                        value["ax_tree"] = "Window: Scratch\n0 AXWindow\n  1 AXTextArea"
+                elif args["action"] == "screenshot":
                     value["display"] = args.get("display", 0) if args.get("display", 0) < len(DISPLAYS) else 0
             data = json.dumps(value).encode()
             self.send_response(200)
@@ -317,18 +320,36 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                        and all(call["request"]["app"] == background["bundle_id"] for call in calls[-2:]), str(typed))
             wrong = mcp.call("computer", {"action": "type", "text": "hello", "app": "com.apple.Calendar"})
             case.check("Host rejects an adapter resolving a different keyboard app",
-                       wrong["result"]["isError"] and "did not resolve the requested keyboard app" in mcp.text(wrong)
+                       wrong["result"]["isError"] and "did not resolve the requested app" in mcp.text(wrong)
                        and calls[-1]["operation"] == "computer.resolve", str(wrong))
-            for activate in [None, True]:
-                args = {"action": "open_app", "text": background["bundle_id"]}
-                if activate is True:
-                    args["activate"] = True
-                opened = mcp.call("computer", args)
-                case.check(f"open_app activates only when requested ({activate})",
-                           not opened["result"]["isError"]
-                           and calls[-1]["request"].get("activate") == activate
-                           and json.loads(mcp.text(opened))["frontmost_app"] == (background if activate else FRONTMOST_APP),
-                           str(opened))
+            opened = mcp.call("computer", {"action": "open_app", "text": background["bundle_id"]})
+            case.check("open_app leaves the foreground app alone",
+                       not opened["result"]["isError"]
+                       and json.loads(mcp.text(opened))["frontmost_app"] == FRONTMOST_APP, str(opened))
+            count = len(calls)
+            invalid = mcp.call("computer", {"action": "open_app", "text": background["bundle_id"], "activate": True})
+            case.check("explicit activation is rejected before the adapter",
+                       invalid["result"]["isError"] and len(calls) == count, str(invalid))
+
+            app = background["bundle_id"]
+            captured = mcp.call("computer", {"action": "get_app_state", "app": app, "window": 76})["result"]
+            data = captured["content"]
+            case.check("background app state returns the selected window, tree, and PNG",
+                       not captured["isError"] and json.loads(data[0]["text"])["window"]["id"] == 76
+                       and "1 AXTextArea" in data[1]["text"] and data[2]["type"] == "image"
+                       and calls[-1]["request"]["target"]["bundle_id"] == app, str(captured))
+            invalid = mcp.call("computer", {"action": "screenshot", "app": app, "window": 77})
+            case.check("Host checks the requested window ID",
+                       invalid["result"]["isError"] and "did not capture the requested app window" in mcp.text(invalid),
+                       str(invalid))
+            edited = mcp.call("computer", {"action": "set_value", "app": app, "element": 1, "text": ""})["result"]
+            case.check("element editing sends its ID and value only on perform",
+                       not edited["isError"] and calls[-1]["request"]["element"] == 1
+                       and calls[-1]["request"]["text"] == "" and "screenshot_path" not in calls[-1]["request"]
+                       and "text" not in calls[-2]["request"], str(edited))
+            count = len(calls)
+            invalid = mcp.call("computer", {"action": "perform_action", "app": app, "element": 0, "ax_action": "AXRaise"})
+            case.check("AXRaise is rejected before the adapter", invalid["result"]["isError"] and len(calls) == count, str(invalid))
             select_app(FRONTMOST_APP)
 
             code, listing = client.call(2, "GET", "/mobile/artifacts", query={"session_id": session_id})
