@@ -10,6 +10,7 @@
 //! (`~/.unpeel/app-sessions/<id>/session.sock`); no running desktop app is
 //! required beyond the hosts themselves.
 
+use crate::computer_mcp;
 use crate::session_host::{self, HostedSessionManifest, HostedSessionState, SessionHostCommand};
 use crate::session_input::sanitize_paste_text;
 #[cfg(test)]
@@ -55,7 +56,7 @@ impl McpDomainMask {
         workspace: true,
         artifacts: true,
         browser: true,
-        computer: false,
+        computer: true,
         apps: true,
         skills: true,
     };
@@ -67,7 +68,7 @@ impl McpDomainMask {
             WORKSPACE_TOOL => self.workspace,
             ARTIFACTS_TOOL => self.artifacts,
             BROWSER_TOOL => self.browser,
-            COMPUTER_TOOL => false,
+            COMPUTER_TOOL => self.computer,
             APPS_TOOL => self.apps,
             SKILLS_TOOL => self.skills,
             name if name.strip_prefix("browser_").is_some_and(is_browser_action) => self.browser,
@@ -201,6 +202,7 @@ pub fn tool_names() -> Vec<&'static str> {
         WORKSPACE_TOOL,
         ARTIFACTS_TOOL,
         BROWSER_TOOL,
+        COMPUTER_TOOL,
         APPS_TOOL,
         SKILLS_TOOL,
     ]
@@ -609,7 +611,10 @@ fn tools_call_with_domains(params: &Value, domains: McpDomainMask) -> Result<Val
         true
     };
     let outcome = if domains.allows_tool(name) && action_mask_allows {
-        run_tool(name, &arguments)
+        match name {
+            COMPUTER_TOOL => computer_mcp::tool_content(&arguments),
+            _ => run_tool(name, &arguments).map(|text| vec![json!({"type": "text", "text": text})]),
+        }
     } else {
         Err(format!(
             "The '{name}' tool is not enabled for this MCP registration."
@@ -617,10 +622,10 @@ fn tools_call_with_domains(params: &Value, domains: McpDomainMask) -> Result<Val
     };
 
     match outcome {
-        Ok(text) => {
+        Ok(content) => {
             trace(&format!("tool={name} ok"));
             Ok(json!({
-                "content": [{ "type": "text", "text": text }],
+                "content": content,
                 "isError": false,
             }))
         }
@@ -656,9 +661,6 @@ fn run_tool(name: &str, arguments: &Value) -> Result<String, String> {
             let action = required_action(arguments, browser_action_names())?;
             run_browser_action(&action, arguments)
         }
-        COMPUTER_TOOL => {
-            Err("Unpeel computer use has been retired. Configure desktop tools in your agent or environment.".into())
-        }
         APPS_TOOL => {
             let action = required_action(arguments, apps_action_names())?;
             run_apps_action(&action, arguments)
@@ -683,7 +685,7 @@ fn run_tool(name: &str, arguments: &Value) -> Result<String, String> {
         }
         _ => Err(format!(
             "Unknown tool: {name}. This server exposes one tool per domain ('agents', \
-'sessions', 'workspace', 'artifacts', 'browser', 'apps', 'skills') taking an 'action' parameter; call \
+'sessions', 'workspace', 'artifacts', 'browser', 'computer', 'apps', 'skills') taking an 'action' parameter; call \
 {{\"action\":\"help\"}} on a tool for docs."
         )),
     }
@@ -1645,6 +1647,8 @@ fn tool_definitions_for_manifest(
         domains.artifacts && manifest.is_none_or(HostedSessionManifest::sessions_mcp_enabled);
     let advertise_browser =
         domains.browser && manifest.is_none_or(HostedSessionManifest::browser_mcp_enabled);
+    let advertise_computer =
+        domains.computer && manifest.is_some_and(computer_mcp::session_has_integration);
     // Apps discovery and the root skills registry are present by default
     // wherever the unified server has any live domain. Both are read-only,
     // but a registration that granted no domain at all still advertises
@@ -1671,6 +1675,9 @@ fn tool_definitions_for_manifest(
     }
     if advertise_browser {
         tools.push(browser_tool_definition());
+    }
+    if advertise_computer {
+        tools.push(computer_mcp::tool_definition());
     }
     if advertise_apps {
         tools.push(apps_tool_definition());
@@ -4795,6 +4802,7 @@ mod tests {
                     || name == WORKSPACE_TOOL
                     || name == ARTIFACTS_TOOL
                     || name == BROWSER_TOOL
+                    || name == COMPUTER_TOOL
                     || name == APPS_TOOL
                     || name == SKILLS_TOOL,
                 "unexpected advertised tool {name}"
@@ -4941,6 +4949,7 @@ mod tests {
             workspace_tool_definition(),
             artifacts_tool_definition(),
             browser_tool_definition(),
+            computer_mcp::tool_definition(),
             apps_tool_definition(),
             skills_tool_definition(),
         ];

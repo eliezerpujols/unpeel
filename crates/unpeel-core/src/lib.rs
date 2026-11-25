@@ -37,6 +37,8 @@ pub mod browser_engine;
 #[cfg(feature = "native-host")]
 pub mod browser_mcp;
 #[cfg(feature = "native-host")]
+pub mod computer_mcp;
+#[cfg(feature = "native-host")]
 pub mod controller_api;
 #[cfg(feature = "native-host")]
 pub mod controller_host;

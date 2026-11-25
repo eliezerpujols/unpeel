@@ -1350,6 +1350,22 @@ pub fn read_chunk(
     offset: u64,
     limit: usize,
 ) -> Result<SessionArtifactChunk, SessionArtifactReadError> {
+    read_local_chunk(
+        session_id,
+        kind,
+        name,
+        offset,
+        limit.clamp(1, ARTIFACT_READ_MAX_CHUNK_BYTES),
+    )
+}
+
+pub(crate) fn read_local_chunk(
+    session_id: &str,
+    kind: &str,
+    name: &str,
+    offset: u64,
+    limit: usize,
+) -> Result<SessionArtifactChunk, SessionArtifactReadError> {
     if !safe_segment(session_id) {
         return Err(read_error(400, "invalid session id"));
     }
@@ -1359,8 +1375,6 @@ pub fn read_chunk(
     let Some(components) = kind_components(kind) else {
         return Err(read_error(404, "unknown artifact kind"));
     };
-    let limit = limit.clamp(1, ARTIFACT_READ_MAX_CHUNK_BYTES);
-
     #[cfg(unix)]
     {
         let root = secure_fs::open_session_artifact_root(session_id)
@@ -1486,6 +1500,22 @@ pub fn kind_dir(session_id: &str, kind: &str) -> Option<PathBuf> {
         return None;
     }
     kind_dir_at(&artifacts_root(session_id), kind)
+}
+
+#[cfg(unix)]
+pub(crate) fn create_computer_screenshot_dir(session_id: &str) -> Result<PathBuf, String> {
+    let path = kind_dir(session_id, "computer").ok_or("Invalid computer session id")?;
+    let create = || -> std::io::Result<()> {
+        let sessions = secure_fs::open_configured_root(&app_paths::app_sessions_root())?;
+        let session = secure_fs::open_dir_at(&sessions, session_id)?;
+        let mut dir = secure_fs::open_or_create_dir_at(&session, "artifacts")?;
+        for component in kind_components("computer").expect("computer artifact kind") {
+            dir = secure_fs::open_or_create_dir_at(&dir, component)?;
+        }
+        Ok(())
+    };
+    create().map_err(|error| format!("Could not create computer screenshot directory: {error}"))?;
+    std::path::absolute(path).map_err(|error| format!("Could not resolve screenshot path: {error}"))
 }
 
 fn kind_dir_at(root: &Path, kind: &str) -> Option<PathBuf> {

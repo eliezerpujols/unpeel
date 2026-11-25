@@ -1344,7 +1344,7 @@ class McpClient:
     inherits the harness environment (so ``UNPEEL_CUA_DRIVER_BIN``,
     ``DISPLAY``, and friends reach the engine calls it makes)."""
 
-    def __init__(self, home, session_id, host_binary=None):
+    def __init__(self, home, session_id, host_binary=None, host_args=("__mcp__",)):
         host = host_binary or os.path.join(os.path.dirname(BINARY), "unpeel-host")
         env = {
             **os.environ,
@@ -1353,7 +1353,7 @@ class McpClient:
             "UNPEEL_SESSION_ID": session_id,
         }
         self.proc = subprocess.Popen(
-            [host, "__mcp__"],
+            [host, *host_args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

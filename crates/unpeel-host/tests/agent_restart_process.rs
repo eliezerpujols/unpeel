@@ -638,6 +638,7 @@ fn blank_terminal_never_claims_mcp_registration_or_agent_restart() {
             "workspace",
             "artifacts",
             "browser",
+            "computer",
             "apps",
             "skills"
         ]
@@ -646,7 +647,7 @@ fn blank_terminal_never_claims_mcp_registration_or_agent_restart() {
     // Persisted Kiro configs from before the generic gate rename invoke the
     // legacy argv. It answers as the unified gate: grants come from this
     // Session's manifest (the old Kiro env aliases are ignored), and the
-    // retired Computer domain stays absent and uncallable.
+    // live computer-use policy still defaults to Off.
     let mut legacy_kiro_mcp = Command::new(env!("CARGO_BIN_EXE_unpeel-host"))
         .arg("__kiro_mcp__")
         .env("UNPEEL_HOME", &home)
@@ -663,7 +664,7 @@ fn blank_terminal_never_claims_mcp_registration_or_agent_restart() {
         .take()
         .unwrap()
         .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"computer\",\"arguments\":{\"action\":\"help\"}}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"computer\",\"arguments\":{\"action\":\"screenshot\"}}}\n",
         )
         .unwrap();
     let legacy_output = legacy_kiro_mcp.wait_with_output().unwrap();
@@ -694,6 +695,7 @@ fn blank_terminal_never_claims_mcp_registration_or_agent_restart() {
             "workspace",
             "artifacts",
             "browser",
+            "computer",
             "apps",
             "skills"
         ]
@@ -703,6 +705,10 @@ fn blank_terminal_never_claims_mcp_registration_or_agent_restart() {
         .find(|response| response["id"] == 3)
         .expect("legacy Kiro computer denial");
     assert_eq!(denied_computer["result"]["isError"], true);
+    assert_eq!(
+        denied_computer["result"]["content"][0]["text"],
+        unpeel_core::computer_mcp::OFF_MESSAGE
+    );
 
     let rejected = socket_command(
         &home,

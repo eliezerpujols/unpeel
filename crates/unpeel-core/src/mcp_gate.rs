@@ -49,7 +49,9 @@ pub fn run_stdio(kind: &str) -> Result<(), String> {
         workspace: sessions_granted,
         artifacts: sessions_granted,
         browser: browser_granted,
-        computer: false,
+        computer: manifest
+            .as_ref()
+            .is_some_and(crate::computer_mcp::session_has_integration),
         // Apps discovery rides any granted domain: it is read-only manifest
         // discovery, present by default wherever the unified server is live.
         apps: sessions_granted || browser_granted,
