@@ -104,6 +104,22 @@ Confirm which binary is serving with
 /Applications), and that a new route made it into a build with e.g.
 `strings clients/native/dist/Unpeel.app/Contents/MacOS/UnpeelNative | grep <route>`.
 
+### Mac computer use
+
+Screen Recording and Accessibility are granted to the app bundle in System
+Settings under Privacy & Security. A dev build uses the grants for **Unpeel
+Dev**. The Host authorizes actions and selects the output path before calling
+the app over the authenticated platform adapter.
+
+`computer.status` reports `screen_recording`, `accessibility`, and the
+frontmost app. `computer.apps` lists running apps. `computer.perform` uses
+the session's last PNG as its coordinate space, including after a zoom.
+Its `scale` is image pixels per Quartz screen point on the long axis.
+Regular screenshots capture the main display. Zoom crops the requested
+region at the display's native resolution. Both cap the image's long edge
+at 1456 pixels. macOS 14 and later use ScreenCaptureKit, with a Quartz
+display capture fallback on macOS 13.
+
 ### iOS app: build & deploy
 
 The iOS client (`clients/ios/UnpeelIOS`) is an xcodegen project — after adding or

@@ -75,6 +75,22 @@ final class HookServerParsingTests: XCTestCase {
             .failure(.invalidEnvelope)
         )
 
+        let computerApps = Data(#"{"version":1,"operation":"computer.apps","request":{}}"#.utf8)
+        XCTAssertEqual(HookServer.platformAdapterCall(from: computerApps), .success(.computerApps))
+        let computerPerform = Data(
+            #"{"version":1,"operation":"computer.perform","request":{"session_id":"session-1","action":"wait","duration":1}}"#.utf8
+        )
+        guard case let .success(.computerPerform(request)) = HookServer.platformAdapterCall(from: computerPerform)
+        else { return XCTFail("Expected the computer.perform callback") }
+        XCTAssertEqual(try? request.get().action, .wait(.seconds(1)))
+
+        let malformedPerform = Data(
+            #"{"version":1,"operation":"computer.perform","request":{"session_id":"session-1","action":"mouse_move"}}"#.utf8
+        )
+        guard case let .success(.computerPerform(invalidRequest)) = HookServer.platformAdapterCall(from: malformedPerform)
+        else { return XCTFail("Expected computer.perform to return an action error") }
+        XCTAssertThrowsError(try invalidRequest.get())
+
         let overlay = Data(
             #"{"version":1,"operation":"overlay.snapshot","request":{}}"#.utf8
         )

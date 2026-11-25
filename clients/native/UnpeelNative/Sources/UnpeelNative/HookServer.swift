@@ -65,7 +65,9 @@ enum PlatformAdapterCall: Equatable {
     case presentApprovals([PlatformPresentedApproval])
     case openInEditor(path: String)
     case thumbnail(query: [String: String])
+    case computerPerform(Result<ComputerRequest, ComputerError>)
     case computerStatus
+    case computerApps
     case refreshLinkEntitlement(macID: String)
     case reconcileMobileE2EKeys
     case removeMobileE2EKey(deviceID: String)
@@ -117,7 +119,7 @@ final class HookServer: @unchecked Sendable {
     var platformAdapterHandler: (@Sendable (
         _ body: Data,
         _ reply: @escaping @Sendable (Int, String) -> Void
-    ) -> Void)?
+    ) -> Task<Void, Never>?)?
 
     /// Handler for `/state-changed`: another Unpeel wrote shared state and
     /// wants this one to re-read it now. Unauthenticated by design — it
@@ -365,15 +367,20 @@ final class HookServer: @unchecked Sendable {
             }
             let done = DispatchSemaphore(value: 0)
             let box = ResultBox()
-            handler(body) { status, body in
+            let task = handler(body) { status, body in
                 box.set((status, body))
                 done.signal()
             }
-            let callbackCeiling: TimeInterval = (json["operation"] as? String)
-                == "link.entitlement.refresh" ? 18 : 4
-            _ = done.wait(timeout: .now() + callbackCeiling)
+            let operation = json["operation"] as? String
+            let isComputerCall = operation.flatMap(ComputerPlatformAdapter.Operation.init(rawValue:)) != nil
+            let callbackCeiling: TimeInterval = isComputerCall ? 32 : (operation == "link.entitlement.refresh" ? 18 : 4)
+            if done.wait(timeout: .now() + callbackCeiling) == .timedOut, isComputerCall {
+                task?.cancel()
+            }
             let (status, responseBody) = box.get()
-                ?? (504, #"{"error":"platform adapter timed out"}"#)
+                ?? (504, isComputerCall
+                    ? #"{"ok":false,"error":"computer action timed out"}"#
+                    : #"{"error":"platform adapter timed out"}"#)
             respond(fd, status: status, body: responseBody)
             return
         }
@@ -545,9 +552,14 @@ final class HookServer: @unchecked Sendable {
                 }
             }
             return .success(.thumbnail(query: query))
-        case "computer.status":
+        case ComputerPlatformAdapter.Operation.perform.rawValue:
+            return .success(.computerPerform(ComputerRequest.parse(request)))
+        case ComputerPlatformAdapter.Operation.status.rawValue:
             guard request.isEmpty else { return .failure(.invalidEnvelope) }
             return .success(.computerStatus)
+        case ComputerPlatformAdapter.Operation.apps.rawValue:
+            guard request.isEmpty else { return .failure(.invalidEnvelope) }
+            return .success(.computerApps)
         case "link.entitlement.refresh":
             guard request.count == 1,
                   let rawMacID = request["macID"] as? String

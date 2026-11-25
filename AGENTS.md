@@ -84,8 +84,9 @@ makes sense for coding, it does not belong here.
   created (`spawned_by`).
 - **Engines are Host-owned and pinned.** The browser engine
   (`protocol/browser-engine-v1.json`) is installed and hash-verified by
-  the Host. Desktop automation belongs to the agent or VM environment.
-  Unpeel never ships or requires a Node runtime.
+  the Host. The Mac app provides native desktop capture and input through the
+  authenticated platform adapter. The Host owns computer-use policy and
+  screenshot artifact paths. Unpeel never ships or requires a Node runtime.
 - **A program's own report is the busy/idle authority; hooks are the
   bridge.** A program that speaks the Program Status Protocol (`OSC 7501`,
   `crates/unpeel-core/src/program_status.rs`; Claude Code does) reports
