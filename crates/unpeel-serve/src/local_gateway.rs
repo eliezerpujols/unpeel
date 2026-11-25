@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use unpeel_core::computer_mcp;
 use unpeel_core::controller_host::ControllerHostRuntime;
 use unpeel_core::remote_stdio;
 
@@ -270,6 +271,9 @@ fn serve_connection(
         if request.path == PLATFORM_ADAPTER_CONTROL_PATH {
             return handle_platform_adapter_control(id, request, &platform_adapters);
         }
+        if request.path == computer_mcp::LOCAL_COMPUTER_PATH {
+            return handle_computer_call(request, &platform_adapters);
+        }
         if let Some(response) =
             crate::mobile::handle_local_live_route(&request, &approvals, &pairing, &snapshot)
         {
@@ -400,6 +404,33 @@ fn serve_connection(
     if let Ok(mut active) = active.lock() {
         active.remove(&id);
     }
+}
+
+fn handle_computer_call(
+    request: unpeel_core::relay_wire::TunnelRequest,
+    hub: &PlatformAdapterHub,
+) -> (u16, Vec<u8>) {
+    if request.method != "POST" {
+        return (405, br#"{"error":"method not allowed"}"#.to_vec());
+    }
+    let Ok(body) = serde_json::from_slice(&request.body) else {
+        return (400, br#"{"error":"invalid computer request"}"#.to_vec());
+    };
+    let result = computer_mcp::handle_local_call(&body, |operation, body| {
+        let response = hub.call(operation, body).map_err(|error| match error {
+            PlatformAdapterError::Unavailable => {
+                "Computer use requires a Mac app with a connected computer adapter".into()
+            }
+            other => other.to_string(),
+        })?;
+        if !(200..300).contains(&response.status) {
+            return Err(computer_mcp::adapter_error(&response.body));
+        }
+        Ok(response.body)
+    });
+    let response =
+        result.unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": error }));
+    (200, response.to_string().into_bytes())
 }
 
 fn handle_platform_adapter_control(

@@ -29,6 +29,7 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// thread (never the Host tick), and gets a bounded ceiling just above the
 /// app's 15-second service request timeout.
 const LINK_ENTITLEMENT_CALLBACK_TIMEOUT: Duration = Duration::from_secs(20);
+const COMPUTER_CALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_CALLBACK_BYTES: usize = 512 * 1024;
 const MAX_CAPABILITIES: usize = 16;
 const MAX_INSTANCE_ID_BYTES: usize = 128;
@@ -52,7 +53,9 @@ pub const ADAPTER_SERVICES: &[&str] = &[
     "approval.present",
     "app.open-in-editor",
     "artifact.thumbnail",
-    "computer.status",
+    "computer.apps",
+    unpeel_core::computer_mcp::PERFORM_OPERATION,
+    unpeel_core::computer_mcp::STATUS_OPERATION,
     "controller.transport.host-owned",
     "link.entitlement.refresh",
     "mobile.e2e-key.reconcile",
@@ -246,10 +249,10 @@ impl PlatformAdapterHub {
                 registration.instance_id, registration.callback_port
             ),
         );
-        let timeout = if capability == "link.entitlement.refresh" {
-            LINK_ENTITLEMENT_CALLBACK_TIMEOUT
-        } else {
-            CALLBACK_TIMEOUT
+        let timeout = match capability {
+            "link.entitlement.refresh" => LINK_ENTITLEMENT_CALLBACK_TIMEOUT,
+            unpeel_core::computer_mcp::PERFORM_OPERATION => COMPUTER_CALLBACK_TIMEOUT,
+            _ => CALLBACK_TIMEOUT,
         };
         let result = callback_request(&registration, &body, timeout);
         match &result {

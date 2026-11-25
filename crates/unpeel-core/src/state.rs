@@ -736,6 +736,10 @@ pub enum ComputerAccess {
 }
 
 impl ComputerAccess {
+    fn off() -> Self {
+        Self::Off
+    }
+
     /// Lenient parse of the persisted string form. An *absent* field decodes
     /// to the serde default (`Ask`); an explicit-but-unrecognized value falls
     /// back to `Off` so a malformed setting never silently broadens access
@@ -1103,8 +1107,10 @@ pub struct AppState {
     /// typed screenshot request always asks for gallery publication).
     #[serde(default = "default_true")]
     pub mcp_auto_add_browser_screenshots: bool,
-    /// The app-wide Computer MCP access mode. Defaults to [`ComputerAccess::Ask`]
-    /// (per-session approval); Off in Settings ▸ Computer is the master disable.
+    /// Live access to the Mac app's computer-use adapter. Explicit opt-in.
+    #[serde(default = "ComputerAccess::off")]
+    pub computer_use: ComputerAccess,
+    /// Access setting retained for clients of the former computer engine.
     #[serde(default)]
     pub computer_default_access: ComputerAccess,
     /// Session ids approved for computer use under `Ask` (the "target" is
@@ -1217,6 +1223,7 @@ impl Default for AppState {
             browser_approvals: Vec::new(),
             mcp_worktree_access: false,
             mcp_auto_add_browser_screenshots: true,
+            computer_use: ComputerAccess::Off,
             computer_default_access: ComputerAccess::default(),
             computer_approvals: Vec::new(),
             computer_settings: ComputerSettings::default(),
