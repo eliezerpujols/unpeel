@@ -38,6 +38,7 @@ pub type ProjectColorWriter<'a> = &'a dyn Fn(&str, Option<&str>) -> Result<(), S
 pub struct ControllerHostRuntime {
     principal: ControllerPrincipal,
     hook_port: Option<u16>,
+    effects: ControllerEffects,
 }
 
 impl ControllerHostRuntime {
@@ -55,7 +56,15 @@ impl ControllerHostRuntime {
                     .map(|host_id| crate::state::host_owner_principal_id(&host_id)),
             },
             hook_port,
+            effects: ControllerEffects::new(Arc::new(move |request| {
+                crate::controller_api::execute_headless_session_action(request, hook_port)
+            })),
         }
+    }
+
+    pub fn with_effects(mut self, effects: ControllerEffects) -> Self {
+        self.effects = effects;
+        self
     }
 
     /// Translate the common Relay/SSH wire request into a Host-authenticated
@@ -144,18 +153,11 @@ impl ControllerHostRuntime {
         let create_context = catalog
             .as_ref()
             .map(|catalog| catalog.create_context(self.hook_port));
-        let effects = ControllerEffects::new(Arc::new({
-            let hook_port = self.hook_port;
-            move |request| {
-                crate::controller_api::execute_headless_session_action(request, hook_port)
-            }
-        }));
-
         if let Some(response) = crate::controller_api::route_with_effects(
             request,
             route_context.as_ref(),
             create_context.as_ref(),
-            Some(&effects),
+            Some(&self.effects),
         ) {
             return response;
         }
@@ -2133,22 +2135,46 @@ fn session_summary_with_menu_attention(
         .and_then(|value| value.get("activity_source"))
         .and_then(Value::as_str)
         .filter(|source| matches!(*source, "program" | "hooks" | "screen"));
-    let activity_name = if !running {
-        if unread {
-            "done"
-        } else {
-            "idle"
-        }
+    let dismissal = running
+        .then(|| {
+            crate::session_ops::AttentionDismissal::load(
+                &crate::app_paths::app_sessions_root().join(&manifest.session.id),
+                manifest.runtime_launch_generation,
+            )
+        })
+        .flatten();
+    let settled = if unread { "done" } else { "idle" };
+    let program = manifest.program_status.as_ref().filter(|_| running);
+    let (activity_name, source) = if !running {
+        (settled, None)
+    } else if let Some(program) = program {
+        use crate::program_status::ProgramState;
+        let activity = match program.state {
+            ProgramState::Working => "working",
+            ProgramState::Blocked
+                if !dismissal.is_some_and(|d| d.covers_unix_ms(program.changed_at)) =>
+            {
+                "blocked"
+            }
+            _ => settled,
+        };
+        (activity, Some("program"))
     } else if menu_attention_detection && manifest.menu_prompt_active {
-        "blocked"
+        ("blocked", persisted_source)
     } else {
-        match persisted_activity {
+        let cleared = dismissal.is_some_and(|dismissal| {
+            activity
+                .and_then(|row| row.get("updated_at"))
+                .and_then(Value::as_u64)
+                .is_none_or(|at| dismissal.covers_unix_ms(at))
+        });
+        let activity = match persisted_activity {
             Some("starting") => "starting",
             Some("working") => "working",
-            Some("blocked") => "blocked",
-            _ if unread => "done",
-            _ => "idle",
-        }
+            Some("blocked") if !cleared => "blocked",
+            _ => settled,
+        };
+        (activity, persisted_source)
     };
     let active_runtime_id = running
         .then(|| session_host::active_runtime_id(manifest))
@@ -2173,12 +2199,8 @@ fn session_summary_with_menu_attention(
         "updatedAtUnixMs": updated_at,
         "status": if running { "running" } else { "exited" },
         "activity": activity_name,
-        "activitySource": running.then_some(persisted_source).flatten(),
-        "programStatus": manifest
-            .program_status
-            .as_ref()
-            .filter(|_| running)
-            .map(crate::program_status::ProgramStatusSummary::controller_json),
+        "activitySource": source,
+        "programStatus": program.map(crate::program_status::ProgramStatusSummary::controller_json),
         "unread": unread,
         "pinned": pinned,
         "notifyWhenDone": false,

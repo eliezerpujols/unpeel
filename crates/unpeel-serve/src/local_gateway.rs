@@ -125,11 +125,17 @@ impl LocalGatewayServer {
         // `UNPEEL_APP_PORT` in the hosted PTY, so provider hooks write
         // `last-hook-event.json` but never POST Busy/Idle and the sidebar
         // spinner never starts.
-        let runtime = Arc::new(ControllerHostRuntime::owner_transport(
-            "local",
-            Some(remote_stdio::owner_subject()),
-            Some(hook_port),
-        ));
+        let runtime = Arc::new(
+            ControllerHostRuntime::owner_transport(
+                "local",
+                Some(remote_stdio::owner_subject()),
+                Some(hook_port),
+            )
+            .with_effects(crate::mobile::headless_controller_effects(
+                Some(hook_port),
+                Arc::clone(&approvals),
+            )),
+        );
         let connection_ids = Arc::new(AtomicU64::new(1));
         let accept_thread = std::thread::Builder::new()
             .name("unpeel-local-host-accept".into())

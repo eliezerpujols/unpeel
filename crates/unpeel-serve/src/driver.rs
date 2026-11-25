@@ -1153,7 +1153,11 @@ impl HostRuntime {
                         .as_ref()
                         .is_some_and(|program| program.state.is_finished()),
                     _ => {
-                        !self.engine.is_latched(&row.id) || self.engine.is_completed(&row.id)
+                        (!self.engine.is_latched(&row.id) || self.engine.is_completed(&row.id))
+                            // A manual dismissal can settle an open visual menu
+                            // or an old hook without completing a turn.
+                            && !(old == Some(Status::Attention)
+                                && self.engine.dismissal_covers_activity(&row.id, &row.dir()))
                     }
                 }
                 && matches!(

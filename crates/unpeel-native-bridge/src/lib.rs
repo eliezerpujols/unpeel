@@ -420,6 +420,7 @@ trait RegisteredRemoteBackend: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteSessionVerb {
     Stop,
+    ClearAttention,
     Remove,
     Restart,
     RestartAgent,
@@ -431,6 +432,7 @@ impl RemoteSessionVerb {
     fn operation(self) -> &'static str {
         match self {
             Self::Stop => "session stop",
+            Self::ClearAttention => "clear session attention",
             Self::Remove => "session remove",
             Self::Restart => "session restart",
             Self::RestartAgent => "session agent restart",
@@ -657,6 +659,7 @@ impl RegisteredRemoteBackend for RegisteredCoreBackend {
     ) -> Result<u64, NativeRemoteEffectError> {
         let receipt = match verb {
             RemoteSessionVerb::Stop => self.backend.stop_session(session_id),
+            RemoteSessionVerb::ClearAttention => self.backend.clear_session_attention(session_id),
             RemoteSessionVerb::Remove => self.backend.remove_session(session_id),
             RemoteSessionVerb::Restart => self.backend.restart_session(session_id),
             RemoteSessionVerb::RestartAgent => self.backend.restart_agent(session_id),
@@ -4240,6 +4243,32 @@ pub unsafe extern "C" fn unpeel_native_bridge_remote_session_stop(
         out_pointer,
         out_length,
         |session_id| perform_remote_session_verb(handle, RemoteSessionVerb::Stop, session_id),
+    )
+}
+
+/// Dismiss the Host's currently recorded attention for a Session.
+///
+/// # Safety
+///
+/// A non-empty Session id must point to readable UTF-8 bytes. Both output
+/// pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn unpeel_native_bridge_remote_session_attention_clear(
+    handle: RemoteHandle,
+    session_id_pointer: *const u8,
+    session_id_length: usize,
+    out_pointer: *mut *mut u8,
+    out_length: *mut usize,
+) -> i32 {
+    let verb = RemoteSessionVerb::ClearAttention;
+    remote_session_effect_ffi(
+        handle,
+        session_id_pointer,
+        session_id_length,
+        verb.operation(),
+        out_pointer,
+        out_length,
+        |session_id| perform_remote_session_verb(handle, verb, session_id),
     )
 }
 

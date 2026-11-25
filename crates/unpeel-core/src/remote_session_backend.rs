@@ -51,6 +51,7 @@ const WRITE_CAPABILITY: &str = "session.input.write";
 const RESIZE_DESKTOP_CAPABILITY: &str = "session.resize_desktop";
 const MARK_READ_CAPABILITY: &str = "session.mark_read";
 const MARK_UNREAD_CAPABILITY: &str = "session.mark_unread";
+const CLEAR_ATTENTION_CAPABILITY: &str = "session.attention.clear";
 const APPROVAL_ANSWER_CAPABILITY: &str = "approval.answer";
 const TITLE_SET_CAPABILITY: &str = "session.title.set";
 const PIN_SET_CAPABILITY: &str = "session.pin.set";
@@ -2142,6 +2143,30 @@ impl RemoteSessionBackend {
             &effect_turn,
             OPERATION,
             STOP_CAPABILITY,
+            SESSION_ACTION_PATH,
+            body,
+        )
+    }
+
+    /// Dismiss the current Host-recorded attention (`session.attention.clear`).
+    pub fn clear_session_attention(
+        &self,
+        session_id: &str,
+    ) -> Result<RemoteEffectReceipt, RemoteEffectFailure> {
+        const OPERATION: &str = "clear session attention";
+        let effect_turn = self.inner.begin_effect();
+        effect_preflight(OPERATION, || validate_session_id(session_id))?;
+        let body = encode_effect_body(
+            OPERATION,
+            &SessionActionWire {
+                session_id,
+                action: "clear_attention",
+            },
+        )?;
+        self.inner.perform_effect(
+            &effect_turn,
+            OPERATION,
+            CLEAR_ATTENTION_CAPABILITY,
             SESSION_ACTION_PATH,
             body,
         )

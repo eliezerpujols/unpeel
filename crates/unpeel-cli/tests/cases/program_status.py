@@ -20,6 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from harness import run, run_cli  # noqa: E402
 from hook_cancellation import control, fixture_started, read_json  # noqa: E402
+from host_launch_conformance import LocalHostClient  # noqa: E402
 
 
 def body(case):
@@ -60,6 +61,8 @@ while True:
         report("state=working:app=reporter:progress=40:msg=" + msg("Compiling 3 crates"))
     elif data == b"b":
         report("state=blocked:kind=permission:app=reporter:msg=" + msg("Approve deploy?"))
+    elif data == b"c":
+        report("state=blocked:kind=permission:app=reporter:msg=" + msg("Approve restart?"))
     elif data == b"d":
         report("state=done:app=reporter:msg=" + msg("Built in 2s"))
     elif data == b"i":
@@ -68,7 +71,8 @@ while True:
     os.chmod(program, 0o755)
     home.preset(label="reporter", command=shlex.quote(program), preset_id="reporter")
     service = case.serve(env=environment)
-    if not case.check("isolated Host starts", bool(service.ready(timeout=25)), service.log()):
+    ready = service.ready(timeout=25)
+    if not case.check("isolated Host starts", bool(ready), service.log()):
         return
     launched = run_cli(home, ["new", "--preset", "reporter", "--project", "p"], env=environment)
     ids = re.findall(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", launched.stdout)
@@ -121,6 +125,23 @@ while True:
         case.check("blocked is attention",
                    bool(service.wait_for(published("attention"), timeout=10))
                    and program_status().get("kind") == "permission", str(activity()))
+
+        client = LocalHostClient(ready["localSocket"])
+        try:
+            clear = client.call(1, "POST", "/mobile/session-action",
+                                body={"sessionID": sid, "action": "clear_attention"})
+        finally:
+            client.close()
+        case.check("the Host clears the attention projection and keeps the program report",
+                   clear[0] == 200 and bool(service.wait_for(published("idle"), timeout=10))
+                   and program_status().get("state") == "blocked", str((clear, activity())))
+        case.check("clearing attention records no completion",
+                   not activity().get("completed") and finished_count() == 0, str(activity()))
+
+        control(home, sid, "c")
+        case.check("a new program prompt raises attention again",
+                   bool(service.wait_for(published("attention"), timeout=10))
+                   and program_status().get("msg") == "Approve restart?", str(activity()))
 
         control(home, sid, "d")
         case.check("done is idle and a completed turn",

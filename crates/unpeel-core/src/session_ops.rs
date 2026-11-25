@@ -1496,6 +1496,54 @@ pub fn set_completion_notification(session_id: &str, enabled: bool) -> Result<()
     )
 }
 
+/// A dismissal covers only attention already reported by this runtime launch.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct AttentionDismissal {
+    runtime_generation: u64,
+    cleared_at: SystemTime,
+}
+
+impl AttentionDismissal {
+    pub fn load(dir: &Path, runtime_generation: u64) -> Option<Self> {
+        let raw = std::fs::read(dir.join("attention-dismissal.json")).ok()?;
+        let dismissal: Self = serde_json::from_slice(&raw).ok()?;
+        (dismissal.runtime_generation == runtime_generation).then_some(dismissal)
+    }
+
+    pub fn covers(self, observed_at: SystemTime) -> bool {
+        observed_at <= self.cleared_at
+    }
+
+    pub fn covers_unix_ms(self, observed_at: u64) -> bool {
+        UNIX_EPOCH
+            .checked_add(Duration::from_millis(observed_at))
+            .is_some_and(|observed_at| self.covers(observed_at))
+    }
+}
+
+/// Retire this menu edge and fence already-recorded attention. Hook and
+/// program reports remain intact, so a later report can raise attention again.
+pub fn clear_attention(session_id: &str) -> Result<(), String> {
+    let _lifecycle = lock_session_lifecycle(session_id)?;
+    let manifest = manifest(session_id)?;
+    let dismissal = AttentionDismissal {
+        runtime_generation: manifest.runtime_launch_generation,
+        cleared_at: SystemTime::now(),
+    };
+    let path = session_dir(session_id).join("attention-dismissal.json");
+    let _lock = crate::app_state::lock_exclusive(&path)?;
+    if manifest.menu_prompt_active {
+        // The PTY scanner writes only on a viewport edge. It will raise
+        // this flag again when the menu goes away and a new one appears.
+        crate::session_host::update_manifest_session(session_id, |current| {
+            if current.runtime_launch_generation == dismissal.runtime_generation {
+                current.menu_prompt_active = false;
+            }
+        })?;
+    }
+    write_session_marker(&path, &dismissal, None)
+}
+
 pub fn can_notify_when_done(command: &str, active_app: bool) -> bool {
     active_app
         || crate::runtime_catalog::builtin_runtime_catalog()

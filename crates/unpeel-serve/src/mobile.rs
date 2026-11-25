@@ -1513,8 +1513,16 @@ fn headless_create_context(
     ))
 }
 
-fn headless_controller_effects(hook_port: Option<u16>) -> ControllerEffects {
+pub(crate) fn headless_controller_effects(
+    hook_port: Option<u16>,
+    approvals: Arc<crate::approvals::ApprovalHub>,
+) -> ControllerEffects {
+    use unpeel_core::controller_api::ControllerSessionAction;
+
     ControllerEffects::new(Arc::new(move |request| {
+        if request.action == ControllerSessionAction::ClearAttention {
+            approvals.check_attention_dismissal(&request.session_id)?;
+        }
         unpeel_core::controller_api::execute_headless_session_action(request, hook_port)
     }))
 }
@@ -1585,7 +1593,7 @@ fn handle_with_effects(
         (request.method.as_str(), request.path.as_str()),
         ("POST", "/mobile/restart-session") | ("POST", "/mobile/session-action")
     )
-    .then(|| headless_controller_effects(hook_port));
+    .then(|| headless_controller_effects(hook_port, Arc::clone(approvals)));
     let controller_effects = controller_effects_override.or(owned_controller_effects.as_ref());
     if let Some(response) = unpeel_core::controller_api::route_with_effects(
         &controller_request,
@@ -4054,6 +4062,7 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
                 },
                 "cwd": "/tmp",
                 "state": "running",
+                "menu_prompt_active": true,
             })
             .to_string(),
         )
@@ -4109,6 +4118,9 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
         let effects = ControllerEffects::new(Arc::new(|request| {
             use unpeel_core::controller_api::{ControllerEffectError, ControllerSessionAction};
             match (request.session_id.as_str(), request.action) {
+                ("conformance-session", ControllerSessionAction::ClearAttention) => {
+                    unpeel_core::controller_api::execute_headless_session_action(request, None)
+                }
                 ("conformance-restart", ControllerSessionAction::Restart)
                 | ("conformance-stop-live", ControllerSessionAction::Stop)
                 | ("conformance-action-restart", ControllerSessionAction::Restart)
@@ -4164,6 +4176,15 @@ non-ephemeral ports — a product regression, not a port race. Attempts: {failur
             );
             assert_eq!(status, case.expected.tui, "conformance case {}", case.id);
             let session_id = "conformance-session";
+            if case.id == "attention.clear.valid" {
+                let manifest = unpeel_core::session_host::load_manifest(session_id).unwrap();
+                assert!(!manifest.menu_prompt_active);
+                assert!(unpeel_core::session_ops::AttentionDismissal::load(
+                    &dir,
+                    manifest.runtime_launch_generation
+                )
+                .is_some());
+            }
             if case.id == "mark-unread.valid" {
                 assert!(unpeel_core::session_ops::marked_unread(session_id));
                 assert!(unpeel_core::session_ops::read_marker(session_id).is_some());

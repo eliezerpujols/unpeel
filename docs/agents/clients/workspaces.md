@@ -108,11 +108,12 @@ completion. Delivery through snapshots requires a reachable workspace.
 Background pairing polls Direct. Link delivers while the selected or
 retained runtime connection is active.
 
+**Clear attention** dismisses current Session attention in every scope.
+Later prompts can raise attention again. Pending MCP approvals require an
+explicit answer.
+
 #### Accepted menu gaps
 
-- **Clear attention** is main Local only. It dismisses the native activity
-  and menu-prompt state. The Host has no dismissal operation, and pending
-  approvals require an explicit answer.
 - **Agent access** works on this Mac's workspaces. Paired and SSH Hosts have
   no operation for reading or updating a Session's cross-Session grants.
 - **Pin to global project sidebar** works remotely once the Host has the

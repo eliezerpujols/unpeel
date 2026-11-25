@@ -3060,8 +3060,7 @@ struct SessionRowView: View {
     /// Whether this session's provider reports turn completion through hooks,
     /// making the "Notify when done" push reliable. Gates that toggle.
     var canNotifyWhenDone = true
-    /// Whether "Clear attention" applies — the Controller-local activity
-    /// engine's escape hatch, hidden for remote Hosts.
+    /// Whether the workspace supports "Clear attention" for this Session.
     var canClearAttention = true
     /// Whether "Mark as Read/Unread" applies (this instance's own Host).
     var canToggleUnread = false

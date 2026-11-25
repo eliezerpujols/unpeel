@@ -2,13 +2,20 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 26,
+    "minor": 27,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 27,
+        "summary": "Clear a Session's current attention through the Host, with pending MCP approvals requiring an explicit answer.",
+        "capabilities": [
+          "session.attention.clear"
+        ]
+      },
       {
         "minor": 26,
         "summary": "Hosts accept a manual unread receipt and persist the per-session completion notification preference across all transports. Bootstrap can report a completion recorded after opt-in.",
@@ -251,6 +258,13 @@
       "path": "/mobile/relay-credentials",
       "native": true,
       "tui": false
+    },
+    {
+      "id": "session.attention.clear",
+      "method": "POST",
+      "path": "/mobile/session-action#clear_attention",
+      "native": true,
+      "tui": true
     },
     {
       "id": "session.create",

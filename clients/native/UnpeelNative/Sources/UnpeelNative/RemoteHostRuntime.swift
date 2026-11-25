@@ -3489,6 +3489,7 @@ extension RemoteHostRuntime {
         static let titleSet = "session.title.set"
         static let pinSet = "session.pin.set"
         static let stop = "session.stop"
+        static let attentionClear = "session.attention.clear"
         static let remove = "session.remove"
         static let restart = "session.restart"
         static let reload = RemoteControlProtocol.sessionReloadCapability
@@ -3641,6 +3642,15 @@ extension RemoteHostRuntime {
             operation: "stop"
         ) { backend in
             _ = try await backend.stopSession(sessionID: sessionID)
+        }
+    }
+
+    func clearSessionAttention(_ sessionID: String) async throws {
+        try await performOrganizationVerb(
+            capability: HostOperation.attentionClear,
+            operation: "clear attention"
+        ) { backend in
+            _ = try await backend.clearSessionAttention(sessionID: sessionID)
         }
     }
 

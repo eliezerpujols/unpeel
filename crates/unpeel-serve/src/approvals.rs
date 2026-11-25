@@ -90,6 +90,27 @@ impl ApprovalWait<'_> {
 }
 
 impl ApprovalHub {
+    pub(crate) fn check_attention_dismissal(
+        &self,
+        session_id: &str,
+    ) -> Result<(), unpeel_core::controller_api::ControllerEffectError> {
+        use unpeel_core::controller_api::ControllerEffectError;
+
+        // The pending entry and its responder stay owned by the answer path.
+        // An approval enqueued after this check still presents independently.
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| ControllerEffectError::Failed("approval queue unavailable".into()))?;
+        if pending.iter().any(|approval| {
+            approval.caller_session_id == session_id
+                || approval.target_session_id.as_deref() == Some(session_id)
+        }) {
+            return Err(ControllerEffectError::PendingApproval);
+        }
+        Ok(())
+    }
+
     pub fn request_computer(self: &Arc<Self>, session_id: &str) -> ApprovalOutcome {
         self.request(
             "computer",

@@ -699,6 +699,10 @@ private actor StubPoolBackend: NativeRemoteBackendProtocol {
         throw StubPoolError.unexpected
     }
 
+    func clearSessionAttention(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
+        throw StubPoolError.unexpected
+    }
+
     func removeSession(sessionID _: String) async throws -> NativeRemoteEffectReceipt {
         throw StubPoolError.unexpected
     }

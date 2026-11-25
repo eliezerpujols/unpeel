@@ -3494,16 +3494,23 @@ final class UnpeelStore: ObservableObject {
         )
     }
 
-    /// Force-clear a session's attention badge ("Clear attention" in the
-    /// sidebar context menu) — the escape hatch for a stuck or false badge.
-    /// Covers both sources: a hook-owned PermissionRequest state drops to
-    /// idle (later hook events re-drive it as usual), and the host's
-    /// menu-prompt flag is dismissed until it lowers and re-raises.
+    /// Dismiss the current badge in the native startup model and on any
+    /// Host that owns the displayed Session status.
     func clearAttention(_ sessionID: String) {
-        guard selectedHostScope == .local else { return }
-        activity.clearAttention(sessionID)
-        menuAttentionDismissals.insert(sessionID)
-        rescan()
+        guard sessionCanClearAttention(sessionID) else { return }
+        let scope = selectedHostScope
+        if scope == .local {
+            activity.clearAttention(sessionID)
+            menuAttentionDismissals.insert(sessionID)
+            rescan()
+        }
+        if currentScopeUsesHostControl,
+           remoteHostRuntime.supportsHostOperation(RemoteHostRuntime.HostOperation.attentionClear) {
+            performRemoteVerb("Couldn't clear attention") { [weak self] runtime in
+                guard self?.selectedHostScope == scope else { return }
+                try await runtime.clearSessionAttention(sessionID)
+            }
+        }
     }
 
     // MARK: - Stop (non-destructive "clear it out")
@@ -10209,11 +10216,24 @@ final class UnpeelStore: ObservableObject {
         return summary?.notifyWhenDone == true
     }
 
-    /// "Clear attention" is a Controller-local activity-engine escape hatch;
-    /// there is no remote operation for it. Pending MCP approvals are not
-    /// dismissable this way — they need an explicit Allow / Don't Allow.
+    static func sessionAttentionClearAvailable(
+        scope: SelectedHostScope,
+        supportsOperation: Bool,
+        hasPendingApproval: Bool
+    ) -> Bool {
+        !hasPendingApproval && (scope == .local || supportsOperation)
+    }
+
     func sessionCanClearAttention(_ sessionID: String) -> Bool {
-        selectedHostScope == .local && !sessionNeedsMcpApprovalAttention(sessionID)
+        Self.sessionAttentionClearAvailable(
+            scope: selectedHostScope,
+            supportsOperation: remoteHostRuntime.supportsHostOperation(
+                RemoteHostRuntime.HostOperation.attentionClear
+            ),
+            hasPendingApproval: pendingMcpApprovals.contains {
+                $0.callerSessionID == sessionID || $0.targetSessionID == sessionID
+            }
+        )
     }
 
     // MARK: - Project context menu actions (ProjectItem.svelte:818-941)

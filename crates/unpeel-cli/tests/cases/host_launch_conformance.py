@@ -247,7 +247,7 @@ def run_fixture(home, launcher, fixture):
     return statuses, bootstrap, ready
 
 
-def answer_worker_approval_over_local_socket(home, ready, label):
+def answer_worker_approval_over_local_socket(case, home, ready, label):
     result = {}
 
     def request_approval():
@@ -287,6 +287,17 @@ def answer_worker_approval_over_local_socket(home, ready, label):
                 break
             time.sleep(0.05)
         if pending:
+            clear = {"sessionID": "conformance-session", "action": "clear_attention"}
+            local_clear = client.call(9_999, "POST", "/mobile/session-action", body=clear)
+            mobile_clear = mobile_request(
+                ready["directPort"], "/mobile/session-action", "conformance-controller-token",
+                method="POST", body=clear,
+            )
+            case.check(
+                f"{label} clear attention leaves pending approval for explicit answer",
+                local_clear[0] == mobile_clear[0] == 409 and waiter.is_alive(),
+                str((local_clear, mobile_clear)),
+            )
             answer = client.call(
                 10_000,
                 "POST",
@@ -347,7 +358,7 @@ def body(case):
                 str(environment),
             )
             pending, answer, mcp_result, waiter_alive = (
-                answer_worker_approval_over_local_socket(home, ready, name)
+                answer_worker_approval_over_local_socket(case, home, ready, name)
             )
             case.check(
                 f"{name} local client answers the worker-owned approval queue",

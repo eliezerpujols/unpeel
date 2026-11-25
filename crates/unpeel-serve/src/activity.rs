@@ -302,6 +302,24 @@ impl ActivityEngine {
             .unwrap_or(false)
     }
 
+    pub fn dismiss_attention(
+        &mut self,
+        session_id: &str,
+        dismissal: unpeel_core::session_ops::AttentionDismissal,
+    ) {
+        if let Some(entry) = self.entries.get_mut(session_id) {
+            if entry.state == Some(HookState::Attention)
+                && entry
+                    .last_transition_at
+                    .is_some_and(|at| dismissal.covers(at))
+            {
+                entry.state = Some(HookState::Idle);
+                entry.deadline_at = None;
+                entry.completed = false;
+            }
+        }
+    }
+
     pub fn hook_owned_state(&self, session_id: &str) -> Option<HookState> {
         let entry = self.entries.get(session_id)?;
         if !entry.hook_seen {
@@ -329,6 +347,17 @@ impl ActivityEngine {
                 && entry.completed
                 && !entry.background_expired
                 && entry.background.values().all(|activity| activity.expired)
+        })
+    }
+
+    pub fn dismissal_covers_activity(&self, session_id: &str, dir: &Path) -> bool {
+        self.entries.get(session_id).is_some_and(|entry| {
+            unpeel_core::session_ops::AttentionDismissal::load(dir, entry.runtime_launch_generation)
+                .is_some_and(|dismissal| {
+                    entry
+                        .last_transition_at
+                        .is_none_or(|at| dismissal.covers(at))
+                })
         })
     }
 
@@ -715,6 +744,43 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
+    }
+
+    #[test]
+    fn attention_dismissal_fences_the_old_hook_and_allows_a_new_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = ActivityEngine::default();
+        timed_seed(dir.path(), "PermissionRequest", 1, at(1000));
+        engine.seed_from_disk("s", dir.path(), true, None, 1);
+        assert_eq!(engine.hook_owned_state("s"), Some(HookState::Attention));
+
+        fs::write(
+            dir.path().join("attention-dismissal.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "runtime_generation": 1,
+                "cleared_at": at(2000),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let dismissal = unpeel_core::session_ops::AttentionDismissal::load(dir.path(), 1).unwrap();
+        assert!(unpeel_core::session_ops::AttentionDismissal::load(dir.path(), 2).is_none());
+        engine.dismiss_attention("s", dismissal);
+        engine.seed_from_disk("s", dir.path(), true, None, 1);
+        assert_eq!(engine.hook_owned_state("s"), Some(HookState::Idle));
+        assert!(!engine.is_completed("s"));
+
+        // The worker can restart and reseed the old hook while the dismissal
+        // remains on disk. The same cutoff still applies.
+        let mut restarted = ActivityEngine::default();
+        restarted.seed_from_disk("s", dir.path(), true, None, 1);
+        restarted.dismiss_attention("s", dismissal);
+        assert_eq!(restarted.hook_owned_state("s"), Some(HookState::Idle));
+        timed_seed(dir.path(), "PermissionRequest", 1, at(3000));
+        restarted.seed_from_disk("s", dir.path(), true, None, 1);
+        restarted.dismiss_attention("s", dismissal);
+        assert_eq!(restarted.hook_owned_state("s"), Some(HookState::Attention));
+        assert!(!restarted.is_completed("s"));
     }
 
     #[test]

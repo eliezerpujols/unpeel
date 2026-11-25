@@ -303,10 +303,6 @@ extension UnpeelStore {
         approval.presentationSessionID(knownIDs: mcpApprovalKnownSessionIDs)
     }
 
-    func sessionNeedsMcpApprovalAttention(_ sessionID: String) -> Bool {
-        mcpApprovalAttentionSessionIDs.contains(sessionID)
-    }
-
     func pendingMcpApproval(forSessionID sessionID: String) -> PendingMcpApproval? {
         let known = mcpApprovalKnownSessionIDs
         return pendingMcpApprovals.first {

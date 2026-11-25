@@ -595,6 +595,44 @@
       }
     },
     {
+      "id": "attention.clear.missing-session-id",
+      "method": "POST",
+      "path": "/mobile/session-action",
+      "body": {
+        "action": "clear_attention"
+      },
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "attention.clear.unknown-session",
+      "method": "POST",
+      "path": "/mobile/session-action",
+      "body": {
+        "sessionID": "conformance-unknown",
+        "action": "clear_attention"
+      },
+      "expected": {
+        "native": 404,
+        "tui": 404
+      }
+    },
+    {
+      "id": "attention.clear.valid",
+      "method": "POST",
+      "path": "/mobile/session-action",
+      "body": {
+        "sessionID": "conformance-session",
+        "action": "clear_attention"
+      },
+      "expected": {
+        "native": 200,
+        "tui": 200
+      }
+    },
+    {
       "id": "mark-read.missing-session",
       "method": "POST",
       "path": "/mobile/mark-read",

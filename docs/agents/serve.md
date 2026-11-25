@@ -255,6 +255,16 @@ auto-stop skips <id>: unread attention (waiting on the user; never
 auto-stopped unseen)` / `no resumable conversation …` / `idle for less than
 the cutoff` / `pinned` / …), so "why did this never stop" is one grep.
 
+### Clear attention (protocol minor 27)
+
+`session.attention.clear` uses `POST /mobile/session-action` with
+`sessionID` and `action: "clear_attention"`. The Host clears the current
+menu flag and dismisses hook or program attention already recorded for the
+current runtime launch. Later reports can raise attention again. A pending
+MCP approval involving the Session returns `409` and stays pending until
+answered explicitly. The dismissal sends no terminal input and records no
+completion.
+
 ### Session receipts and completion notifications (protocol minor 26)
 
 `POST /mobile/mark-unread` (`session.mark_unread`) accepts `sessionID`

@@ -309,6 +309,14 @@ fn derive_status_with_source(
     now: SystemTime,
     menu_attention_detection: bool,
 ) -> (Status, StatusSource) {
+    let dismissal = running
+        .then(|| {
+            unpeel_core::session_ops::AttentionDismissal::load(
+                dir,
+                manifest.runtime_launch_generation,
+            )
+        })
+        .flatten();
     // The hook engine keeps observing even while a program report wins, so
     // it holds current state the moment the program clears its records.
     let derived = derive_hook_or_screen_status(
@@ -318,9 +326,18 @@ fn derive_status_with_source(
         dir,
         now,
         menu_attention_detection,
+        dismissal,
     );
     match manifest.program_status.as_ref().filter(|_| running) {
-        Some(program) => (program_status(program), StatusSource::Program),
+        Some(program) => {
+            let status = program_status(program);
+            let cleared = status == Status::Attention
+                && dismissal.is_some_and(|dismissal| dismissal.covers_unix_ms(program.changed_at));
+            (
+                if cleared { Status::Idle } else { status },
+                StatusSource::Program,
+            )
+        }
         None => derived,
     }
 }
@@ -341,6 +358,7 @@ fn derive_hook_or_screen_status(
     dir: &std::path::Path,
     now: SystemTime,
     menu_attention_detection: bool,
+    dismissal: Option<unpeel_core::session_ops::AttentionDismissal>,
 ) -> (Status, StatusSource) {
     if !running {
         return (Status::Exited, StatusSource::None);
@@ -443,6 +461,9 @@ fn derive_hook_or_screen_status(
                 manifest.runtime_launched_at,
                 manifest.runtime_launch_generation,
             );
+        }
+        if let Some(dismissal) = dismissal {
+            engine.dismiss_attention(id, dismissal);
         }
         if engine.is_latched(id) {
             // Permission UIs repaint too. Before interpreting changed text as

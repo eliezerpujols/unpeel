@@ -120,7 +120,7 @@ fn real_gateway_bootstraps_pages_output_and_dispatches_concurrently() {
         completion_dir.join("manifest.json"),
         br#"{
           "session":{"id":"s2","project_id":"p1","label":"Claude","command":"claude","created_at":1},
-          "cwd":"/tmp","state":"running","runtime_launch_generation":1
+          "cwd":"/tmp","state":"running","runtime_launch_generation":1,"menu_prompt_active":true
         }"#,
     )
     .unwrap();
@@ -326,6 +326,24 @@ fn real_gateway_bootstraps_pages_output_and_dispatches_concurrently() {
     );
     assert_eq!(
         session_row(&completed, "s2")["completionNotificationAtUnixMs"],
+        completed_at
+    );
+    assert_eq!(session_row(&completed, "s2")["activity"], "blocked");
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        request(18, "POST", "/mobile/session-action"),
+        serde_json::json!({ "sessionID": "s2", "action": "clear_attention" }),
+    );
+    let dismissed = rpc(
+        &mut stdin,
+        &mut stdout,
+        request(19, "GET", "/mobile/bootstrap"),
+        serde_json::Value::Null,
+    );
+    assert_eq!(session_row(&dismissed, "s2")["activity"], "idle");
+    assert_eq!(
+        session_row(&dismissed, "s2")["completionNotificationAtUnixMs"],
         completed_at
     );
 

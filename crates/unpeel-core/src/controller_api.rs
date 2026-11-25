@@ -283,6 +283,8 @@ pub enum ControllerSessionAction {
     /// Replace the host in place, keeping the Session id (`session.reload`):
     /// stops a live host first, then relaunches the same command.
     Reload,
+    /// Dismiss the current activity badge (`session.attention.clear`).
+    ClearAttention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +301,7 @@ pub enum ControllerEffectError {
     SessionNotRunning,
     SessionStillRunning,
     AgentNotRestartable,
+    PendingApproval,
     Failed(String),
 }
 
@@ -969,6 +972,9 @@ pub fn execute_headless_session_action(
             SESSION_CREATE_INITIAL_ROWS,
         )
         .map(|_| ()),
+        ControllerSessionAction::ClearAttention => {
+            session_ops::clear_attention(&request.session_id)
+        }
     };
     result.map_err(|message| match request.action {
         ControllerSessionAction::RestartAgent | ControllerSessionAction::ResumeAgent => {
@@ -1222,6 +1228,7 @@ fn run_session_action(
             Some("resume_agent") => ControllerSessionAction::ResumeAgent,
             Some("remove") => ControllerSessionAction::Remove,
             Some("reload") => ControllerSessionAction::Reload,
+            Some("clear_attention") => ControllerSessionAction::ClearAttention,
             _ => return Err(ControllerApiError::new(400, "request failed")),
         },
     };
@@ -1242,6 +1249,9 @@ fn run_session_action(
             ControllerEffectError::SessionStillRunning => {
                 ControllerApiError::new(409, format!("Session is still running: {session_id}"))
             }
+            ControllerEffectError::PendingApproval => {
+                ControllerApiError::new(409, "Session has a pending MCP approval")
+            }
             ControllerEffectError::AgentNotRestartable => {
                 let verb = if action == ControllerSessionAction::ResumeAgent {
                     "resume"
@@ -1251,17 +1261,6 @@ fn run_session_action(
                 ControllerApiError::new(409, format!("No managed agent to {verb}: {session_id}"))
             }
             ControllerEffectError::Failed(message) => {
-                log::warn!(
-                    "controller {} effect failed for {session_id}: {message}",
-                    match action {
-                        ControllerSessionAction::Stop => "stop",
-                        ControllerSessionAction::Restart => "restart",
-                        ControllerSessionAction::RestartAgent => "restart agent",
-                        ControllerSessionAction::ResumeAgent => "resume agent",
-                        ControllerSessionAction::Remove => "remove",
-                        ControllerSessionAction::Reload => "reload",
-                    }
-                );
                 let verb = match action {
                     ControllerSessionAction::Stop => "stop",
                     ControllerSessionAction::Restart => "restart",
@@ -1269,7 +1268,9 @@ fn run_session_action(
                     ControllerSessionAction::ResumeAgent => "resume agent",
                     ControllerSessionAction::Remove => "remove",
                     ControllerSessionAction::Reload => "reload",
+                    ControllerSessionAction::ClearAttention => "clear attention for",
                 };
+                log::warn!("controller {verb} effect failed for {session_id}: {message}");
                 // Carry the Host's reason: a Controller cannot tell a dead
                 // host from a corrupt Session from the verb alone (#18).
                 ControllerApiError::new(

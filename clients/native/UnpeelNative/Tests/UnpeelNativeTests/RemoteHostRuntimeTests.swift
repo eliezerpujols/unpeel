@@ -7,7 +7,7 @@ import UnpeelShared
 
 @MainActor
 final class RemoteHostRuntimeTests: XCTestCase {
-    func testSessionMenuReadReceiptsAndNotifyRouteToEveryNonLocalHost() async throws {
+    func testSessionMenuActionsRouteToEveryNonLocalHost() async throws {
         let home = "/tmp/parity-session-menu"
         let scopes: [SelectedHostScope] = [
             .localWorkspace(home: home, name: "Host"),
@@ -37,7 +37,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
             let session = makeSession(id: sessionID, capabilities: provider)
             await backend.resolveBootstrap(.success(makeSnapshot(capabilities: [
                 "host.bootstrap", "session.output.read", "session.mark_read", "session.mark_unread",
-                "session.notify_when_done.set",
+                "session.notify_when_done.set", "session.attention.clear",
             ], sessions: [session])))
             await waitUntil { runtime.connectionState == .connected(name: "Host") }
             for unread in [true, false] {
@@ -62,13 +62,27 @@ final class RemoteHostRuntimeTests: XCTestCase {
                 supportsOperation: false, capabilities: session.capabilities
             ))
             try await runtime.setNotifyWhenDone(sessionID, enabled: true)
+            let canClear = runtime.supportsHostOperation(RemoteHostRuntime.HostOperation.attentionClear)
+            XCTAssertTrue(UnpeelStore.sessionAttentionClearAvailable(
+                scope: scope, supportsOperation: canClear, hasPendingApproval: false
+            ))
+            XCTAssertFalse(UnpeelStore.sessionAttentionClearAvailable(
+                scope: scope, supportsOperation: canClear, hasPendingApproval: true
+            ))
+            XCTAssertFalse(UnpeelStore.sessionAttentionClearAvailable(
+                scope: scope, supportsOperation: false, hasPendingApproval: false
+            ))
+            try await runtime.clearSessionAttention(sessionID)
             await waitUntil { await backend.effectCalls.count == 2 }
             let receipts = await backend.effectCalls
             XCTAssertEqual(receipts, [.markUnread(sessionID: sessionID), .markRead(sessionID: sessionID)])
             let organization = await backend.organizationCalls
-            XCTAssertEqual(organization, ["notify:session:true"])
+            XCTAssertEqual(organization, ["notify:session:true", "clear-attention:session"])
             runtime.disconnect()
         }
+        XCTAssertTrue(UnpeelStore.sessionAttentionClearAvailable(
+            scope: .local, supportsOperation: false, hasPendingApproval: false
+        ))
     }
 
     /// The Link/Tailscale hint for a paired Mac that Direct cannot reach:
@@ -3523,6 +3537,11 @@ private actor ControlledRemoteBackend: NativeRemoteBackendProtocol {
     func stopSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {
         organizationCalls.append("stop:\(sessionID)")
         return NativeRemoteEffectReceipt(requestID: 904)
+    }
+
+    func clearSessionAttention(sessionID: String) async throws -> NativeRemoteEffectReceipt {
+        organizationCalls.append("clear-attention:\(sessionID)")
+        return NativeRemoteEffectReceipt(requestID: 911)
     }
 
     func removeSession(sessionID: String) async throws -> NativeRemoteEffectReceipt {

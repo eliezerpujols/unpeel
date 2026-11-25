@@ -185,6 +185,7 @@ protocol NativeRemoteBackendProtocol: Sendable {
     func setSessionProject(sessionID: String, projectID: String) async throws
         -> NativeRemoteEffectReceipt
     func stopSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
+    func clearSessionAttention(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func removeSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func restartSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
     func reloadSession(sessionID: String) async throws -> NativeRemoteEffectReceipt
@@ -1243,6 +1244,14 @@ final class NativeRemoteBackend: @unchecked Sendable {
             sessionID: sessionID,
             operation: "session stop",
             call: unpeel_native_bridge_remote_session_stop
+        )
+    }
+
+    func clearSessionAttention(sessionID: String) async throws -> NativeRemoteEffectReceipt {
+        try await performSessionEffect(
+            sessionID: sessionID,
+            operation: "clear session attention",
+            call: unpeel_native_bridge_remote_session_attention_clear
         )
     }
 
