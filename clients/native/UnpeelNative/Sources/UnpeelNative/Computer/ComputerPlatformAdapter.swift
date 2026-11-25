@@ -14,6 +14,7 @@ final class ComputerPlatformAdapter {
 
     private let input = ComputerInput()
     private var frames: [String: ComputerScreenshotGeometry] = [:]
+    private var cursorPoints: [String: CGPoint] = [:]
     private var actionInProgress = false
     private var tasks: [UUID: Task<Success, Error>] = [:]
     private var buttonHold: (target: ComputerTarget, activity: ComputerControl.Activity)?
@@ -25,9 +26,7 @@ final class ComputerPlatformAdapter {
 
     private func stop() {
         for task in tasks.values { task.cancel() }
-        if let pid = buttonHold?.target.pid {
-            input.releaseLeftButton(to: pid)
-        }
+        input.releaseLeftButton()
         buttonHold = nil
         control.show(nil)
     }
@@ -51,12 +50,13 @@ final class ComputerPlatformAdapter {
 
     private enum Recipient {
         case keyboard(ComputerTarget)
-        case pointer(ComputerTarget, CGPoint, end: CGPoint? = nil)
+        case pointer(ComputerPointerTarget, CGPoint, end: CGPoint? = nil)
         case launch(ComputerApps.Launch)
 
         var target: ComputerTarget {
             switch self {
-            case let .keyboard(target), let .pointer(target, _, _): target
+            case let .keyboard(target): target
+            case let .pointer(target, _, _): target.app
             case let .launch(launch): launch.target
             }
         }
@@ -73,11 +73,12 @@ final class ComputerPlatformAdapter {
         var width: Int?
         var height: Int?
         var scale: CGFloat?
+        var display: Int?
         var coordinate: [Int]?
         var frontmostApp: ComputerApps.App?
 
         enum CodingKeys: String, CodingKey {
-            case ok, width, height, scale, coordinate
+            case ok, width, height, scale, coordinate, display
             case screenshotPath = "screenshot_path"
             case frontmostApp = "frontmost_app"
         }
@@ -90,10 +91,11 @@ final class ComputerPlatformAdapter {
         let reason: String?
         let screenRecording: Bool
         let accessibility: Bool
+        let displays: [ComputerDisplays.Display]
         let frontmostApp: ComputerApps.App?
 
         enum CodingKeys: String, CodingKey {
-            case ok, available, ready, reason, accessibility
+            case ok, available, ready, reason, accessibility, displays
             case screenRecording = "screen_recording"
             case frontmostApp = "frontmost_app"
         }
@@ -121,6 +123,7 @@ final class ComputerPlatformAdapter {
             reason: missing.isEmpty ? nil : missing.joined(separator: " "),
             screenRecording: screenRecording,
             accessibility: accessibility,
+            displays: ComputerDisplays.active(),
             frontmostApp: ComputerApps.frontmost
         ))
     }
@@ -133,6 +136,9 @@ final class ComputerPlatformAdapter {
         do {
             let request = try parsed.get()
             try control.requireRunning()
+            if let index = request.displayIndex {
+                _ = try ComputerDisplays.select(index, previousID: nil, from: ComputerDisplays.active())
+            }
             let recipient = try recipient(for: request)
             return encode(Resolution(
                 target: recipient?.target,
@@ -190,8 +196,10 @@ final class ComputerPlatformAdapter {
             throw ComputerError(ComputerPermissions.screenRecordingMessage)
         }
         let recipient = try recipient(for: request, performing: true)
+        let postingPointerInput = recipient?.points != nil
+        if postingPointerInput { control.setPointerDelivery(true) }
+        defer { if postingPointerInput { control.setPointerDelivery(false) } }
         var response = Success()
-        var displayID = CGMainDisplayID()
         var region: CGRect?
         if let recipient {
             try authorize(request, target: recipient.target)
@@ -209,10 +217,11 @@ final class ComputerPlatformAdapter {
             case let .zoom(pixels):
                 let frame = try currentFrame(for: request.sessionID)
                 region = try frame.screenRegion(for: pixels)
-                displayID = frame.displayID
             case .cursorPosition:
                 let frame = try currentFrame(for: request.sessionID)
-                response.coordinate = ComputerPixelCoordinate.rounded(frame.pixelPoint(for: try input.cursorPosition()))
+                response.coordinate = ComputerPixelCoordinate.rounded(
+                    frame.pixelPoint(for: try cursorPoint(for: request.sessionID))
+                )
             default:
                 break
             }
@@ -224,14 +233,25 @@ final class ComputerPlatformAdapter {
                     // CGEvent delivery and the following frame are asynchronous.
                     try await Task.sleep(for: .milliseconds(125))
                 }
+                if postingPointerInput { control.setPointerDelivery(false) }
                 try control.requireRunning(generation: generation)
-                let geometry = try await ComputerScreenshot.capture(to: path, displayID: displayID, region: region)
+                // Only an explicit screenshot changes the display or resets
+                // it to main. Returned frames stay on the established display.
+                let previousID = request.action == .screenshot ? nil : frames[request.sessionID]?.displayID
+                let display = try ComputerDisplays.select(
+                    request.displayIndex, previousID: previousID, from: ComputerDisplays.active()
+                )
+                if region != nil, display.id != previousID {
+                    throw ComputerError("The zoom display is no longer active. Take a new screenshot.")
+                }
+                let geometry = try await ComputerScreenshot.capture(to: path, displayID: display.id, region: region)
                 try control.requireRunning(generation: generation)
                 frames[request.sessionID] = geometry
                 response.screenshotPath = path
                 response.width = geometry.width
                 response.height = geometry.height
                 response.scale = geometry.scale
+                response.display = display.index
             } catch let error where recipient != nil && !(error is CancellationError) {
                 throw ComputerError("The action completed, but the screenshot failed: \(error.localizedDescription)")
             }
@@ -255,24 +275,24 @@ final class ComputerPlatformAdapter {
                 }
                 return resolved
             }
-            return try mapped ?? input.cursorPosition()
+            return try mapped ?? cursorPoint(for: request.sessionID)
         }
         switch request.action {
         case .type, .key:
-            return .keyboard(try ComputerTargetLookup.frontmost())
+            return .keyboard(try ComputerTargetLookup.keyboard(app: request.keyboardApp))
         case let .openApp(name):
             return .launch(try ComputerApps.resolveLaunch(name))
         case let .click(_, _, pixel), let .mouseMove(pixel):
             let position = try point(pixel, resolved: request.screenPoint)
-            return .pointer(try ComputerTargetLookup.at(position), position)
+            return .pointer(try ComputerTargetLookup.pointer(at: position, isClick: request.action.isClick), position)
         case let .leftMouseDown(pixel), let .leftMouseUp(pixel), let .scroll(_, _, pixel):
             let position = try point(pixel, resolved: request.screenPoint)
-            return .pointer(try ComputerTargetLookup.at(position), position)
+            return .pointer(try ComputerTargetLookup.pointer(at: position), position)
         case let .drag(start, end):
             let first = try point(start, resolved: request.screenPoint)
             let last = try point(end, resolved: request.screenEndPoint)
-            let target = try ComputerTargetLookup.at(first)
-            guard target.matches(try ComputerTargetLookup.at(last)) else {
+            let target = try ComputerTargetLookup.pointer(at: first)
+            guard target.app.matches(try ComputerTargetLookup.pointer(at: last).app) else {
                 throw ComputerError("Computer use can only drag within the same app.")
             }
             return .pointer(target, first, end: last)
@@ -314,40 +334,91 @@ final class ComputerPlatformAdapter {
         switch recipient {
         case let .launch(launch):
             try check(launch.target)
-            try await launch.open()
+            try await launch.open(activates: request.activatesApp)
         case let .keyboard(target):
             guard let pid = target.pid else { throw ComputerError("The target app has no process.") }
-            let checkFocus = { try check(ComputerTargetLookup.frontmost()) }
+            let checkKeyboard = { try check(ComputerTargetLookup.keyboard(app: request.keyboardApp)) }
             switch request.action {
-            case let .type(text): try await input.type(text, to: pid, checkFocus: checkFocus)
+            case let .type(text): try await input.type(text, to: pid, checkTarget: checkKeyboard)
             case let .key(key, duration):
-                try checkFocus()
+                try checkKeyboard()
                 try await input.key(key, duration: duration, to: pid)
             default: break
             }
         case let .pointer(target, point, end):
-            guard let pid = target.pid else { throw ComputerError("The target app has no process.") }
-            let checkPoint = { position in try check(ComputerTargetLookup.at(position)) }
-            try checkPoint(point)
-            switch request.action {
-            case let .click(button, count, _): try input.click(button, count: count, at: point)
-            case .mouseMove: try input.move(to: point)
-            case .drag:
-                if let end {
-                    try await input.drag(from: point, to: end, pid: pid, checkPoint: checkPoint)
-                }
-            case .leftMouseDown:
-                try input.pressLeftButton(at: point)
-                buttonHold = (target, activity)
-            case .leftMouseUp:
-                try input.liftLeftButton(at: point)
-                buttonHold = nil
-            case let .scroll(direction, amount, _):
-                try input.scroll(direction, amount: amount, at: point)
-            default: break
+            func checkPoint(_ position: CGPoint) throws {
+                try check(ComputerTargetLookup.pointer(at: position).app)
             }
+            func checkDelivery(afterSystemActivation: Bool) throws {
+                let actual = try ComputerTargetLookup.pointer(at: point, isClick: request.action.isClick)
+                try check(actual.app)
+                let sameDestination = afterSystemActivation
+                    ? actual.window?.id == target.window?.id
+                    : actual.delivery == target.delivery
+                guard sameDestination else {
+                    throw ComputerError("The window under the point changed. Take a new screenshot and retry.")
+                }
+            }
+            try checkDelivery(afterSystemActivation: false)
+            try await postPointer(
+                request, target: target, point: point, end: end, activity: activity,
+                checkDelivery: checkDelivery, checkPoint: checkPoint
+            )
+            cursorPoints[request.sessionID] = end ?? point
         }
         try control.requireRunning(generation: generation)
+    }
+
+    private func postPointer(
+        _ request: ComputerRequest, target: ComputerPointerTarget, point: CGPoint, end: CGPoint?,
+        activity: ComputerControl.Activity, checkDelivery: (Bool) throws -> Void, checkPoint: (CGPoint) throws -> Void
+    ) async throws {
+        let delivery = target.delivery
+        switch request.action {
+        case .mouseMove:
+            // A point on a system surface can still establish the session's
+            // cursor without moving the physical pointer.
+            if delivery.targetsWindow { try input.move(to: point, delivery: delivery) }
+        case .drag, .leftMouseDown, .leftMouseUp:
+            guard delivery.targetsWindow else {
+                throw ComputerError("Dragging or holding a button requires a target window.")
+            }
+            switch request.action {
+            case .drag:
+                if let end {
+                    try await input.drag(from: point, to: end, delivery: delivery, checkPoint: checkPoint)
+                }
+            case .leftMouseDown:
+                try input.pressLeftButton(at: point, delivery: delivery)
+                buttonHold = (target.app, activity)
+            case .leftMouseUp:
+                try input.liftLeftButton(at: point, delivery: delivery)
+                buttonHold = nil
+            default: break
+            }
+        case let .click(button, count, _):
+            if case let .hid(pid, requiresActivation) = delivery {
+                try await input.withHIDPointer(at: point, targetPID: pid, requiresActivation: requiresActivation) {
+                    try checkDelivery(requiresActivation)
+                    try input.click(button, count: count, at: point, delivery: delivery)
+                }
+            } else {
+                try input.click(button, count: count, at: point, delivery: delivery)
+            }
+        case let .scroll(direction, amount, _):
+            guard let pid = target.app.pid else { throw ComputerError("The target app has no process.") }
+            // Quartz wheel events have no AppKit destination window after
+            // postToPid. WindowServer must route them under the cursor.
+            try await input.withHIDPointer(at: point, targetPID: pid) {
+                try checkDelivery(false)
+                try input.scroll(direction, amount: amount, at: point)
+            }
+        default: break
+        }
+    }
+
+    private func cursorPoint(for sessionID: String) throws -> CGPoint {
+        try cursorPoints[sessionID] ?? input.cursorPosition()
     }
 
     private func currentFrame(for sessionID: String) throws -> ComputerScreenshotGeometry {

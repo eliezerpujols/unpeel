@@ -20,6 +20,10 @@ PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgZGL+DwABFAEG1rmmRQAAAABJRU5ErkJggg=="
 )
 FRONTMOST_APP = {"name": "Notes", "bundle_id": "com.apple.Notes"}
+DISPLAYS = [
+    {"index": 0, "width": 1728, "height": 1117, "x": 0, "y": 0, "main": True},
+    {"index": 1, "width": 2560, "height": 1440, "x": -2560, "y": -128, "main": False},
+]
 OFF = "Computer use is turned off in Unpeel Settings ▸ Computer use"
 TOKEN = "test-computer-callback-token-long-enough"
 
@@ -150,12 +154,14 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
             args = envelope["request"]
             value = {"ok": True, "frontmost_app": FRONTMOST_APP}
             if envelope["operation"] == "computer.status":
-                value.update(screen_recording=True, accessibility=True)
+                value.update(screen_recording=True, accessibility=True, displays=DISPLAYS)
             elif envelope["operation"] == "computer.resolve":
                 control = Path(case.home.path("computer-control.json"))
                 value["control_generation"] = json.loads(control.read_text())["generation"] if control.exists() else "initial"
                 if args["action"] in {"left_click", "type"}:
                     value["target"] = {**target, "pid": 42}
+                if args["action"] == "open_app":
+                    value["target"] = {**target, "pid": None}
                 if "coordinate" in args:
                     value["screen_coordinate"] = args["coordinate"]
             elif args["action"] == "cursor_position":
@@ -166,6 +172,10 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                 path = Path(args["screenshot_path"])
                 path.write_bytes(large_png() if args["action"] == "zoom" else PNG)
                 value.update(screenshot_path=str(path), width=1, height=1, scale=1.0)
+                if args["action"] == "open_app" and args.get("activate") is True:
+                    value["frontmost_app"] = target
+                if args["action"] == "screenshot":
+                    value["display"] = args.get("display", 0) if args.get("display", 0) < len(DISPLAYS) else 0
             data = json.dumps(value).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
@@ -189,12 +199,22 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
             case.check("callback registration accepted", code == 200, str(registration))
 
             reply = mcp.call("computer", {"action": "status"})
-            case.check("status returns permission state and app", not reply["result"]["isError"]
-                       and json.loads(mcp.text(reply))["frontmost_app"] == FRONTMOST_APP
-                       and json.loads(mcp.text(reply))["screen_recording"], str(reply))
+            metadata = json.loads(mcp.text(reply))
+            case.check("status returns permission state, app and displays", not reply["result"]["isError"]
+                       and metadata["frontmost_app"] == FRONTMOST_APP
+                       and metadata["screen_recording"] and metadata["displays"] == DISPLAYS, str(reply))
             case.check("status uses the existing empty request contract", calls[-1] == {
                 "version": 1, "operation": "computer.status", "request": {}
             }, str(calls[-1]))
+
+            reply = mcp.call("computer", {"action": "screenshot", "display": 1})
+            case.check("display selection reaches both adapter stages and returns with the image",
+                       not reply["result"]["isError"] and json.loads(mcp.text(reply))["display"] == 1
+                       and [call["request"]["display"] for call in calls[-2:]] == [1, 1], str(reply))
+            reply = mcp.call("computer", {"action": "screenshot", "display": 9})
+            case.check("Host rejects a screenshot when the adapter returned a different display",
+                       reply["result"]["isError"] and "did not capture the requested display" in mcp.text(reply),
+                       str(reply))
 
             select_app({"name": "Safari", "bundle_id": "com.apple.Safari"})
             reply = mcp.call("computer", {"action": "left_click", "coordinate": [0, 1]})
@@ -239,6 +259,32 @@ def exercise_adapter(case, mcp, session_id, client, phone_port, token):
                             "target": {**FRONTMOST_APP, "pid": 42}, "screen_coordinate": [0, 1],
                             "control_generation": "initial"},
             }, str(calls[-1]))
+
+            background = {"name": "TextEdit", "bundle_id": "com.apple.TextEdit"}
+            select_app(background)
+            case.home.write_state({**case.home.state(), "computer_app_approvals": {
+                session_id: {"com.apple.notes": "allow", "com.apple.textedit": "allow"}
+            }})
+            typed = mcp.call("computer", {"action": "type", "text": "background input", "app": background["bundle_id"]})
+            case.check("explicit keyboard app routes by bundle instead of foreground metadata",
+                       not typed["result"]["isError"] and json.loads(mcp.text(typed))["frontmost_app"] == FRONTMOST_APP
+                       and calls[-1]["request"]["target"]["bundle_id"] == background["bundle_id"]
+                       and all(call["request"]["app"] == background["bundle_id"] for call in calls[-2:]), str(typed))
+            wrong = mcp.call("computer", {"action": "type", "text": "hello", "app": "com.apple.Calendar"})
+            case.check("Host rejects an adapter resolving a different keyboard app",
+                       wrong["result"]["isError"] and "did not resolve the requested keyboard app" in mcp.text(wrong)
+                       and calls[-1]["operation"] == "computer.resolve", str(wrong))
+            for activate in [None, True]:
+                args = {"action": "open_app", "text": background["bundle_id"]}
+                if activate is True:
+                    args["activate"] = True
+                opened = mcp.call("computer", args)
+                case.check(f"open_app activates only when requested ({activate})",
+                           not opened["result"]["isError"]
+                           and calls[-1]["request"].get("activate") == activate
+                           and json.loads(mcp.text(opened))["frontmost_app"] == (background if activate else FRONTMOST_APP),
+                           str(opened))
+            select_app(FRONTMOST_APP)
 
             code, listing = client.call(2, "GET", "/mobile/artifacts", query={"session_id": session_id})
             case.check("Host gallery lists the computer screenshot", code == 200

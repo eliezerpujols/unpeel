@@ -4,55 +4,19 @@
 //
 //  Desktop surfaces for pending MCP approvals and the computer-permissions
 //  nudge. Grants have an in-pane card on the Session they belong to.
-//  App-specific computer grants can also show the card without taking focus
-//  from the target app. All prompts are nonmodal.
+//  Computer-use prompts also show the card without taking focus
+//  from the foreground app. All prompts are nonmodal.
 //
 
 import AppKit
 import SwiftUI
 
-/// A reusable floating alert-style panel: titled (so it can become key for
-/// keyboard shortcuts) but with the title bar hidden, floating level so it
-/// stays visible over the app, never modal.
+/// A floating approval or permission panel that preserves the user's focus.
 @MainActor
 final class FloatingPromptPanelController {
-    private var panel: NSPanel?
-    private let preservesFocus: Bool
+    private var panel: NonactivatingPromptPanel?
 
-    init(preservesFocus: Bool = false) {
-        self.preservesFocus = preservesFocus
-    }
-
-    /// Show (or update) the panel with the given content. Activates the app
-    /// and centers the panel when it was not already visible; a visible
-    /// panel keeps its position and just swaps content.
-    func show<Content: View>(_ content: Content) {
-        let root = AnyView(content)
-        if preservesFocus {
-            showWithoutActivation(root)
-            return
-        }
-        if let panel, panel.isVisible {
-            (panel.contentViewController as? NSHostingController<AnyView>)?.rootView = root
-            return
-        }
-        let panel = self.panel ?? makePanel()
-        self.panel = panel
-        panel.contentViewController = NSHostingController(rootView: root)
-        // Get the user's eyes on the prompt: the asking agent's tool call is
-        // blocked until someone answers (~2 minute timeout).
-        NSApp.activate(ignoringOtherApps: true)
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    func dismiss() {
-        panel?.orderOut(nil)
-        panel?.contentViewController = nil
-        panel?.contentView = nil
-    }
-
-    private func showWithoutActivation(_ root: AnyView) {
+    func show<Content: View>(_ root: Content) {
         let panel = self.panel ?? NonactivatingPromptPanel()
         self.panel = panel
         let content = NonactivatingPromptHostingView(rootView: root)
@@ -67,27 +31,16 @@ final class FloatingPromptPanelController {
         panel.orderFrontRegardless()
     }
 
-    private func makePanel() -> NSPanel {
-        let panel = NSPanel(
-            contentRect: .zero,
-            styleMask: [.titled, .fullSizeContentView],
-            backing: .buffered,
-            defer: true
-        )
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        return panel
+    func dismiss() {
+        panel?.orderOut(nil)
+        panel?.contentView = nil
     }
 }
 
 final class NonactivatingPromptPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         isOpaque = false

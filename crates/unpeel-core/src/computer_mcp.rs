@@ -44,7 +44,10 @@ const USAGE: &str = "Control native Mac apps through Unpeel. Use the Unpeel brow
     Use the Unpeel browser and check unfamiliar URLs with the user before opening them.";
 
 const ACTIONS: &[(&str, &str)] = &[
-    ("screenshot", "Capture the current display."),
+    (
+        "screenshot",
+        "Capture the main display or the optional display index from status.",
+    ),
     ("left_click", "Click at coordinate."),
     ("right_click", "Right-click at coordinate."),
     ("middle_click", "Middle-click at coordinate."),
@@ -63,10 +66,10 @@ const ACTIONS: &[(&str, &str)] = &[
         "left_mouse_up",
         "Release the left button at the current cursor position.",
     ),
-    ("type", "Type literal Unicode text."),
+    ("type", "Type literal Unicode text. Optionally target a running app by bundle ID."),
     (
         "key",
-        "Press a key or a combo in text, such as Return or cmd+c.",
+        "Press a key or a combo in text, such as Return or cmd+c. Optionally target a running app by bundle ID.",
     ),
     (
         "hold_key",
@@ -84,9 +87,12 @@ const ACTIONS: &[(&str, &str)] = &[
     ),
     (
         "open_app",
-        "Open or activate the app named in text, by name or bundle ID.",
+        "Open the app named in text without taking focus. Set activate to true to bring it to the foreground.",
     ),
-    ("status", "Check Mac permissions and the frontmost app."),
+    (
+        "status",
+        "Check Mac permissions, the frontmost app, and active displays.",
+    ),
     ("help", "List actions or describe one with help_for."),
 ];
 
@@ -99,9 +105,12 @@ pub(crate) fn tool_definition() -> Value {
             "required": ["action"],
             "properties": {
                 "action": {"type": "string", "enum": ACTIONS.iter().map(|(name, _)| name).collect::<Vec<_>>()},
+                "display": {"type": "integer", "minimum": 0, "description": "Display index from status, for screenshot only"},
                 "coordinate": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
                 "start_coordinate": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2},
                 "text": {"type": "string"},
+                "app": {"type": "string", "description": "Running app bundle ID for key, hold_key, or type"},
+                "activate": {"type": "boolean", "description": "Bring the app to the foreground on open_app if true"},
                 "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
                 "scroll_amount": {"type": "integer", "minimum": 1},
                 "duration": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_DURATION_SECS},
@@ -208,6 +217,12 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
                 return Err("'text' must contain an app name or bundle ID".into());
             }
             request.insert("text".into(), json!(app));
+            if let Some(activate) = arguments.get("activate") {
+                request.insert(
+                    "activate".into(),
+                    json!(activate.as_bool().ok_or("'activate' must be a boolean")?),
+                );
+            }
         }
         "key" | "hold_key" => {
             let keys = required_text(arguments, MAX_KEY_BYTES)?;
@@ -221,9 +236,28 @@ fn validate_arguments(action: &str, arguments: &Value) -> Result<Value, String> 
             }
             request.insert("text".into(), json!(keys));
         }
-        "screenshot" | "left_mouse_down" | "left_mouse_up" | "wait" | "cursor_position"
-        | "status" => {}
+        "screenshot" => {
+            if let Some(display) = arguments.get("display") {
+                request.insert("display".into(), json!(display_index(display)?));
+            }
+        }
+        "left_mouse_down" | "left_mouse_up" | "wait" | "cursor_position" | "status" => {}
         _ => return Err(format!("Unknown computer operation: {action}")),
+    }
+    if matches!(action, "key" | "hold_key" | "type") {
+        if let Some(raw) = arguments.get("app") {
+            let app = raw
+                .as_str()
+                .filter(|id| {
+                    !id.is_empty()
+                        && id.len() <= 255
+                        && id.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+                        })
+                })
+                .ok_or("'app' must be a running app’s bundle ID")?;
+            request.insert("app".into(), json!(app));
+        }
     }
     if matches!(action, "wait" | "hold_key") {
         let duration = arguments
@@ -266,6 +300,13 @@ fn required_text(arguments: &Value, max_len: usize) -> Result<&str, String> {
         .ok_or_else(|| {
             format!("'text' must be a nonempty string of at most {max_len} UTF-8 bytes without NUL")
         })
+}
+
+fn display_index(value: &Value) -> Result<i32, String> {
+    value
+        .as_u64()
+        .and_then(|index| i32::try_from(index).ok())
+        .ok_or_else(|| "'display' must be a nonnegative integer index from computer status".into())
 }
 
 fn positive_integer(arguments: &Value, key: &str) -> Result<i32, String> {
@@ -495,7 +536,7 @@ fn action_log_entry(action: &str, body: &Value, resolution: &Resolution) -> Valu
         ),
         "action": action,
     });
-    for field in ["coordinate", "start_coordinate", "region"] {
+    for field in ["coordinate", "start_coordinate", "region", "display"] {
         if let Some(value) = body.get(field) {
             entry[field] = value.clone();
         }
@@ -555,6 +596,11 @@ pub fn handle_local_call(
     {
         return Err("The Mac app did not identify the target app".into());
     }
+    if let Some(app) = body["app"].as_str() {
+        if !target.is_some_and(|target| target.bundle_id.eq_ignore_ascii_case(app)) {
+            return Err("The Mac app did not resolve the requested keyboard app".into());
+        }
+    }
     let control = ControlGeneration::new(resolution.control_generation.clone());
     control.require_current()?;
     session_artifacts::append_computer_action(
@@ -591,7 +637,14 @@ pub fn handle_local_call(
     } else {
         None
     };
+    let requested_display = body.get("display").and_then(Value::as_i64);
     let result = call_adapter(PERFORM_OPERATION, body)?;
+    if result["ok"].as_bool() == Some(true)
+        && requested_display.is_some()
+        && result["display"].as_i64() != requested_display
+    {
+        return Err("Mac app did not capture the requested display".into());
+    }
     perform_result(action, result, path.as_deref())
 }
 
@@ -607,6 +660,9 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
         metadata["screenshot_path"] = json!(path);
         metadata["width"] = json!(positive_integer(&result, "width")?);
         metadata["height"] = json!(positive_integer(&result, "height")?);
+        if let Some(display) = result.get("display") {
+            metadata["display"] = json!(display_index(display)?);
+        }
         metadata["scale"] = json!(result["scale"]
             .as_f64()
             .filter(|scale| *scale > 0.0)
@@ -902,6 +958,62 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_app_and_open_activation_are_strict_and_action_specific() {
+        let app = "com.apple.TextEdit";
+        for action in ["type", "key", "hold_key"] {
+            let result =
+                validate_arguments(action, &json!({"app": app, "text": "space", "duration": 1}))
+                    .unwrap();
+            assert_eq!(result["app"], app);
+            assert!(result.get("activate").is_none());
+        }
+        assert!(validate_arguments("type", &json!({"app": "Text Edit", "text": "hello"})).is_err());
+        assert!(validate_arguments("key", &json!({"app": true, "text": "space"})).is_err());
+        for activate in [true, false] {
+            let result = validate_arguments(
+                "open_app",
+                &json!({"activate": activate, "text": app, "app": app}),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                json!({"action": "open_app", "activate": activate, "text": app})
+            );
+        }
+        assert!(validate_arguments("open_app", &json!({"activate": "true", "text": app})).is_err());
+        assert!(validate_arguments("open_app", &json!({"text": app}))
+            .unwrap()
+            .get("activate")
+            .is_none());
+        assert_eq!(
+            validate_arguments("left_click", &json!({"app": app, "coordinate": [1, 2]})).unwrap(),
+            json!({"action": "left_click", "coordinate": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn only_screenshot_forwards_a_valid_display_index() {
+        assert_eq!(
+            validate_arguments("screenshot", &json!({"display": 1})).unwrap(),
+            json!({"action": "screenshot", "display": 1})
+        );
+        assert_eq!(
+            validate_arguments("zoom", &json!({"display": 1, "region": [0, 0, 2, 2]})).unwrap(),
+            json!({"action": "zoom", "region": [0, 0, 2, 2]})
+        );
+        for display in [
+            json!(-1),
+            json!(1.5),
+            json!("1"),
+            json!(true),
+            Value::Null,
+            json!(i64::MAX),
+        ] {
+            assert!(validate_arguments("screenshot", &json!({"display": display})).is_err());
+        }
+    }
+
+    #[test]
     fn computer_screenshot_names_are_unique_and_timestamped() {
         let first = screenshot_filename();
         let second = screenshot_filename();
@@ -988,6 +1100,7 @@ mod tests {
             "width": 1456,
             "height": 816,
             "scale": 2.0,
+            "display": 1,
             "frontmost_app": {"name": "Notes", "bundle_id": "com.apple.Notes"},
         });
         assert_eq!(

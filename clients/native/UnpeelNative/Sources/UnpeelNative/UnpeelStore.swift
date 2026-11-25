@@ -731,7 +731,8 @@ final class UnpeelStore: ObservableObject {
     var hostMcpApprovalAnswersInFlight: Set<String> = []
     /// The floating panel for the computer-permissions (TCC) nudge.
     let computerNudgePanel = FloatingPromptPanelController()
-    let computerAppApprovalPanel = FloatingPromptPanelController(preservesFocus: true)
+    let computerApprovalPanel = FloatingPromptPanelController()
+    var presentedComputerApprovalID: String?
     /// Missing-permission sets (sorted, "|"-joined) already alerted about this
     /// app run — the grant-prompt nudge fires once per distinct set.
 

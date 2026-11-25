@@ -31,6 +31,11 @@ struct ComputerRequest: Equatable {
         case openApp(String)
         case status
 
+        var isClick: Bool {
+            if case .click = self { return true }
+            return false
+        }
+
         var needsAccessibility: Bool {
             switch self {
             case .click, .mouseMove, .drag, .leftMouseDown, .leftMouseUp, .type, .key, .scroll:
@@ -50,6 +55,9 @@ struct ComputerRequest: Equatable {
     let screenEndPoint: CGPoint?
     let action: Action
     let screenshotPath: String?
+    let displayIndex: Int?
+    let keyboardApp: String?
+    let activatesApp: Bool
 
     static func parse(_ fields: [String: Any], resolving: Bool = false) -> Result<Self, ComputerError> {
         do {
@@ -86,6 +94,32 @@ struct ComputerRequest: Equatable {
             path = string
         } else {
             path = nil
+        }
+
+        if ["key", "hold_key", "type"].contains(name), let raw = fields["app"] {
+            guard let app = raw as? String, !app.isEmpty, app.utf8.count <= 255,
+                  app.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
+                      || (97...122).contains($0) || [45, 46, 95].contains($0) })
+            else { throw ComputerError("app must be a running app’s bundle ID.") }
+            keyboardApp = app
+        } else {
+            keyboardApp = nil
+        }
+        if name == "open_app", let raw = fields["activate"] {
+            guard let flag = raw as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID()
+            else { throw ComputerError("activate must be a boolean.") }
+            activatesApp = flag.boolValue
+        } else {
+            activatesApp = false
+        }
+
+        if name == "screenshot", let raw = fields["display"] {
+            guard let value = Self.number(raw), let index = Int32(exactly: value), index >= 0 else {
+                throw ComputerError("display must be a nonnegative integer index from computer status.")
+            }
+            displayIndex = Int(index)
+        } else {
+            displayIndex = nil
         }
 
         switch name {

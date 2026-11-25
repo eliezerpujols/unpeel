@@ -49,8 +49,6 @@ struct PendingMcpApproval: Identifiable, Equatable {
     let requestedAt: Date
     let allowsOnce: Bool
 
-    var isComputerAppGrant: Bool { kind == .computer && !allowsOnce }
-
     /// Session that should show the in-pane prompt and the attention badge.
     /// Write grants present on the destination so the user sees where input
     /// would land; other kinds have no destination and present on the caller.
@@ -183,7 +181,7 @@ extension UnpeelStore {
             owned.insert(item.id)
             pendingMcpApprovals.append(approval)
             notifyMcpApprovalRequested(approval)
-            if !didReveal && (scoped || !approval.isComputerAppGrant) {
+            if !didReveal && approval.kind != .computer {
                 revealSessionForMcpApproval(approval)
                 didReveal = true
             }
@@ -192,24 +190,32 @@ extension UnpeelStore {
             scopedHostMcpApprovalIDs = owned
         } else {
             hostOwnedMcpApprovalIDs = owned
-            refreshComputerAppApproval()
         }
+        refreshComputerApproval()
     }
 
-    private func refreshComputerAppApproval() {
+    private func refreshComputerApproval() {
         guard let approval = pendingMcpApprovals.first(where: {
-            $0.isComputerAppGrant && hostOwnedMcpApprovalIDs.contains($0.id)
+            $0.kind == .computer
+                && (hostOwnedMcpApprovalIDs.contains($0.id) || scopedHostMcpApprovalIDs.contains($0.id))
                 && !hostMcpApprovalAnswersInFlight.contains($0.id)
         }) else {
-            computerAppApprovalPanel.dismiss()
+            dismissComputerApproval()
             return
         }
+        guard presentedComputerApprovalID != approval.id else { return }
+        presentedComputerApprovalID = approval.id
         let message = mcpApprovalMessage(approval)
-        computerAppApprovalPanel.show(
+        computerApprovalPanel.show(
             McpApprovalCard(approval: approval, title: message.title, message: message.body) { [weak self] approved, remember in
                 self?.answerMcpApproval(id: approval.id, approved: approved, remember: remember)
             }
         )
+    }
+
+    private func dismissComputerApproval() {
+        presentedComputerApprovalID = nil
+        computerApprovalPanel.dismiss()
     }
 
     /// Answer a pending approval by id. Returns false when the id is no
@@ -220,11 +226,13 @@ extension UnpeelStore {
         guard let index = pendingMcpApprovals.firstIndex(where: { $0.id == id }) else {
             return false
         }
+        let isComputer = pendingMcpApprovals[index].kind == .computer
         if scopedHostMcpApprovalIDs.contains(id) {
             // The selected scope's worker owns this prompt: answer through
             // its runtime (capability-gated `approval.answer`), and let the
             // next bootstrap confirm the row is gone.
             guard hostMcpApprovalAnswersInFlight.insert(id).inserted else { return true }
+            if isComputer { dismissComputerApproval() }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
@@ -240,13 +248,13 @@ extension UnpeelStore {
                     )
                 }
                 self.hostMcpApprovalAnswersInFlight.remove(id)
+                if isComputer { self.refreshComputerApproval() }
             }
             return true
         }
         if hostOwnedMcpApprovalIDs.contains(id) {
             guard hostMcpApprovalAnswersInFlight.insert(id).inserted else { return true }
-            let isComputerAppGrant = pendingMcpApprovals[index].isComputerAppGrant
-            if isComputerAppGrant { computerAppApprovalPanel.dismiss() }
+            if isComputer { dismissComputerApproval() }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 var backend: NativeRemoteBackend?
@@ -270,7 +278,7 @@ extension UnpeelStore {
                 }
                 await backend?.close()
                 self.hostMcpApprovalAnswersInFlight.remove(id)
-                if isComputerAppGrant { self.refreshComputerAppApproval() }
+                if isComputer { self.refreshComputerApproval() }
             }
             return true
         }

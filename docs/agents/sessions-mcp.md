@@ -197,11 +197,31 @@ Registration per provider (all through the explicitly installed integration,
 Use `computer` for native Mac apps and the [Unpeel `browser` tool](browser-mcp.md)
 for websites and localhost URLs. An agent's built-in browser and computer-use
 tools fail inside an Unpeel terminal. Call `computer` with `{"action":"help"}`
-for the supported actions or `{"action":"status"}` to check permissions and the
-frontmost app. Take a screenshot before the first step and use each action's
-returned screenshot to check the result. Take a new one if the action returns
-none. Click coordinates use the latest image's pixels with the origin at the
-top left.
+for the supported actions or `{"action":"status"}` to check permissions, the
+frontmost app, and active displays. `status` lists each display's index,
+origin and size in Quartz screen points, and whether it is the main display.
+Capture a specific display with `{"action":"screenshot","display":1}`. Omit
+`display` to capture the main display. Follow-up action screenshots and zooms
+stay on the selected display while it remains active. Click coordinates use
+the latest image's pixels with the origin at the top left.
+
+`open_app` launches an app in the background by default. Pass
+`{"action":"open_app","text":"TextEdit","activate":true}` to intentionally
+bring it forward. For keyboard input, `key`, `hold_key`, and `type` accept
+an optional running app bundle ID, such as
+`{"action":"type","app":"com.apple.TextEdit","text":"Hello"}`. Omitting
+`app` targets the current foreground app. Background input requires an
+existing window or control that accepts it. Some macOS shortcuts, including
+menu commands in apps such as TextEdit, only work in the foreground.
+
+Pointer actions use the visible window under the given point. The session
+keeps its own pointer position without moving the physical cursor for
+window-targeted events. Scrolling, system menus, and a background TextEdit
+editor can require WindowServer to route input through the physical pointer.
+That fallback can move the
+pointer or focus briefly, then restores both where macOS allows it. A user switch to a
+different app or a physical pointer move takes precedence. Dragging and
+holding a button require a target window.
 
 Never send money, trade, buy, or transfer funds. Ask the user to do it. Never
 click links in emails or messages. Use the Unpeel browser and check unfamiliar
@@ -238,8 +258,8 @@ Screen Recording and Accessibility. Open a fresh shell session and copy its
 ID with `printenv UNPEEL_SESSION_ID`. In macOS Terminal, run the following from
 the checkout with the home printed by the launcher and that session ID.
 The shell needs `jq` and macOS Automation permission for TextEdit. Approve
-TextEdit in Unpeel Dev when prompted and keep its test window on the main
-display while the check runs.
+TextEdit in Unpeel Dev when prompted. The check works with the scratch
+window on any active display.
 
 ```sh
 UNPEEL_HOME='/tmp/up-computer.XXXXXX' UNPEEL_SESSION_ID='session ID' \
@@ -248,8 +268,9 @@ UNPEEL_HOME='/tmp/up-computer.XXXXXX' UNPEEL_SESSION_ID='session ID' \
 ```
 
 The [verification script](../../scripts/verify-computer.sh) exercises
-`open_app`, screenshot, left-click, typing, and a key press. It checks the
-resulting text, closes the scratch document without saving, and verifies the
+background and explicit foreground `open_app`, screenshots on every active display, left-click, and typing after
+a keyboard shortcut. It checks the resulting text, closes the scratch
+document without saving, and verifies the
 read-only error when `computer` tries to open Safari.
 It skips when the Host or its Mac adapter is unavailable or permissions are
 missing. Screenshots and the TextEdit approval stay in the isolated workspace.

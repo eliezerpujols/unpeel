@@ -70,12 +70,53 @@ end run
 APPLESCRIPT
 }
 
+screenshot_dir="$UNPEEL_HOME/app-sessions/$UNPEEL_SESSION_ID/artifacts/computer/screenshots"
+frame() {
+  local action=$1 result screenshot_path screenshot_parent
+  shift
+  result=$(computer "$action" "$@" 2>&1) || fail "computer $action: $result"
+  screenshot_path=$(jq -er 'select(.ok == true and .width > 0 and .height > 0) | .screenshot_path | strings' <<< "$result") \
+    || fail "computer $action did not return a screenshot: $result"
+  [[ "$screenshot_path" == *.png && -s "$screenshot_path" ]] \
+    || fail "Missing PNG screenshot: $screenshot_path"
+  screenshot_parent=$(cd -- "$(dirname -- "$screenshot_path")" && pwd -P)
+  [[ "$screenshot_parent" == "$screenshot_dir" ]] || fail "Unexpected screenshot path: $screenshot_path"
+  printf '%s\n' "$result"
+}
+
+main_display=$(jq -er '.displays[] | select(.main == true) | .index' <<< "$status") \
+  || fail "computer status did not list a main display."
+default_frame=$(frame screenshot)
+jq -e --argjson index "$main_display" '.display == $index' <<< "$default_frame" >/dev/null \
+  || fail "The default screenshot did not capture the main display."
+pass "default screenshot saved the main display as a session artifact"
+
+while IFS= read -r index; do
+  shot=$(frame screenshot "display=$index")
+  jq -e --argjson index "$index" '.display == $index' <<< "$shot" >/dev/null \
+    || fail "Expected a screenshot of display $index: $shot"
+  pass "captured display $index"
+done < <(jq -r '.displays[] | .index' <<< "$status")
+
+# Test launch before AppleScript or opening the scratch document can start TextEdit.
+previous_app=$(jq -er '.frontmost_app.bundle_id // empty' <<< "$status")
+background=$(frame open_app text=com.apple.TextEdit)
+jq -e --arg app "$previous_app" '.frontmost_app.bundle_id == $app' <<< "$background" >/dev/null \
+  || fail "Background open changed the foreground app: $background"
+pass "open_app left the foreground app unchanged"
+
+opened=$(frame open_app text=com.apple.TextEdit activate=true)
+jq -e '.frontmost_app.bundle_id == "com.apple.TextEdit"' <<< "$opened" >/dev/null \
+  || fail "open_app did not activate TextEdit: $opened"
+pass "open_app activated TextEdit"
+
 if ! automation=$(textedit probe 2>&1); then
   case "$automation" in
     *"(-1743)"*) skip "Allow this shell to control TextEdit in macOS Privacy & Security ▸ Automation." ;;
     *) fail "Could not query TextEdit: $automation" ;;
   esac
 fi
+
 
 scratch=$(mktemp -d /private/tmp/up-computer-doc.XXXXXX)
 document="$scratch/$(basename "$scratch").txt"
@@ -91,52 +132,43 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 : > "$document"
 
-screenshot_dir="$UNPEEL_HOME/app-sessions/$UNPEEL_SESSION_ID/artifacts/computer/screenshots"
-frame() {
-  local action=$1 result screenshot_path screenshot_parent
-  shift
-  result=$(computer "$action" "$@" 2>&1) || fail "computer $action: $result"
-  screenshot_path=$(jq -er 'select(.ok == true and .width > 0 and .height > 0) | .screenshot_path | strings' <<< "$result") \
-    || fail "computer $action did not return a screenshot: $result"
-  [[ "$screenshot_path" == *.png && -s "$screenshot_path" ]] \
-    || fail "Missing PNG screenshot: $screenshot_path"
-  screenshot_parent=$(cd -- "$(dirname -- "$screenshot_path")" && pwd -P)
-  [[ "$screenshot_parent" == "$screenshot_dir" ]] || fail "Unexpected screenshot path: $screenshot_path"
-  printf '%s\n' "$result"
-}
-
-frame screenshot >/dev/null
-pass "screenshot saved a session artifact"
 open -g -b com.apple.TextEdit "$document"
-opened=$(frame open_app text=com.apple.TextEdit)
-jq -e '.frontmost_app.bundle_id == "com.apple.TextEdit"' <<< "$opened" >/dev/null \
-  || fail "open_app did not activate TextEdit: $opened"
-pass "open_app activated TextEdit"
-
-display=$(osascript -l JavaScript <<'JXA'
-ObjC.import('AppKit');
-const size = $.NSScreen.screens.objectAtIndex(0).frame.size;
-JSON.stringify([size.width, size.height]);
-JXA
-)
-bounds=$(textedit bounds) || fail "Could not locate the scratch TextEdit window."
-# Intersect the editable interior with the main display, then convert points
-# to pixels using the screenshot returned by open_app.
-coordinate=$(jq -ec --arg bounds "$bounds" --argjson display "$display" '
+frame open_app text=com.apple.TextEdit activate=true >/dev/null
+# Opening the document and making its window key can finish on different turns.
+for ((attempt = 0; attempt < 20; attempt++)); do
+  if bounds=$(textedit bounds 2>/dev/null); then break; fi
+  sleep 0.1
+done
+[[ -n "$bounds" ]] || fail "Could not locate the scratch TextEdit window."
+# Choose the display with the largest portion of the editable window and use
+# its Quartz origin and screenshot size to convert points to image pixels.
+target=$(jq -ec --arg bounds "$bounds" '
   ($bounds | split(",") | map(tonumber)) as [$left, $top, $right, $bottom]
-  | ([0, $left + 25] | max) as $x0 | ([$display[0], $right - 25] | min) as $x1
-  | ([0, $top + 70] | max) as $y0 | ([$display[1], $bottom - 30] | min) as $y1
-  | select($x1 > $x0 and $y1 > $y0)
-  | [((($x0 + $x1) / 2 * .width / $display[0]) | floor),
-     ((($y0 + $y1) / 2 * .height / $display[1]) | floor)]
-' <<< "$opened") || fail "Keep the scratch TextEdit window on the main display."
-frame left_click "coordinate=$coordinate" >/dev/null
-pass "left_click in the scratch window"
+  | [.displays[]
+     | ([.x, $left + 25] | max) as $x0 | ([.x + .width, $right - 25] | min) as $x1
+     | ([.y, $top + 70] | max) as $y0 | ([.y + .height, $bottom - 30] | min) as $y1
+     | select($x1 > $x0 and $y1 > $y0)
+     | {index, area: (($x1 - $x0) * ($y1 - $y0)),
+        fraction: [((($x0 + $x1) / 2 - .x) / .width),
+                   ((($y0 + $y1) / 2 - .y) / .height)]}]
+  | max_by(.area) | select(. != null)
+' <<< "$status") || fail "The editable scratch window is outside the listed displays."
+index=$(jq -er '.index' <<< "$target")
+shot=$(frame screenshot "display=$index")
+coordinate=$(jq -ec --argjson target "$target" '
+  [((.width * $target.fraction[0]) | floor), ((.height * $target.fraction[1]) | floor)]
+' <<< "$shot")
+clicked=$(frame left_click "coordinate=$coordinate")
+jq -e --argjson display "$index" '.display == $display and .frontmost_app.bundle_id == "com.apple.TextEdit"' \
+  <<< "$clicked" >/dev/null || fail "left_click changed apps or the active screenshot display: $clicked"
+pass "left_click kept the scratch window frontmost on display $index"
 
-marker="Unpeel computer check"
+marker="Unpeel computer check 🙂"
 contents=$(textedit contents) || fail "The scratch TextEdit document lost focus."
 [[ -z "$contents" ]] || fail "The scratch document should be empty before typing."
-frame type "text=${marker}X" >/dev/null
+# A previous shortcut must not leave Command set on the Unicode events.
+frame key text=cmd+a app=com.apple.TextEdit >/dev/null
+frame type app=com.apple.TextEdit "text=${marker}X" >/dev/null
 [[ "$(textedit contents)" == "${marker}X" ]] || fail "TextEdit did not receive the typed text."
 pass "type inserted the test text"
 frame key text=BackSpace >/dev/null

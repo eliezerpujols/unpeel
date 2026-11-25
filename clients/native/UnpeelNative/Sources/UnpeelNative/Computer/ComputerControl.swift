@@ -123,6 +123,10 @@ final class ComputerControl: ObservableObject {
         updatePill()
     }
 
+    func setPointerDelivery(_ posting: Bool) {
+        pill.setPointerDelivery(posting)
+    }
+
     private func updatePill() {
         let state: ComputerControlPill.State? = if snapshot.paused {
             showsPausePill ? .paused : nil

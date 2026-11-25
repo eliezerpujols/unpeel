@@ -52,6 +52,125 @@ final class ComputerEngineTests: XCTestCase {
         XCTAssertEqual(ComputerControlSnapshot.load(from: file), .unavailable)
     }
 
+    func testOnlyKeyboardActionsAcceptAnExplicitAppAndLaunchIsBackgroundByDefault() throws {
+        let textEdit = "com.apple.TextEdit"
+        for action in ["key", "hold_key", "type"] {
+            let request = try parse(action, ["text": "space", "app": textEdit, "duration": 1]).get()
+            XCTAssertEqual(request.keyboardApp, textEdit)
+            XCTAssertFalse(request.activatesApp)
+        }
+        XCTAssertNil(try parse("left_click", ["app": textEdit, "coordinate": [3, 5]]).get().keyboardApp)
+        XCTAssertThrowsError(try parse("type", ["app": "Text Edit", "text": "test"]).get())
+        XCTAssertFalse(try parse("open_app", ["text": textEdit]).get().activatesApp)
+        XCTAssertFalse(try parse("open_app", ["text": textEdit, "activate": false]).get().activatesApp)
+        XCTAssertTrue(try parse("open_app", ["text": textEdit, "activate": true]).get().activatesApp)
+        XCTAssertThrowsError(try parse("open_app", ["text": textEdit, "activate": "true"]).get())
+        XCTAssertThrowsError(try parse("open_app", ["text": textEdit, "activate": 1]).get())
+    }
+
+    @MainActor
+    func testKeyboardAppRoutingPrefersAnExactOrUnambiguousProcess() throws {
+        XCTAssertEqual(try ComputerTargetLookup.preferredKeyboardPID(matching: [42], frontmost: 25), 42)
+        XCTAssertEqual(try ComputerTargetLookup.preferredKeyboardPID(matching: [42, 51], frontmost: 51), 51)
+        XCTAssertThrowsError(try ComputerTargetLookup.preferredKeyboardPID(matching: [42, 51], frontmost: 25))
+        XCTAssertThrowsError(try ComputerTargetLookup.preferredKeyboardPID(matching: [], frontmost: 25))
+    }
+
+    func testPointerRoutingPrefersWindowsAndUsesHIDForKnownExceptions() {
+        let window = ComputerPointerDelivery.Window(id: 76, bounds: CGRect(x: -800, y: 50, width: 640, height: 360))
+        func route(
+            _ window: ComputerPointerDelivery.Window?, role: String? = nil,
+            app: String = "com.apple.Notes", click: Bool = true, foreground: Bool = false
+        ) -> ComputerPointerDelivery {
+            ComputerPointerDelivery(pid: 42, window: window, role: role, bundleID: app, isClick: click, isForeground: foreground)
+        }
+        XCTAssertEqual(route(window, role: "AXTextArea"), .window(42, window))
+        XCTAssertEqual(route(window, role: "AXMenuItem"), .hid(42))
+        XCTAssertEqual(route(nil), .hid(42))
+        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit"), .hid(42, requiresActivation: true))
+        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit", foreground: true), .window(42, window))
+        XCTAssertEqual(route(window, role: "AXTextArea", app: "com.apple.TextEdit", click: false), .window(42, window))
+        XCTAssertEqual(route(window, role: "AXButton", app: "com.apple.TextEdit"), .window(42, window))
+    }
+
+    @MainActor
+    func testComputerPanelsCannotBecomeKeyOrMain() {
+        let panel = NonactivatingPromptPanel()
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+    }
+
+    @MainActor
+    func testWindowMouseEventLocationUsesTheTargetWindowsQuartzOrigin() {
+        let window = ComputerPointerDelivery.Window(id: 76, bounds: CGRect(x: -800, y: -40, width: 640, height: 360))
+        let location = ComputerPointerDelivery.windowMouseLocation(
+            CGPoint(x: -700, y: 20), in: window, screenTop: 1117
+        )
+        XCTAssertEqual(location, CGPoint(x: 100, y: 1057))
+    }
+
+    @MainActor
+    func testOpenWaitsForTheIntendedProcessAndTimesOutIfItDoesNotActivate() async throws {
+        var observations: [pid_t?] = [nil, 24, 42]
+        try await ComputerApps.waitForFrontmost(42, name: "TextEdit") { observations.removeFirst() }
+        XCTAssertTrue(observations.isEmpty)
+
+        do {
+            try await ComputerApps.waitForFrontmost(42, name: "TextEdit", timeout: .zero) { 24 }
+            XCTFail("Expected an activation timeout")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "TextEdit opened but did not become the frontmost app.")
+        }
+    }
+
+    @MainActor
+    func testUnicodeEventsCarryExactTextAndNoModifiers() throws {
+        let input = ComputerInput()
+        let units = Array("Hello 🙂".utf16)
+        let (down, up) = try input.unicodeEvents(units)
+        for event in [down, up] {
+            var length = 0
+            var buffer = [UInt16](repeating: 0, count: units.count)
+            event.keyboardGetUnicodeString(maxStringLength: buffer.count, actualStringLength: &length, unicodeString: &buffer)
+            XCTAssertEqual(Array(buffer.prefix(length)), units)
+            XCTAssertTrue(event.flags.isEmpty)
+        }
+    }
+
+    func testDisplayOrderSelectionAndExternalCoordinates() throws {
+        let main = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+        let external = CGRect(x: -2560, y: -128, width: 2560, height: 1440)
+        let displays = ComputerDisplays.indexed([(7, external), (4, main)], mainID: 4)
+        XCTAssertEqual(displays.map(\.id), [4, 7])
+        XCTAssertEqual(displays.map(\.index), [0, 1])
+        XCTAssertEqual(displays.map(\.main), [true, false])
+        XCTAssertEqual(try ComputerDisplays.select(nil, previousID: nil, from: displays).id, 4)
+        XCTAssertEqual(try ComputerDisplays.select(1, previousID: 4, from: displays).id, 7)
+        XCTAssertEqual(try ComputerDisplays.select(nil, previousID: 7, from: displays).id, 7)
+        XCTAssertThrowsError(try ComputerDisplays.select(2, previousID: 7, from: displays))
+
+        let frame = geometry(bounds: displays[1].bounds, width: 1280, height: 720)
+        let pixel = CGPoint(x: 500, y: 100)
+        let point = CGPoint(x: -1560, y: 72)
+        XCTAssertEqual(try frame.screenPoint(for: pixel), point)
+        XCTAssertEqual(frame.pixelPoint(for: point), pixel)
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(displays)) as? [[String: Any]]
+        XCTAssertEqual(json?[1]["x"] as? CGFloat, -2560)
+        XCTAssertEqual(json?[1]["height"] as? CGFloat, 1440)
+        XCTAssertEqual(json?[1]["main"] as? Bool, false)
+    }
+
+    func testScreenshotValidatesOptionalDisplayIndex() throws {
+        XCTAssertNil(try parse("screenshot", ["screenshot_path": path]).get().displayIndex)
+        XCTAssertEqual(try parse("screenshot", ["screenshot_path": path, "display": 1]).get().displayIndex, 1)
+        for invalid: Any in [-1, true, 1.5, "1", NSNull(), Int64.max] {
+            XCTAssertThrowsError(try parse("screenshot", ["screenshot_path": path, "display": invalid]).get())
+        }
+        XCTAssertNil(try parse("zoom", ["screenshot_path": path, "display": 1, "region": [0, 0, 1, 1]]).get().displayIndex)
+    }
+
     func testCursorPositionEncodesRoundedIntegerPixels() throws {
         let coordinate = ComputerPixelCoordinate.rounded(CGPoint(x: 700.49, y: -23.50))
         let json = try JSONEncoder().encode(coordinate)

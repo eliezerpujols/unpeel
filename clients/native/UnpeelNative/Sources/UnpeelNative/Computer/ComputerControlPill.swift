@@ -26,6 +26,13 @@ final class ComputerControlPill {
     }
 
     private(set) var panel: NSPanel?
+    private var postingPointer = false
+    private var paused = false
+
+    func setPointerDelivery(_ posting: Bool) {
+        postingPointer = posting
+        panel?.ignoresMouseEvents = posting && !paused
+    }
 
     func update(_ state: State?, setPaused: @escaping (Bool) -> Void) {
         guard let state else {
@@ -34,6 +41,8 @@ final class ComputerControlPill {
         }
         let panel = self.panel ?? NonactivatingPromptPanel()
         self.panel = panel
+        paused = state.paused
+        panel.ignoresMouseEvents = postingPointer && !paused
         let content = NonactivatingPromptHostingView(rootView: pill(state, setPaused: setPaused))
         panel.contentView = content
         let size = content.fittingSize

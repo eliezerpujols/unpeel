@@ -68,13 +68,38 @@ enum ComputerTargetLookup {
         try target(NSWorkspace.shared.frontmostApplication)
     }
 
-    static func at(_ point: CGPoint) throws -> ComputerTarget {
+    static func keyboard(app bundleID: String?) throws -> ComputerTarget {
+        guard let bundleID else { return try frontmost() }
+        let workspace = NSWorkspace.shared
+        let matches = workspace.runningApplications.filter {
+            !$0.isTerminated && $0.bundleIdentifier?.caseInsensitiveCompare(bundleID) == .orderedSame
+        }
+        let preferred = try preferredKeyboardPID(
+            matching: matches.map(\.processIdentifier), frontmost: workspace.frontmostApplication?.processIdentifier
+        )
+        return try target(matches.first { $0.processIdentifier == preferred })
+    }
+
+    static func preferredKeyboardPID(matching pids: [pid_t], frontmost: pid_t?) throws -> pid_t {
+        if let frontmost, pids.contains(frontmost) { return frontmost }
+        if pids.count == 1 { return pids[0] }
+        if pids.isEmpty { throw ComputerError("The requested keyboard app is not running.") }
+        throw ComputerError("Multiple copies of that app are running. Choose the intended copy in the foreground.")
+    }
+
+    static func pointer(at point: CGPoint, isClick: Bool = false) throws -> ComputerPointerTarget {
         // A window owner and its accessibility hit can differ, for example
         // when a browser exposes an accessibility element from a helper.
         // Never assign the helper a more permissive tier than the browser.
-        let windowOwner = try frontWindowOwner(at: point)
-        if let windowOwner, ComputerAppTier(bundleID: windowOwner.bundleID) == .read {
-            return windowOwner
+        let window = try frontWindow(at: point)
+        if let window, ComputerAppTier(bundleID: window.app.bundleID) == .read {
+            return ComputerPointerTarget(
+                app: window.app, window: window.info,
+                delivery: ComputerPointerDelivery(
+                    pid: window.pid, window: window.info, role: nil, bundleID: window.app.bundleID,
+                    isClick: isClick, isForeground: false
+                )
+            )
         }
         // Accessibility hit-tests menus and overlapping windows in the same
         // top-left point space as Quartz.
@@ -84,13 +109,21 @@ enum ComputerTargetLookup {
               let element, AXUIElementGetPid(element, &pid) == .success, pid > 0
         else { throw ComputerError("Could not identify the app at that point.") }
         let hit = try target(NSRunningApplication(processIdentifier: pid))
-        guard windowOwner?.matches(hit) != false || ComputerAppTier(bundleID: hit.bundleID) == .read else {
+        guard window?.app.matches(hit) != false || ComputerAppTier(bundleID: hit.bundleID) == .read else {
             throw ComputerError("Could not confirm which app would receive input at that point.")
         }
-        return hit
+        var value: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
+        return ComputerPointerTarget(
+            app: hit, window: window?.info,
+            delivery: ComputerPointerDelivery(
+                pid: pid, window: window?.info, role: value as? String, bundleID: hit.bundleID, isClick: isClick,
+                isForeground: NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            )
+        )
     }
 
-    private static func frontWindowOwner(at point: CGPoint) throws -> ComputerTarget? {
+    private static func frontWindow(at point: CGPoint) throws -> (app: ComputerTarget, pid: pid_t, info: ComputerPointerDelivery.Window?)? {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]
         else { throw ComputerError("Could not read the windows on this display.") }
@@ -101,7 +134,10 @@ enum ComputerTargetLookup {
                   rect.contains(point),
                   let pid = window[kCGWindowOwnerPID as String] as? pid_t
             else { continue }
-            return try target(NSRunningApplication(processIdentifier: pid))
+            let info: ComputerPointerDelivery.Window? = (window[kCGWindowNumber as String] as? CGWindowID).flatMap {
+                $0 == kCGNullWindowID ? nil : ComputerPointerDelivery.Window(id: $0, bounds: rect)
+            }
+            return (try target(NSRunningApplication(processIdentifier: pid)), pid, info)
         }
         return nil
     }

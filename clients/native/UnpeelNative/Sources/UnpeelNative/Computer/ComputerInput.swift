@@ -1,4 +1,4 @@
-import CoreGraphics
+import AppKit
 import Foundation
 
 @MainActor
@@ -7,7 +7,8 @@ final class ComputerInput {
     static let eventTag: Int64 = 0x554E_504C_4355
 
     private let source = CGEventSource(stateID: .privateState)
-    private var pendingLeftRelease: CGEvent?
+    private var pendingLeftRelease: (point: CGPoint, delivery: ComputerPointerDelivery, number: Int)?
+    private var mouseNumber = 0
 
     func cursorPosition() throws -> CGPoint {
         guard let position = CGEvent(source: nil)?.location else {
@@ -16,60 +17,131 @@ final class ComputerInput {
         return position
     }
 
-    func move(to point: CGPoint) throws {
-        let event = try mouseEvent(pendingLeftRelease != nil ? .leftMouseDragged : .mouseMoved, at: point)
-        event.post(tap: .cghidEventTap)
-        pendingLeftRelease?.location = point
+    func move(to point: CGPoint, delivery: ComputerPointerDelivery) throws {
+        let active = pendingLeftRelease?.delivery ?? delivery
+        let event = try mouseEvent(
+            pendingLeftRelease != nil ? .leftMouseDragged : .mouseMoved,
+            at: point, delivery: active, number: pendingLeftRelease?.number ?? nextMouseNumber()
+        )
+        active.post(event)
+        pendingLeftRelease?.point = point
     }
 
-    func click(_ button: CGMouseButton, count: Int, at point: CGPoint) throws {
-        let types: (down: CGEventType, up: CGEventType)
+    /// Menus and some system surfaces require WindowServer routing. Limit that
+    /// path to discrete actions, then give the user's pointer and focus back.
+    func withHIDPointer(
+        at point: CGPoint, targetPID: pid_t, requiresActivation: Bool = false, send: () throws -> Void
+    ) async throws {
+        let workspace = NSWorkspace.shared
+        guard let previousApp = workspace.frontmostApplication else {
+            throw ComputerError("Could not save your foreground app for system pointer input.")
+        }
+        let previousPoint = try cursorPosition()
+        let result: Result<Void, Error>
+        do {
+            if requiresActivation, previousApp.processIdentifier != targetPID {
+                guard let target = NSRunningApplication(processIdentifier: targetPID), !target.isTerminated,
+                      workspace.frontmostApplication?.processIdentifier == previousApp.processIdentifier else {
+                    throw ComputerError("The foreground app changed before system pointer input.")
+                }
+                try Task.checkCancellation()
+                _ = target.activate(options: [])
+                try await ComputerApps.waitForFrontmost(
+                    targetPID, name: target.localizedName ?? "The target app", timeout: .milliseconds(750)
+                ) { workspace.frontmostApplication?.processIdentifier }
+            }
+            try await positionPointer(at: point, pid: targetPID)
+            try send()
+            result = .success(())
+        } catch {
+            result = .failure(error)
+        }
+
+        // Finish cleanup even if the stop shortcut cancelled this request.
+        let restoring = Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(100))
+            // Respect physical mouse movement or a switch to a third app.
+            defer {
+                if let current = try? cursorPosition(), Self.near(current, point) {
+                    CGWarpMouseCursorPosition(previousPoint)
+                }
+            }
+            try await ComputerApps.restoreForeground(previousApp, displacedBy: targetPID)
+        }
+        try await restoring.value
+        try result.get()
+    }
+
+    private func positionPointer(at point: CGPoint, pid: pid_t) async throws {
+        try Task.checkCancellation()
+        try move(to: point, delivery: .hid(pid))
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(125))
+        while true {
+            try Task.checkCancellation()
+            if Self.near(try cursorPosition(), point) { return }
+            guard clock.now < deadline else {
+                throw ComputerError("The cursor did not reach the target. Take a new screenshot and retry.")
+            }
+            try await clock.sleep(until: min(deadline, clock.now.advanced(by: .milliseconds(10))))
+        }
+    }
+
+    private static func near(_ first: CGPoint, _ second: CGPoint) -> Bool {
+        // Quartz can round a fractional point to the backing grid.
+        abs(first.x - second.x) <= 1 && abs(first.y - second.y) <= 1
+    }
+
+    func click(_ button: CGMouseButton, count: Int, at point: CGPoint, delivery: ComputerPointerDelivery) throws {
+        let types: (down: NSEvent.EventType, up: NSEvent.EventType)
         switch button {
         case .left: types = (.leftMouseDown, .leftMouseUp)
         case .right: types = (.rightMouseDown, .rightMouseUp)
         default: types = (.otherMouseDown, .otherMouseUp)
         }
         let clicks = try (1...count).map { index in
-            let down = try mouseEvent(types.down, at: point, button: button, clickCount: index)
-            let up = try mouseEvent(types.up, at: point, button: button, clickCount: index)
+            let number = nextMouseNumber()
+            let down = try mouseEvent(types.down, at: point, delivery: delivery, number: number, button: button, clickCount: index)
+            let up = try mouseEvent(types.up, at: point, delivery: delivery, number: number, button: button, clickCount: index)
             return (down, up)
         }
-        try move(to: point)
         for (down, up) in clicks {
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            delivery.post(down)
+            delivery.post(up)
         }
     }
 
-    func pressLeftButton(at point: CGPoint) throws {
-        let down = try mouseEvent(.leftMouseDown, at: point, clickCount: 1)
-        let up = try mouseEvent(.leftMouseUp, at: point, clickCount: 1)
-        try move(to: point)
-        down.post(tap: .cghidEventTap)
-        pendingLeftRelease = up
+    func pressLeftButton(at point: CGPoint, delivery: ComputerPointerDelivery) throws {
+        let number = nextMouseNumber()
+        let down = try mouseEvent(.leftMouseDown, at: point, delivery: delivery, number: number, clickCount: 1)
+        delivery.post(down)
+        pendingLeftRelease = (point, delivery, number)
     }
 
-    func liftLeftButton(at point: CGPoint) throws {
-        let event = try mouseEvent(.leftMouseUp, at: point, clickCount: 1)
-        try move(to: point)
-        event.post(tap: .cghidEventTap)
+    func liftLeftButton(at point: CGPoint, delivery: ComputerPointerDelivery) throws {
+        let active = pendingLeftRelease?.delivery ?? delivery
+        let event = try mouseEvent(
+            .leftMouseUp, at: point, delivery: active, number: pendingLeftRelease?.number ?? nextMouseNumber(), clickCount: 1
+        )
+        active.post(event)
         pendingLeftRelease = nil
     }
 
-    func releaseLeftButton(to pid: pid_t) {
+    func releaseLeftButton() {
         guard let release = pendingLeftRelease else { return }
         pendingLeftRelease = nil
-        release.timestamp = DispatchTime.now().uptimeNanoseconds
-        // Cancellation must release the button without clicking whichever
-        // app may now occupy the last point.
-        release.postToPid(pid)
+        if let event = try? mouseEvent(
+            .leftMouseUp, at: release.point, delivery: release.delivery, number: release.number, clickCount: 1
+        ) {
+            release.delivery.post(event)
+        }
     }
 
     func drag(
-        from start: CGPoint, to end: CGPoint, pid: pid_t, checkPoint: (CGPoint) throws -> Void
+        from start: CGPoint, to end: CGPoint, delivery: ComputerPointerDelivery, checkPoint: (CGPoint) throws -> Void
     ) async throws {
-        try pressLeftButton(at: start)
-        defer { releaseLeftButton(to: pid) }
+        try pressLeftButton(at: start, delivery: delivery)
+        defer { releaseLeftButton() }
         for step in 1...10 {
             try await Task.sleep(for: .milliseconds(16))
             let fraction = CGFloat(step) / 10
@@ -78,9 +150,9 @@ final class ComputerInput {
                 y: start.y + (end.y - start.y) * fraction
             )
             try checkPoint(point)
-            try move(to: point)
+            try move(to: point, delivery: delivery)
         }
-        try liftLeftButton(at: end)
+        try liftLeftButton(at: end, delivery: delivery)
     }
 
     func scroll(_ direction: ComputerRequest.ScrollDirection, amount: Int32, at point: CGPoint) throws {
@@ -95,16 +167,14 @@ final class ComputerInput {
             scrollWheelEvent2Source: source, units: .line, wheelCount: 2,
             wheel1: delta.vertical, wheel2: delta.horizontal, wheel3: 0
         ) else { throw ComputerError("Could not create a scroll event.") }
+        event.flags = []
         event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
-        try move(to: point)
         event.location = point
         event.post(tap: .cghidEventTap)
     }
 
     func key(_ key: ComputerKey, duration: Duration, to pid: pid_t) async throws {
-        let (down, up) = try keyboardEvents(key.code)
-        down.flags = key.modifiers
-        up.flags = key.modifiers
+        let (down, up) = try keyboardEvents(key.code, flags: key.modifiers)
         if let modifier = key.modifierKey {
             down.type = .flagsChanged
             up.type = .flagsChanged
@@ -118,35 +188,71 @@ final class ComputerInput {
         if duration > .zero { try await Task.sleep(for: duration) }
     }
 
-    func type(_ text: String, to pid: pid_t, checkFocus: () throws -> Void) async throws {
+    func type(_ text: String, to pid: pid_t, checkTarget: () throws -> Void) async throws {
         var chunks = ComputerUnicodeChunks(text)
         while let chunk = chunks.next() {
-            try checkFocus()
-            let (down, up) = try keyboardEvents(0)
-            chunk.withUnsafeBufferPointer { units in
-                down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
-                up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
-            }
+            try checkTarget()
+            let (down, up) = try unicodeEvents(chunk)
             down.postToPid(pid)
             up.postToPid(pid)
             await Task.yield()
         }
     }
 
+    func unicodeEvents(_ units: [UInt16]) throws -> (down: CGEvent, up: CGEvent) {
+        // Quartz seeds flags from the event source. After Cmd+N, inherited
+        // Command turns Unicode input into a key equivalent in TextEdit.
+        let (down, up) = try keyboardEvents(0, flags: [])
+        units.withUnsafeBufferPointer {
+            down.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress)
+            up.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress)
+        }
+        return (down, up)
+    }
+
+    private func nextMouseNumber() -> Int {
+        mouseNumber &+= 1
+        return mouseNumber
+    }
+
     private func mouseEvent(
-        _ type: CGEventType, at point: CGPoint, button: CGMouseButton = .left, clickCount: Int = 0
+        _ type: NSEvent.EventType, at point: CGPoint, delivery: ComputerPointerDelivery,
+        number: Int, button: CGMouseButton = .left, clickCount: Int = 0
     ) throws -> CGEvent {
-        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button)
-        else { throw ComputerError("Could not create a mouse event.") }
+        let event: CGEvent?
+        switch delivery {
+        case let .window(_, window):
+            let location = ComputerPointerDelivery.windowMouseLocation(
+                point, in: window, screenTop: CGDisplayBounds(CGMainDisplayID()).maxY
+            )
+            let isDown = [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged].contains(type)
+            event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: Int(window.id), context: nil, eventNumber: number, clickCount: clickCount,
+                pressure: isDown ? 1 : 0
+            )?.cgEvent
+        case .hid:
+            guard let quartzType = CGEventType(rawValue: UInt32(type.rawValue)) else {
+                throw ComputerError("Unsupported system mouse event.")
+            }
+            event = CGEvent(mouseEventSource: source, mouseType: quartzType, mouseCursorPosition: point, mouseButton: button)
+        }
+        guard let event else { throw ComputerError("Could not create a mouse event.") }
         event.setIntegerValueField(.eventSourceUserData, value: Self.eventTag)
+        // A previous shortcut must not turn a plain click into a Command-click.
+        event.flags = []
+        event.setIntegerValueField(.mouseEventNumber, value: Int64(number))
+        event.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
         return event
     }
 
-    private func keyboardEvents(_ code: CGKeyCode) throws -> (CGEvent, CGEvent) {
+    private func keyboardEvents(_ code: CGKeyCode, flags: CGEventFlags) throws -> (CGEvent, CGEvent) {
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
         else { throw ComputerError("Could not create a keyboard event.") }
+        down.flags = flags
+        up.flags = flags
         return (down, up)
     }
 }
