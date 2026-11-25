@@ -230,6 +230,55 @@ final class ComputerEngineTests: XCTestCase {
         )
     }
 
+    func testAccessibilityActionLabelsStayOnOneLineAndHideToolbarCustomization() {
+        let row = ComputerAXRow(
+            depth: 0, role: "AXButton", title: nil, detail: nil, value: nil, url: nil,
+            actions: [
+                "Name:Move next\nTarget:0x0\nSelector:(null)",
+                "Name:Move previous\r\nTarget:0x0",
+                "Name:Remove from toolbar", "Name:Open menu\u{2028}Target:0x0", "AXPress",
+            ]
+        )
+        XCTAssertEqual(row.line(id: 7), "7 AXButton Actions: Open menu, AXPress")
+    }
+
+    func testWebAccessibilityPrefersManualAndOnlyChangesRestorableEnhancedMode() {
+        let manual = ComputerWebAccessibility.manual
+        let enhanced = ComputerWebAccessibility.enhanced
+        var writes: [String] = []
+        func prepare(manualWorks: Bool, existing: Bool?) -> Bool {
+            writes.removeAll()
+            return ComputerWebAccessibility.prepare(read: { $0 == enhanced ? existing : nil }) { name, value in
+                XCTAssertTrue(value)
+                writes.append(name)
+                return name == enhanced || manualWorks
+            }
+        }
+        XCTAssertFalse(prepare(manualWorks: true, existing: false))
+        XCTAssertEqual(writes, [manual])
+        XCTAssertTrue(prepare(manualWorks: false, existing: false))
+        XCTAssertEqual(writes, [manual, enhanced])
+        XCTAssertFalse(prepare(manualWorks: false, existing: true))
+        XCTAssertEqual(writes, [manual])
+        XCTAssertFalse(prepare(manualWorks: false, existing: nil))
+        XCTAssertEqual(writes, [manual])
+    }
+
+    func testBlankSafariPageDetectionIgnoresTheToolbar() throws {
+        let width = 640, height = 480
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(red: 0, green: 0, blue: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: height - 75, width: width, height: 75))
+        XCTAssertTrue(ComputerScreenshot.pageAreaLooksBlank(try XCTUnwrap(context.makeImage()), windowHeight: 480))
+        context.fill(CGRect(x: 150, y: 130, width: 300, height: 150))
+        XCTAssertFalse(ComputerScreenshot.pageAreaLooksBlank(try XCTUnwrap(context.makeImage()), windowHeight: 480))
+    }
+
     func testElementScrollHandlesNormalizedWebKitBarsAndExplicitRanges() {
         XCTAssertEqual(ComputerAXActions.scrollValue(0, minimum: 0, maximum: 0, steps: 2, increasing: true), 0.1)
         XCTAssertEqual(ComputerAXActions.scrollValue(35, minimum: 10, maximum: 110, steps: 10, increasing: false), 10)

@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -12,6 +13,7 @@ struct ComputerScreenshotGeometry: Equatable {
     let height: Int
     var window: ComputerWindow? = nil
     var availableWindows: [ComputerWindow]? = nil
+    var warning: String? = nil
 
     private var pixelsPerPointX: CGFloat { CGFloat(width) / screenRect.width }
     private var pixelsPerPointY: CGFloat { CGFloat(height) / screenRect.height }
@@ -112,18 +114,40 @@ enum ComputerScreenshot {
         )
     }
 
+    @MainActor
     static func captureWindow(
-        to path: String, app: ComputerTarget, id: CGWindowID?, region: CGRect? = nil
+        to path: String, app: ComputerTarget, id: CGWindowID?, region: CGRect? = nil,
+        stream: (ComputerWindowStream, sessionID: String)? = nil
     ) async throws -> ComputerScreenshotGeometry {
         try Task.checkCancellation()
         let (window, shareableWindow, windows) = try await ComputerWindows.select(for: app, id: id)
+        let hiddenSafari = app.isSafari && (!shareableWindow.isOnScreen
+            || app.pid != NSWorkspace.shared.frontmostApplication?.processIdentifier)
         let frame: CGImage
         if #available(macOS 14, *) {
             let filter = SCContentFilter(desktopIndependentWindow: shareableWindow)
             let configuration = configuration(for: filter, atNativeResolution: region != nil, showsCursor: false)
             configuration.ignoreShadowsSingleWindow = true
             configuration.ignoreGlobalClipSingleWindow = true
-            frame = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+            var streamImage: CGImage?
+            if app.isSafari, let (capture, sessionID) = stream {
+                do {
+                    streamImage = try await capture.frame(
+                        sessionID: sessionID, window: window, filter: filter,
+                        configuration: configuration, waitsForPage: hiddenSafari
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // Use a one-shot capture if macOS declines a live stream.
+                    try Task.checkCancellation()
+                }
+            }
+            if let streamImage {
+                frame = streamImage
+            } else {
+                frame = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+            }
         } else {
             guard let image = CGWindowListCreateImage(
                 .null, .optionIncludingWindow, window.id, [.boundsIgnoreFraming, .bestResolution]
@@ -134,10 +158,40 @@ enum ComputerScreenshot {
             throw ComputerError("The app window moved or resized during capture. Take a new screenshot.")
         }
         try Task.checkCancellation()
-        return try writePNG(
+        var result = try writePNG(
             frame, displayID: nil, bounds: window.bounds, region: region,
             window: window, availableWindows: windows, to: URL(fileURLWithPath: path)
         )
+        if hiddenSafari, pageAreaLooksBlank(frame, windowHeight: window.bounds.height) {
+            result.warning = "The page area is blank. Safari may not have rendered the window while hidden. Use the Accessibility tree when available."
+        }
+        return result
+    }
+
+    static func pageAreaLooksBlank(_ image: CGImage, windowHeight: CGFloat) -> Bool {
+        guard windowHeight > 0 else { return false }
+        // Exclude Safari's toolbar, window margins, and scrollbars. A page
+        // can also be intentionally white, so the result is only a warning.
+        let top = min(0.55, max(0.20, 125 / windowHeight))
+        let region = CGRect(
+            x: Double(image.width) * 0.06, y: Double(image.height) * top,
+            width: Double(image.width) * 0.88, height: Double(image.height) * (0.94 - top)
+        ).integral
+        guard let page = image.cropping(to: region) else { return false }
+        let side = 32
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        return pixels.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(
+                data: bytes.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { return false }
+            context.interpolationQuality = .high
+            context.draw(page, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return stride(from: 0, to: bytes.count, by: 4).allSatisfy { offset in
+                min(bytes[offset], bytes[offset + 1], bytes[offset + 2]) >= 248
+            }
+        }
     }
 
     @available(macOS 14, *)

@@ -790,6 +790,12 @@ fn perform_result(action: &str, result: Value, path: Option<&Path>) -> Result<Va
         metadata["screenshot_path"] = json!(path);
         metadata["width"] = json!(positive_integer(&result, "width")?);
         metadata["height"] = json!(positive_integer(&result, "height")?);
+        if let Some(warning) = result["screenshot_warning"]
+            .as_str()
+            .filter(|warning| !warning.is_empty() && warning.len() <= 256)
+        {
+            metadata["screenshot_warning"] = json!(warning);
+        }
         if let Some(display) = result.get("display") {
             metadata["display"] = json!(display_index(display)?);
         }
@@ -1043,10 +1049,15 @@ mod tests {
             "ok": true, "screenshot_path": path, "width": 640, "height": 480, "scale": 1.0,
             "window": {"id": 76, "title": "Instagram", "bundle_id": "com.apple.Safari"},
             "ax_tree": "Window: Instagram\n0 AXWindow\n  1 AXLink Actions: AXPress",
+            "screenshot_warning": "The page area is blank. Use the Accessibility tree when available.",
         });
         let metadata = perform_result("get_app_state", response.clone(), Some(path)).unwrap();
         assert_eq!(metadata["window"], response["window"]);
         assert_eq!(metadata["ax_tree"], response["ax_tree"]);
+        assert_eq!(
+            metadata["screenshot_warning"],
+            response["screenshot_warning"]
+        );
         response["ax_tree"] = json!("a".repeat(MAX_AX_TREE_BYTES + 1));
         assert!(perform_result("get_app_state", response, Some(path)).is_err());
     }

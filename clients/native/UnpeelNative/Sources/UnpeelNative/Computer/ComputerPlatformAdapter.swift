@@ -16,6 +16,7 @@ final class ComputerPlatformAdapter {
 
     private let input = ComputerInput()
     private let ghost = ComputerGhostCursor()
+    private let windowStream = ComputerWindowStream()
     private var elements = ComputerElementCache<AXUIElement>()
     private var frames: [String: ComputerScreenshotGeometry] = [:]
     private var cursorPoints: [String: CGPoint] = [:]
@@ -32,6 +33,7 @@ final class ComputerPlatformAdapter {
         for task in tasks.values { task.cancel() }
         input.releaseLeftButton()
         ghost.clear()
+        windowStream.stop()
         elements.clear()
         buttonHold = nil
         control.show(nil)
@@ -90,6 +92,7 @@ final class ComputerPlatformAdapter {
         var display: Int?
         var window: ComputerWindow?
         var windows: [ComputerWindow]?
+        var screenshotWarning: String?
         var axTree: String?
         var coordinate: [Int]?
         var frontmostApp: ComputerApps.App?
@@ -98,6 +101,7 @@ final class ComputerPlatformAdapter {
             case ok, width, height, scale, coordinate, display, window, windows
             case axTree = "ax_tree"
             case screenshotPath = "screenshot_path"
+            case screenshotWarning = "screenshot_warning"
             case frontmostApp = "frontmost_app"
         }
     }
@@ -261,7 +265,7 @@ final class ComputerPlatformAdapter {
                 )
                 try control.requireRunning(generation: generation)
                 if case .window(_, _, true) = recipient, let window = geometry.window {
-                    let tree = try ComputerAXTree.capture(window: window, firstID: elements.nextID)
+                    let tree = try await ComputerAXTree.capture(window: window, firstID: elements.nextID)
                     try control.requireRunning(generation: generation)
                     elements.replace(session: request.sessionID, window: window, elements: tree.elements)
                     response.axTree = tree.text
@@ -273,6 +277,7 @@ final class ComputerPlatformAdapter {
                 response.scale = geometry.scale
                 response.window = geometry.window
                 response.windows = geometry.availableWindows
+                response.screenshotWarning = geometry.warning
             } catch let error where recipient?.sendsInput == true && !(error is CancellationError) {
                 throw ComputerError("The action completed, but the screenshot failed: \(error.localizedDescription)")
             }
@@ -285,11 +290,15 @@ final class ComputerPlatformAdapter {
         path: String, request: ComputerRequest, recipient: Recipient?, region: CGRect?, response: inout Success
     ) async throws -> ComputerScreenshotGeometry {
         if case let .window(app, id, _) = recipient {
-            return try await ComputerScreenshot.captureWindow(to: path, app: app, id: id, region: region)
+            return try await ComputerScreenshot.captureWindow(
+                to: path, app: app, id: id, region: region, stream: (windowStream, request.sessionID)
+            )
         }
         let previous = request.action == .screenshot ? nil : frames[request.sessionID]
         if let window = previous?.window, recipient == nil || recipient?.target.matches(window.app) == true {
-            return try await ComputerScreenshot.captureWindow(to: path, app: window.app, id: window.id, region: region)
+            return try await ComputerScreenshot.captureWindow(
+                to: path, app: window.app, id: window.id, region: region, stream: (windowStream, request.sessionID)
+            )
         }
         let display = try ComputerDisplays.select(
             request.displayIndex, previousID: previous?.displayID, from: ComputerDisplays.active()

@@ -205,7 +205,9 @@ origin and size in Quartz screen points, and whether it is the main display.
 Prefer `{"action":"get_app_state","app":"com.apple.Safari"}`. It returns an
 isolated window screenshot and a capped, numbered Accessibility tree with
 roles, labels, values, URLs, and advertised actions. Use the latest tree for
-the same session and app. For example, if element 7 is the Explore link,
+the same session and app. A Safari window capture may briefly show macOS's
+sharing indicator. If the screenshot result reports a blank page area, use
+the Accessibility tree when available. For example, if element 7 is the Explore link,
 call `{"action":"press","app":"com.apple.Safari","element":7}`. Refresh app
 state after navigation or a UI change.
 

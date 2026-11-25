@@ -14,6 +14,10 @@ struct ComputerTarget: Codable, Equatable {
     func matches(_ other: Self) -> Bool {
         bundleID.caseInsensitiveCompare(other.bundleID) == .orderedSame && pid == other.pid
     }
+
+    var isSafari: Bool {
+        ["com.apple.safari", "com.apple.safaritechnologypreview"].contains(bundleID.lowercased())
+    }
 }
 
 enum ComputerAppTier: Equatable {
