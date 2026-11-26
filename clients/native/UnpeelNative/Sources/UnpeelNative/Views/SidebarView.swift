@@ -1153,6 +1153,7 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.isConfirmingRemove == rhs.isConfirmingRemove
             && lhs.shortcutHint == rhs.shortcutHint
             && lhs.hasLiveSessions == rhs.hasLiveSessions
+            && lhs.hasUnreadSessions == rhs.hasUnreadSessions
             && lhs.localSiteURLs == rhs.localSiteURLs
             && lhs.isPinned == rhs.isPinned
             && lhs.canPin == rhs.canPin
@@ -1198,6 +1199,10 @@ struct ProjectNodeView: View {
     /// first) with a Show more / Show less toggle at the end of the list.
     @State private var showsAllSessions = false
     static let collapsedSessionLimit = 7
+    /// Show more opens a group to at most this many rows (pinned first).
+    /// Older Sessions past it stay out of the sidebar (search/history still
+    /// reach them), so a group with hundreds of Sessions never builds them all.
+    static let expandedSessionLimit = 30
 
     /// Top-level projects and child folders both use the detached drag;
     /// children interleave with sessions, while top-level projects reorder
@@ -1381,6 +1386,7 @@ struct ProjectNodeView: View {
             isConfirmingRemove: store.confirmingRemoveProjectID == node.id,
             shortcutHint: store.projectShortcutHintIndex(forProject: node.id),
             hasLiveSessions: node.sessions.contains(where: \.isLive),
+            hasUnreadSessions: store.canMarkAllRead(in: node),
             // Host-probed live URLs are family-wide, so only the top-level
             // project row wears the globe — child groups/worktrees would
             // repeat the same links.
@@ -1411,6 +1417,7 @@ struct ProjectNodeView: View {
             onCreateGroup: { store.promptCreateGroup(projectID: node.id) },
             onRemoveGroup: { store.removeGroupProject(node.id) },
             onStopAll: { store.stopAllSessions(projectID: node.id) },
+            onMarkAllRead: { store.markAllSessionsRead(in: node) },
             onRevealInFinder: { store.revealInFinder(path: node.project.path) },
             onOpenIn: { target in
                 store.openWorkspace(path: node.project.path, in: target)
@@ -1663,15 +1670,15 @@ struct ProjectNodeView: View {
         )
     }
 
-    private func regularItemLimit(pinned: Int) -> Int {
-        max(0, Self.collapsedSessionLimit - pinned)
+    private func regularItemLimit(pinned: Int, expanded: Bool = false) -> Int {
+        max(0, (expanded ? Self.expandedSessionLimit : Self.collapsedSessionLimit) - pinned)
     }
 
     /// Visible prefix of the regular section. Collapsed, it never hides the
     /// selected Session: the prefix extends to include it.
     private func visibleRegularItemCount(pinned: Int, regular: [SidebarMixedItem]) -> Int {
-        let limit = regularItemLimit(pinned: pinned)
-        guard !showsAllSessions, regular.count > limit else { return regular.count }
+        let limit = regularItemLimit(pinned: pinned, expanded: showsAllSessions)
+        guard regular.count > limit else { return regular.count }
         if let selected = store.selectedSessionID,
            let index = regular.firstIndex(where: { item in
                switch item {
@@ -2043,6 +2050,9 @@ struct ProjectRowView: View {
     /// Any live session in THIS project (not worktree children) — gates
     /// "Stop all" (hasLive, ProjectItem.svelte:896).
     var hasLiveSessions = false
+    /// Any unread Session in this project or its groups/worktrees — gates
+    /// "Mark All as Read".
+    var hasUnreadSessions = false
     /// Live local-site URLs served by this project's family (host-probed).
     /// Non-empty shows the globe link button beside the name and the Links
     /// section of the context menu. Top-level local projects only.
@@ -2062,6 +2072,7 @@ struct ProjectRowView: View {
     /// fall back to the parent on the next scan.
     var onRemoveGroup: () -> Void = {}
     var onStopAll: () -> Void = {}
+    var onMarkAllRead: () -> Void = {}
     var onRevealInFinder: () -> Void = {}
     /// Open the project's path in an external app (context-menu "Open in").
     var onOpenIn: (WorkspaceOpenTarget) -> Void = { _ in }
@@ -2445,6 +2456,11 @@ struct ProjectRowView: View {
                             Button(target.name) { onMoveToWorkspace(target) }
                         }
                     }
+                }
+            }
+            if hasUnreadSessions {
+                Button("Mark All as Read") {
+                    onMarkAllRead()
                 }
             }
             if hasLiveSessions {

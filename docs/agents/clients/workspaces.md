@@ -101,6 +101,10 @@ workspaces, paired Hosts, and SSH Hosts. A scope-only feature is a bug
 unless it is listed below with its reason. Gate verbs by the advertised
 Host operation and the provider or resource's capabilities.
 
+**Mark All as Read** (project and group context menu) applies the same
+per-Session read verb to every unread Session in that project, its groups,
+and worktrees, so it is available wherever Mark as Read is.
+
 **Mark as Read / Mark as Unread** use the selected Host's shared receipt
 and update the sidebar immediately. **Notify when done** uses the provider's
 completion capability and delivers on the Mac Controller from Host-recorded

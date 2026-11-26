@@ -5463,6 +5463,24 @@ final class UnpeelStore: ObservableObject {
         showUnreadNow(sessionID, false)
     }
 
+    /// Unread Sessions in a project/group and every child group or worktree.
+    func unreadSessionIDs(in node: ProjectNode) -> [String] {
+        node.sessions.map(\.id).filter { sessionIsUnread($0) }
+            + node.worktrees.flatMap { unreadSessionIDs(in: $0) }
+    }
+
+    /// Project/group context menu "Mark All as Read" — available in every
+    /// Host scope that can mark a single Session read.
+    func canMarkAllRead(in node: ProjectNode) -> Bool {
+        unreadSessionIDs(in: node).contains { sessionCanToggleUnread($0) }
+    }
+
+    func markAllSessionsRead(in node: ProjectNode) {
+        for sessionID in unreadSessionIDs(in: node) where sessionCanToggleUnread(sessionID) {
+            markSessionRead(sessionID)
+        }
+    }
+
     private func setHostSessionUnread(_ sessionID: String, unread: Bool) {
         let observed = observedSessionID == sessionID
         guard remoteHostRuntime.setSessionUnread(
