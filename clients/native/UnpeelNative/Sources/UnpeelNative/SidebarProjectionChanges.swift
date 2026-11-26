@@ -1,4 +1,20 @@
+import Foundation
 import UnpeelShared
+
+enum SidebarSessionAge {
+    private static let visibleInterval: TimeInterval = 7 * 24 * 60 * 60
+
+    static func cutoff(for session: SessionEntry) -> Date? {
+        guard !session.runtimeLaunchPending else { return nil }
+        switch session.status {
+        case .idle, .exited:
+            let latest = max(session.createdAt, session.lifecycleAtMs ?? 0)
+            return Date(timeIntervalSince1970: Double(latest) / 1_000 + visibleInterval)
+        case .starting, .busy, .attention:
+            return nil
+        }
+    }
+}
 
 enum SidebarProjectionChanges {
     /// Cache inputs are per-project rows, mixed order, and pin/unread

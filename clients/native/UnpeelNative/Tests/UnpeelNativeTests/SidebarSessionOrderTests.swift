@@ -3,6 +3,37 @@ import XCTest
 
 @MainActor
 final class SidebarSessionOrderTests: XCTestCase {
+    func testSidebarAgeUsesLastActivityAndKeepsWorkInProgress() {
+        let startedAt: Int64 = 1_750_000_000_000
+        let lastActivity = startedAt + 10_000
+        let sevenDays: TimeInterval = 604_800
+        let expectedCutoff = Date(
+            timeIntervalSince1970: Double(lastActivity) / 1_000 + sevenDays
+        )
+
+        func session(status: SessionStatus, pendingLaunch: Bool = false) -> SessionEntry {
+            SessionEntry(
+                id: "session", projectID: "project", label: "Shell", command: "sh",
+                createdAt: startedAt, status: status, runtimeLaunchPending: pendingLaunch,
+                lifecycleAtMs: lastActivity
+            )
+        }
+
+        XCTAssertEqual(SidebarSessionAge.cutoff(for: session(status: .idle)), expectedCutoff)
+        XCTAssertEqual(SidebarSessionAge.cutoff(for: session(status: .exited)), expectedCutoff)
+        XCTAssertNil(SidebarSessionAge.cutoff(for: session(status: .idle, pendingLaunch: true)))
+        for status in [SessionStatus.starting, .busy, .attention] {
+            XCTAssertNil(SidebarSessionAge.cutoff(for: session(status: status)))
+        }
+
+        var legacy = session(status: .exited)
+        legacy.lifecycleAtMs = nil
+        XCTAssertEqual(
+            SidebarSessionAge.cutoff(for: legacy),
+            Date(timeIntervalSince1970: Double(startedAt) / 1_000 + sevenDays)
+        )
+    }
+
     private func pin(_ id: String, at: UInt64) -> PinnedSidebarSession {
         PinnedSidebarSession(
             key: PinnedSidebarSession.key(forSessionID: id),

@@ -1626,26 +1626,34 @@ enum SidebarListContentBuilder {
             for: selectedSessionID
         )
         // Pins first (Host flags, Host order); live rows next in Host order;
-        // then the Host-windowed stopped preview (unread inactive rows
-        // always stay visible).
+        // then the Host-windowed stopped preview. Apply the same age cutoff
+        // as the interactive list before picking rows for the swipe preview.
+        let now = Date()
+        let approvals = snapshot.pendingApprovals ?? []
+        let knownSessionIDs = approvals.isEmpty ? [] : Set(summariesByID.keys)
+        let approvalSessionIDs = Set(approvals.map {
+            $0.presentationSessionID(knownIDs: knownSessionIDs)
+        })
         func sessionLists(_ n: ProjectNode) -> (pinned: [SessionEntry], displayed: [SessionEntry]) {
             let dateSorted = projectSummaries[n.id]?.dateSorted == true
             let pinned = n.sessions.filter { summariesByID[$0.id]?.pinned == true }
-            var candidates = n.sessions.filter { summariesByID[$0.id]?.pinned != true }
+            var candidates = n.sessions.filter { session in
+                summariesByID[session.id]?.pinned != true
+                    && (session.id == displayedSelectedSessionID
+                        || approvalSessionIDs.contains(session.id)
+                        || paneProjection.itemsByRepresentative[session.id] != nil
+                        || SidebarSessionAge.cutoff(for: session).map { now <= $0 } != false)
+            }
             if dateSorted {
                 candidates.sort { recency($0) > recency($1) }
             }
             let active = candidates.filter(\.isLive)
             let stopped = candidates.filter { !$0.isLive }
                 .sorted { recency($0) > recency($1) }
-            // The pooled Host snapshot is already stopped-windowed by that
-            // Host. Keep its exact projection; this Mac's local preference
-            // must not reshape another workspace or remote Host.
-            let visibleStopped = stopped
             // The stopped section renders in recency order in the real list
             // regardless of the group's manual order (sidebarSessionBlocks
             // appends `sortedStopped` after the active section).
-            return (pinned, active + visibleStopped)
+            return (pinned, active + stopped)
         }
         func makeSessionRow(
             _ entry: SessionEntry, depth: Int, pinned: Bool

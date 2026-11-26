@@ -338,13 +338,15 @@ final class UnpeelStore: ObservableObject {
             }
             guard selectedSessionID != oldValue else { return }
             if let id = selectedSessionID { noteSessionMRU(id) }
-            // Selection changes list membership only for a local inactive row
-            // kept past the stopped preview window. Remote lists arrive
-            // pre-windowed by their Host. Preserve the memoized project lists
-            // for the overwhelmingly common live-session switch.
+            // Selection can reveal a stopped row past the preview window or
+            // an idle row past the age cutoff. Busy sessions are always eligible.
+            let now = Date()
+            let scopedSessions = displaysHostProjection ? remoteSessionsByID : sessionsByID
             let windowedInactiveSessionIDs = Set(
                 [oldValue, selectedSessionID].compactMap { $0 }.filter { id in
-                    sessionsByID[id]?.isLive == false
+                    guard let session = scopedSessions[id] else { return false }
+                    return !session.isLive
+                        || SidebarSessionAge.cutoff(for: session).map { $0 < now } == true
                 }
             )
             if Self.selectionChangeAffectsSidebarLists(
@@ -1143,8 +1145,13 @@ final class UnpeelStore: ObservableObject {
     /// latest snapshot once the interaction releases its row.
     private var remoteProjectionDeferredForSidebarInteraction = false
     /// Per-project memo of the sidebar's rendered row lists; see
-    /// `sidebarLists(in:)`. Cleared whenever an input changes.
-    private var sidebarListsCache: [String: (pinned: [SessionEntry], displayed: [SessionEntry])] = [:]
+    /// `sidebarLists(in:)`. Cleared when its inputs change or a row ages out.
+    private struct SidebarSessionLists {
+        var pinned: [SessionEntry]
+        var displayed: [SessionEntry]
+        var nextAgeCutoff: Date?
+    }
+    private var sidebarListsCache: [String: SidebarSessionLists] = [:]
 
     /// Last observed foreground-runtime identity (`id:pid`, "" while none),
     /// tracked only for sessions whose launch command is not hook-capable.
@@ -1871,7 +1878,10 @@ final class UnpeelStore: ObservableObject {
         let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
             // Off-main collection: the safety net fires forever, and its
             // disk pass must never cost the main queue a frame.
-            Task { @MainActor in self?.scheduleRescan(after: 0) }
+            Task { @MainActor in
+                self?.invalidateExpiredSidebarLists()
+                self?.scheduleRescan(after: 0)
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         safetyTimer = timer
@@ -15456,12 +15466,9 @@ final class UnpeelStore: ObservableObject {
     /// windowing. The array-of-arrays shape remains because this path
     /// historically operated on blocks; each block is one session now.
     private func sidebarSessionBlocks(
-        in node: ProjectNode
+        in node: ProjectNode,
+        candidates: [SessionEntry]
     ) -> (ordered: [[SessionEntry]], stopped: [[SessionEntry]]) {
-        let pinnedRenderedIDs = Set(pinnedSessions(in: node).map(\.id))
-        let candidates = node.sessions.filter {
-            !pinnedRenderedIDs.contains($0.id)
-        }
         // The drag-reorder overlay must survive the recency sort, or a hand-
         // dragged row snaps straight back. Rows absent from the overlay stay
         // newest-first above the hand-ordered block, mirroring
@@ -15552,17 +15559,31 @@ final class UnpeelStore: ObservableObject {
     /// each visible ProjectNodeView body, which asked for both lists —
     /// ordering plus a UserDefaults read per project per render pass. The
     /// inputs only change on tree/pin rebuilds and the explicit mutations
-    /// that call `invalidateSidebarLists()`.
-    private func sidebarLists(
-        in node: ProjectNode
-    ) -> (pinned: [SessionEntry], displayed: [SessionEntry]) {
+    /// that call `invalidateSidebarLists()`, or when a row reaches the cutoff.
+    private func sidebarLists(in node: ProjectNode) -> SidebarSessionLists {
         if let cached = sidebarListsCache[node.id] { return cached }
         let pinned = pinnedSessions(in: node)
-        let (ordered, inactive) = sidebarSessionBlocks(in: node)
-        // A scoped Host already applied its own inactive-preview setting when
-        // it built bootstrap. The Controller must render that projection as
-        // advertised instead of imposing this Mac's local preference on it.
+        let pinnedIDs = Set(pinned.map(\.id))
+        let now = Date()
         let hostAlreadyWindowed = remoteProjectSummariesByID[node.id] != nil
+        let rendersSelectedScope = hostAlreadyWindowed || selectedHostScope == .local
+        let selection = rendersSelectedScope ? selectedSessionID : sidebarCarouselLocalSelectedSessionID
+        let layout = rendersSelectedScope ? paneLayoutState : paneLayoutController.state(forScopeID: "local")
+        let groupRepresentatives = Set(layout.groups.compactMap(\.representativeSessionID))
+        func ageCutoff(_ session: SessionEntry) -> Date? {
+            guard session.id != selection,
+                  !groupRepresentatives.contains(session.id),
+                  !restartingSessionIDs.contains(session.id)
+            else { return nil }
+            return SidebarSessionAge.cutoff(for: session)
+        }
+        let candidates = node.sessions.filter { session in
+            !pinnedIDs.contains(session.id)
+                && ageCutoff(session).map { now <= $0 } != false
+        }
+        let (ordered, inactive) = sidebarSessionBlocks(in: node, candidates: candidates)
+        // Scoped Hosts already applied their own inactive-preview setting in
+        // bootstrap. The age cutoff above applies to every Mac sidebar scope.
         var visibleInactiveIDs = Set<String>()
         var inactiveRank = 0
         for block in inactive {
@@ -15583,8 +15604,24 @@ final class UnpeelStore: ObservableObject {
             }
         }
         let rendered = displayedBlocks.flatMap { $0 }
-        sidebarListsCache[node.id] = (pinned, rendered)
-        return (pinned, rendered)
+        let lists = SidebarSessionLists(
+            pinned: pinned,
+            displayed: rendered,
+            nextAgeCutoff: rendered.compactMap(ageCutoff).min()
+        )
+        sidebarListsCache[node.id] = lists
+        return lists
+    }
+
+    private func invalidateExpiredSidebarLists() {
+        guard !sidebarInteractionBlocksRemoteProjection else { return }
+        let now = Date()
+        let expiredProjects = sidebarListsCache.compactMap { id, lists in
+            lists.nextAgeCutoff.map { $0 < now } == true ? id : nil
+        }
+        guard !expiredProjects.isEmpty else { return }
+        objectWillChange.send()
+        for id in expiredProjects { sidebarListsCache.removeValue(forKey: id) }
     }
 
     func invalidateSidebarLists() {

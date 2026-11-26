@@ -101,6 +101,13 @@ workspaces, paired Hosts, and SSH Hosts. A scope-only feature is a bug
 unless it is listed below with its reason. Gate verbs by the advertised
 Host operation and the provider or resource's capabilities.
 
+The Mac sidebar and its workspace previews hide unpinned idle and stopped
+Sessions whose last activity was more than seven days ago, including when
+**Show more** is expanded. Pinned Sessions, the current selection, open
+pane groups, and Sessions that are starting, working, or need attention
+stay eligible.
+Older Sessions are still available through search and history.
+
 **Mark All as Read** (project and group context menu) applies the same
 per-Session read verb to every unread Session in that project, its groups,
 and worktrees, so it is available wherever Mark as Read is.
