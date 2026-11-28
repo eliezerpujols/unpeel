@@ -1338,6 +1338,7 @@ final class NativeRemoteBackend: @unchecked Sendable {
         let displayName: String?
         let colorID: String?
         let dateSorted: Bool?
+        let sessionSortMode: SessionSortMode?
         let pinned: Bool?
         /// `project.folders` fields. Optional, so nil keys are omitted and
         /// an older bridge never sees them.
@@ -1358,6 +1359,7 @@ final class NativeRemoteBackend: @unchecked Sendable {
                 displayName: patch.displayName,
                 colorID: patch.colorID,
                 dateSorted: patch.dateSorted,
+                sessionSortMode: patch.sessionSortMode,
                 pinned: patch.pinned,
                 folders: patch.folders,
                 agentFolderAccess: patch.agentFolderAccess

@@ -3817,13 +3817,18 @@ extension RemoteHostRuntime {
         )
     }
 
-    func setProjectDateSorted(projectID: String, dateSorted: Bool) async throws {
+    func setProjectSessionSortMode(projectID: String, mode: SessionSortMode) async throws {
+        let supportsModes = supportsHostOperation(SessionSortMode.hostCapability)
         try await setProjectOrganization(
             projectID: projectID,
+            capability: supportsModes || mode == .created
+                ? SessionSortMode.hostCapability
+                : HostOperation.projectOrganizationSet,
             operation: "change Session sort",
             patch: RemoteProjectOrganizationPatch(
                 projectID: projectID,
-                dateSorted: dateSorted
+                dateSorted: supportsModes ? nil : mode.legacyDateSorted,
+                sessionSortMode: supportsModes || mode == .created ? mode : nil
             )
         )
     }

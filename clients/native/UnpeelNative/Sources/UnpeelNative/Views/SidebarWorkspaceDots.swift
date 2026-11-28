@@ -1312,7 +1312,7 @@ enum SidebarListContentBuilder {
         pinnedItems: (ProjectNode) -> [SidebarMixedItem],
         sessionLists: (ProjectNode) -> (pinned: [SessionEntry], displayed: [SessionEntry]),
         displayedItems: (ProjectNode, [SessionEntry]) -> [SidebarMixedItem],
-        sessionRow: (SessionEntry, Int, Bool) -> SidebarListContent.SessionRow,
+        sessionRow: (SessionEntry, String, Int, Bool) -> SidebarListContent.SessionRow,
         emptyLabel: (ProjectNode) -> String
     ) -> [SidebarListContent.InnerRow] {
         var rows: [SidebarListContent.InnerRow] = []
@@ -1326,7 +1326,7 @@ enum SidebarListContentBuilder {
                 budget -= 1
                 switch item {
                 case .session(let entry):
-                    rows.append(.session(sessionRow(entry, depth, pinned)))
+                    rows.append(.session(sessionRow(entry, node.id, depth, pinned)))
                 case .folder(let child):
                     let expanded = isExpanded(child.id)
                     rows.append(.folder(folder(child, depth + 1, expanded)))
@@ -1357,7 +1357,7 @@ enum SidebarListContentBuilder {
         let visibleRegular = collapsedVisibleCount(
             pinnedCount: pinned.count,
             regular: regularItems,
-            isSelected: { sessionRow($0, depth, false).isSelected }
+            isSelected: { sessionRow($0, node.id, depth, false).isSelected }
         )
         guard appendItems(Array(regularItems.prefix(visibleRegular)), pinned: false)
         else { return rows }
@@ -1447,7 +1447,7 @@ enum SidebarListContentBuilder {
                     displayedItems: { n, _ in
                         store.renderedDisplayedItems(in: n)
                     },
-                    sessionRow: { entry, depth, pinned in
+                    sessionRow: { entry, projectID, depth, pinned in
                         SidebarListContent.SessionRow(
                             entry: entry,
                             depth: depth,
@@ -1455,9 +1455,8 @@ enum SidebarListContentBuilder {
                             isSelected: entry.id == selectedSessionID,
                             isUnread: store.sessionIsUnread(entry.id),
                             paneItems: paneProjection.itemsByRepresentative[entry.id] ?? [],
-                            ageTimestampMs: store.isDateSorted(projectID: entry.projectID)
-                                ? max(entry.createdAt, entry.lifecycleAtMs ?? 0)
-                                : nil
+                            ageTimestampMs: store.sessionSortMode(projectID: projectID)
+                                .ageTimestampMs(for: entry)
                         )
                     },
                     emptyLabel: { n in
@@ -1582,9 +1581,6 @@ enum SidebarListContentBuilder {
             ).map(Set.init) ?? Set(rootNodes.map(\.id))
         }
 
-        let recency: (SessionEntry) -> Int64 = {
-            max($0.createdAt, $0.lifecycleAtMs ?? 0)
-        }
         // A still-warm runtime preserves its explicit selection when the
         // user swipes back. A pooled/cold target shows the scope's
         // REMEMBERED selection (what the committed switch will restore) so
@@ -1635,28 +1631,22 @@ enum SidebarListContentBuilder {
             $0.presentationSessionID(knownIDs: knownSessionIDs)
         })
         func sessionLists(_ n: ProjectNode) -> (pinned: [SessionEntry], displayed: [SessionEntry]) {
-            let dateSorted = projectSummaries[n.id]?.dateSorted == true
+            let mode = projectSummaries[n.id]?.resolvedSessionSortMode ?? .manual
             let pinned = n.sessions.filter { summariesByID[$0.id]?.pinned == true }
-            var candidates = n.sessions.filter { session in
+            let candidates = n.sessions.filter { session in
                 summariesByID[session.id]?.pinned != true
                     && (session.id == displayedSelectedSessionID
                         || approvalSessionIDs.contains(session.id)
                         || paneProjection.itemsByRepresentative[session.id] != nil
                         || SidebarSessionAge.cutoff(for: session).map { now <= $0 } != false)
             }
-            if dateSorted {
-                candidates.sort { recency($0) > recency($1) }
-            }
-            let active = candidates.filter(\.isLive)
-            let stopped = candidates.filter { !$0.isLive }
-                .sorted { recency($0) > recency($1) }
-            // The stopped section renders in recency order in the real list
-            // regardless of the group's manual order (sidebarSessionBlocks
-            // appends `sortedStopped` after the active section).
-            return (pinned, active + stopped)
+            let sections = mode.sidebarSections(
+                candidates, manualOrder: projectSummaries[n.id]?.sessionOrder ?? n.sessions.map(\.id)
+            )
+            return (pinned, sections.live + sections.stopped)
         }
         func makeSessionRow(
-            _ entry: SessionEntry, depth: Int, pinned: Bool
+            _ entry: SessionEntry, projectID: String, depth: Int, pinned: Bool
         ) -> SidebarListContent.SessionRow {
             let summary = summariesByID[entry.id]
             return SidebarListContent.SessionRow(
@@ -1666,9 +1656,8 @@ enum SidebarListContentBuilder {
                 isSelected: entry.id == displayedSelectedSessionID,
                 isUnread: summary?.unread == true,
                 paneItems: paneProjection.itemsByRepresentative[entry.id] ?? [],
-                ageTimestampMs: projectSummaries[entry.projectID]?.dateSorted == true
-                    ? recency(entry)
-                    : nil
+                ageTimestampMs: projectSummaries[projectID]?.resolvedSessionSortMode
+                    .ageTimestampMs(for: entry)
             )
         }
         let isUnread: (String) -> Bool = { summariesByID[$0]?.unread == true }
@@ -1715,7 +1704,7 @@ enum SidebarListContentBuilder {
                 }
             }
             guard !folders.isEmpty else { return displayed.map { .session($0) } }
-            let dateSorted = projectSummaries[n.id]?.dateSorted == true
+            let dateSorted = (projectSummaries[n.id]?.resolvedSessionSortMode ?? .manual) != .manual
             let order = dateSorted ? [] : (projectSummaries[n.id]?.sessionOrder ?? [])
             let folderIDs = Set(folders.map(\.id))
             guard !dateSorted, order.contains(where: { folderIDs.contains($0) }) else {

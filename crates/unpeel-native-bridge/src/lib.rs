@@ -2064,6 +2064,8 @@ struct NativeProjectOrganizationWire {
     color_id: Option<String>,
     #[serde(rename = "dateSorted")]
     date_sorted: Option<bool>,
+    #[serde(rename = "sessionSortMode")]
+    session_sort_mode: Option<unpeel_core::session_sort::SessionSortMode>,
     pinned: Option<bool>,
     /// `project.folders`: replaces the folder list wholesale; `[]` clears it.
     folders: Option<Vec<RemoteProjectFolderEntry>>,
@@ -2391,6 +2393,7 @@ fn set_remote_project_organization(
         display_name: wire.display_name,
         color_id: wire.color_id,
         date_sorted: wire.date_sorted,
+        session_sort_mode: wire.session_sort_mode,
         pinned: wire.pinned,
         folders: wire.folders,
         agent_folder_access: wire.agent_folder_access,

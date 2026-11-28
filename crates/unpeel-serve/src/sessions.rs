@@ -14,6 +14,7 @@ use unpeel_core::app_paths;
 use unpeel_core::controller_api::HostCreatePreset;
 use unpeel_core::program_status::{ProgramState, ProgramStatusSummary};
 use unpeel_core::session_host::{HostedSessionManifest, HostedSessionState};
+use unpeel_core::session_sort::SessionSortMode;
 use unpeel_core::state::AppState;
 
 use crate::activity::{ActivityEngine, HookState};
@@ -190,15 +191,23 @@ impl SessionRow {
 /// is deliberately not an update. The id tie-breaker keeps independent
 /// frontends deterministic.
 pub fn compare_recent(left: &SessionRow, right: &SessionRow) -> std::cmp::Ordering {
-    let working = |row: &SessionRow| matches!(row.status, Status::Starting | Status::Busy);
-    working(right)
-        .cmp(&working(left))
-        .then_with(|| {
-            right
-                .activity_at
-                .max(right.created_at)
-                .cmp(&left.activity_at.max(left.created_at))
-        })
+    compare_by_date(SessionSortMode::Updated, left, right)
+}
+
+fn compare_by_date(
+    mode: SessionSortMode,
+    left: &SessionRow,
+    right: &SessionRow,
+) -> std::cmp::Ordering {
+    let key = |row: &SessionRow| {
+        mode.date_key(
+            row.created_at,
+            row.activity_at,
+            matches!(row.status, Status::Starting | Status::Busy),
+        )
+    };
+    key(left)
+        .cmp(&key(right))
         .then_with(|| left.id.cmp(&right.id))
 }
 
@@ -938,19 +947,6 @@ pub fn scan_sidebar(
         project_order.sort_by_key(|(pid, _)| std::cmp::Reverse(group_newest(pid)));
     }
 
-    // Groups the user switched to date sort: their manual order is ignored
-    // until they switch back (same source the desktop reads).
-    let date_sorted: std::collections::HashSet<String> = app_state
-        .as_ref()
-        .map(|state| {
-            state
-                .session_sort_modes
-                .iter()
-                .filter(|(_, mode)| mode.as_str() == "date")
-                .map(|(id, _)| id.clone())
-                .collect()
-        })
-        .unwrap_or_default();
     let pinned_groups: std::collections::HashSet<String> = app_state
         .as_ref()
         .map(|state| {
@@ -990,7 +986,7 @@ pub fn scan_sidebar(
             overlay,
             keep_visible,
             &known,
-            date_sorted.contains(&project_id),
+            project_session_sort_mode(app_state.as_ref(), &project_id),
             stopped_window,
         );
         // This project's children (worktrees and groups), in project order.
@@ -1039,7 +1035,7 @@ pub fn scan_sidebar(
                 overlay,
                 keep_visible,
                 &known,
-                date_sorted.contains(&kid_id),
+                project_session_sort_mode(app_state.as_ref(), &kid_id),
                 stopped_window,
             );
             items.push(SidebarItem::WorktreeHeader {
@@ -1109,6 +1105,14 @@ pub fn sidebar_stopped_window(raw: Option<u64>) -> usize {
     }
 }
 
+fn project_session_sort_mode(state: Option<&AppState>, project_id: &str) -> SessionSortMode {
+    SessionSortMode::from_stored(
+        state
+            .and_then(|state| state.session_sort_modes.get(project_id))
+            .and_then(serde_json::Value::as_str),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn group_listing(
     project_id: &str,
@@ -1117,7 +1121,7 @@ fn group_listing(
     overlay: Option<&NativeOverlay>,
     keep_visible: &std::collections::HashSet<String>,
     known: &std::collections::HashSet<String>,
-    date_sorted: bool,
+    mode: SessionSortMode,
     stopped_window: usize,
 ) -> GroupListing {
     let member = |i: &usize| in_group(&rows[*i], project_id, known);
@@ -1128,11 +1132,17 @@ fn group_listing(
     // a switch back to custom.
     let shared_order = unpeel_core::session_ops::session_order(project_id);
     let persisted_manual = if shared_order.is_empty() {
-        overlay.and_then(|o| o.session_order.get(project_id))
+        overlay
+            .and_then(|o| o.session_order.get(project_id))
+            .filter(|order| !order.is_empty())
     } else {
         Some(&shared_order)
     };
-    let manual = if date_sorted { None } else { persisted_manual };
+    let manual = if mode == SessionSortMode::Manual {
+        persisted_manual
+    } else {
+        None
+    };
 
     let mut pinned: Vec<usize> = indices
         .iter()
@@ -1162,26 +1172,25 @@ fn group_listing(
                 .unwrap_or(usize::MAX)
         });
     }
-    // Sessions are flat within a group. New rows absent from the manual order
-    // float newest-first above the explicitly ordered block. Date mode is
-    // finalized below with the exact Recent comparator; this creation key is
-    // only the custom-order fallback.
-    let sort_stamp = |i: usize| -> u64 { rows[i].created_at };
-    let order_key = |i: usize| -> (u8, usize, std::cmp::Reverse<u64>) {
-        match manual.and_then(|m| m.iter().position(|id| *id == rows[i].id)) {
-            Some(rank) => (1, rank, std::cmp::Reverse(sort_stamp(i))),
-            None => (0, 0, std::cmp::Reverse(sort_stamp(i))),
-        }
+    // Rows without a saved rank lead the manual order, newest-created first.
+    let order_key = |i: usize| {
+        let row = &rows[i];
+        let rank = manual.and_then(|ids| ids.iter().position(|id| *id == row.id));
+        (rank, std::cmp::Reverse(row.created_at), &row.id)
     };
     let mut active: Vec<usize> = indices
         .iter()
         .copied()
         .filter(|i| member(i) && rows[*i].running && !rows[*i].pinned)
         .collect();
-    if date_sorted {
-        active.sort_by(|&left, &right| compare_recent(&rows[left], &rows[right]));
-    } else {
-        active.sort_by_key(|&i| order_key(i));
+    match mode {
+        SessionSortMode::Manual => active.sort_by_key(|&i| order_key(i)),
+        SessionSortMode::Updated => {
+            active.sort_by(|&left, &right| compare_recent(&rows[left], &rows[right]))
+        }
+        SessionSortMode::Created => {
+            active.sort_by(|&left, &right| compare_by_date(mode, &rows[left], &rows[right]))
+        }
     }
     let mut stopped: Vec<usize> = indices
         .iter()
@@ -1189,16 +1198,11 @@ fn group_listing(
         .filter(|i| member(i) && !rows[*i].running && !rows[*i].pinned)
         .collect();
 
-    // Stopped rows keep their lifecycle order, newest first.
+    // Rank the retention window by lifecycle before applying presentation
+    // order, so choosing a sort mode cannot change which sessions expire.
     stopped.sort_by(|&left, &right| {
-        let stamp = |index: usize| rows[index].created_at.max(rows[index].activity_at);
-        stamp(right)
-            .cmp(&stamp(left))
-            .then_with(|| rows[left].id.cmp(&rows[right].id))
+        compare_by_date(SessionSortMode::Manual, &rows[left], &rows[right])
     });
-    if manual.is_some() {
-        stopped.sort_by_key(|&i| order_key(i));
-    }
 
     // The keep limit also keeps any stopped row the user has not read.
     let mut kept: Vec<usize> = Vec::new();
@@ -1210,6 +1214,14 @@ fn group_listing(
         } else {
             hidden.push(index);
         }
+    }
+
+    match mode {
+        SessionSortMode::Manual if manual.is_some() => kept.sort_by_key(|&i| order_key(i)),
+        SessionSortMode::Created => {
+            kept.sort_by(|&left, &right| compare_by_date(mode, &rows[left], &rows[right]))
+        }
+        _ => {}
     }
 
     // Pins first, every live row next, then the windowed stopped tail.
@@ -1962,12 +1974,6 @@ pub fn mobile_snapshot(
     }
 
     let app_state = load_app_state();
-    let date_sorted_projects: std::collections::HashSet<&str> = app_state
-        .as_ref()
-        .into_iter()
-        .flat_map(|state| state.session_sort_modes.iter())
-        .filter_map(|(id, mode)| (mode == "date").then_some(id.as_str()))
-        .collect();
     let pinned_projects: std::collections::HashSet<&str> = app_state
         .as_ref()
         .into_iter()
@@ -2026,9 +2032,7 @@ pub fn mobile_snapshot(
                     obj.insert("pinned".into(), true.into());
                 }
             }
-            if date_sorted_projects.contains(id) {
-                obj.insert("dateSorted".into(), true.into());
-            }
+            project_session_sort_mode(app_state.as_ref(), id).write_summary(obj);
             if let Some(color_id) = color_id {
                 obj.insert("colorID".into(), color_id.into());
             }
@@ -2345,7 +2349,7 @@ mod tests {
             None,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            SessionSortMode::Updated,
             5,
         );
         let ids = |indices: &[usize]| {
@@ -2368,6 +2372,46 @@ mod tests {
             ],
             "all live rows stay above the stopped section"
         );
+    }
+
+    #[test]
+    fn group_sort_modes_preserve_manual_order_and_lifecycle_retention() {
+        let mut rows = [
+            recent_test_row("first-work", Status::Busy, true, 20, false),
+            recent_test_row("second-idle", Status::Idle, true, 30, false),
+            recent_test_row("old-resumed", Status::Exited, false, 100, false),
+            recent_test_row("new-stopped", Status::Exited, false, 75, false),
+            recent_test_row("expired", Status::Exited, false, 71, false),
+        ];
+        for (row, created) in rows.iter_mut().zip([1, 2, 3, 70, 71]) {
+            row.created_at = created;
+        }
+        let overlay = NativeOverlay {
+            session_order: HashMap::from([(
+                "__recent_test_project".into(),
+                [1, 0, 2, 3].map(|index| rows[index].id.clone()).to_vec(),
+            )]),
+            ..NativeOverlay::default()
+        };
+        for (mode, expected) in [
+            (SessionSortMode::Manual, [1, 0, 2, 3]),
+            (SessionSortMode::Updated, [0, 1, 2, 3]),
+            (SessionSortMode::Created, [1, 0, 3, 2]),
+            (SessionSortMode::Manual, [1, 0, 2, 3]),
+        ] {
+            let listing = group_listing(
+                "__recent_test_project",
+                &rows,
+                &[4, 3, 2, 1, 0],
+                Some(&overlay),
+                &Default::default(),
+                &Default::default(),
+                mode,
+                2,
+            );
+            assert_eq!(listing.sessions, expected, "{mode:?}");
+            assert_eq!(listing.hidden, [4], "{mode:?}");
+        }
     }
 
     #[test]
@@ -2399,7 +2443,7 @@ mod tests {
             None,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            SessionSortMode::Updated,
             2,
         );
         let ids = listing
@@ -2421,7 +2465,7 @@ mod tests {
             None,
             &unread,
             &std::collections::HashSet::new(),
-            true,
+            SessionSortMode::Updated,
             2,
         );
         let expired = listing

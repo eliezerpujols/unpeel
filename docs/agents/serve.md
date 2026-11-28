@@ -255,6 +255,17 @@ auto-stop skips <id>: unread attention (waiting on the user; never
 auto-stopped unseen)` / `no resumable conversation …` / `idle for less than
 the cutoff` / `pinned` / …), so "why did this never stop" is one grep.
 
+### Session sort modes (protocol minor 28)
+
+`project.session_sort_mode.set` advertises support for `sessionSortMode` on
+bootstrap project rows and in `POST /mobile/project-organization`.
+The accepted values are `"manual"`, `"updated"`, and `"created"`.
+On updates, an explicit mode takes precedence over the legacy `dateSorted`
+boolean. A boolean-only update selects Recently updated (`true`) or Manual
+(`false`). Bootstrap still sends `dateSorted: true` for both date modes so
+older Controllers handle either as date-sorted. The Host writes the override
+to `app-state.json` and preserves the saved order in `session-order.json`.
+
 ### Clear attention (protocol minor 27)
 
 `session.attention.clear` uses `POST /mobile/session-action` with

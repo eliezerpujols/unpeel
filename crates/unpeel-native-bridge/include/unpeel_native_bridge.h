@@ -531,7 +531,8 @@ int32_t unpeel_native_bridge_remote_app_open(
 /*
  * Organize one remote project/group (project.organization.set). patch_json
  * is the camelCase one-project patch (sortOrder?, displayName?, colorID?,
- * dateSorted?; absent fields are left unchanged). sortOrder moves the
+ * sessionSortMode?, dateSorted?; absent fields are left unchanged).
+ * sortOrder moves the
  * project to that index among its same-parent siblings in the Host's
  * current display order.
  */

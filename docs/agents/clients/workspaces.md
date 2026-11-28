@@ -123,6 +123,10 @@ retained runtime connection is active.
 Later prompts can raise attention again. Pending MCP approvals require an
 explicit answer.
 
+**Sort sessions** offers Recently updated, Recently created, and Manual
+per folder in each workspace scope. The sidebar and swipe preview use
+the same mode and age label. See [session order](../session-model.md#persistence-restart-and-resume).
+
 #### Accepted menu gaps
 
 - **Agent access** works on this Mac's workspaces. Paired and SSH Hosts have

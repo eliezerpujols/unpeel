@@ -958,10 +958,8 @@ final class UnpeelStore: ObservableObject {
 
     /// Groups (project/group/worktree id) whose sessions sort by date
     /// (recently updated first) instead of the manual drag order —
-    /// app-state.json `session_sort_modes`, shared with the TUI. Date sort
-    /// disables drag re-ordering for the group; the stored manual order
-    /// survives a switch back to custom.
-    @Published private(set) var dateSortedProjectIDs: Set<String> = []
+    /// Per-folder overrides loaded from the shared app-state.json.
+    @Published private var sessionSortModes: [String: SessionSortMode] = [:]
 
     /// Settings ▸ Advanced "Auto-stop inactive terminals": sessions
     /// CONTINUOUSLY idle for this many minutes (0 = off) are stopped — the
@@ -6057,13 +6055,12 @@ final class UnpeelStore: ObservableObject {
             projectFolderColorIDs = externalColors
         }
         let stateFile = loadAppState()
-        // Before rebuildTree: node.sessions ordering consults this set.
-        let dateSorted = Set(
-            (stateFile?.sessionSortModes ?? [:])
-                .filter { $0.value == "date" }.keys
-        )
-        if dateSorted != dateSortedProjectIDs {
-            dateSortedProjectIDs = dateSorted
+        let sortModes: [String: SessionSortMode] = (stateFile?.sessionSortModes ?? [:]).compactMapValues { value in
+            let mode = SessionSortMode(storedValue: value)
+            return mode == .manual ? nil : mode
+        }
+        if sortModes != sessionSortModes {
+            sessionSortModes = sortModes
             invalidateSidebarLists()
         }
         let sessions = scanSessions(snapshot: snapshot)
@@ -7259,45 +7256,31 @@ final class UnpeelStore: ObservableObject {
         saveProjectFolderColorIDs()
     }
 
-    /// Whether this group's sessions sort by date (recently updated first)
-    /// instead of the manual drag order.
-    func isDateSorted(projectID: String) -> Bool {
-        if let summary = remoteProjectSummariesByID[projectID] {
-            return summary.dateSorted == true
-        }
-        return dateSortedProjectIDs.contains(projectID)
+    func sessionSortMode(projectID: String) -> SessionSortMode {
+        remoteProjectSummariesByID[projectID]?.resolvedSessionSortMode
+            ?? sessionSortModes[projectID]
+            ?? .manual
     }
 
-    /// Flip a group between date sort and custom order. The mode lives in
-    /// app-state.json (`session_sort_modes`) so the TUI reads and writes the
-    /// same truth; the manual order in session-order.json stays untouched,
-    /// so switching back to custom restores the old arrangement.
-    func setSessionDateSorted(_ dateSorted: Bool, for projectID: String) {
+    func canSortSessionsByCreation(projectID: String) -> Bool {
+        !routesProjectVerbThroughHost(projectID)
+            || remoteHostRuntime.supportsHostOperation(SessionSortMode.hostCapability)
+    }
+
+    func setSessionSortMode(_ mode: SessionSortMode, for projectID: String) {
         if routesProjectVerbThroughHost(projectID) {
             performRemoteVerb("Couldn't change the Session sort") { runtime in
-                try await runtime.setProjectDateSorted(
-                    projectID: projectID,
-                    dateSorted: dateSorted
-                )
+                try await runtime.setProjectSessionSortMode(projectID: projectID, mode: mode)
             }
             return
         }
         let wrote = editPresetStateAnnouncing { object in
-            var modes = (object["session_sort_modes"] as? [String: Any])?
-                .compactMapValues { $0 as? String } ?? [:]
-            if dateSorted {
-                modes[projectID] = "date"
-            } else {
-                modes.removeValue(forKey: projectID)
-            }
+            var modes = object["session_sort_modes"] as? [String: Any] ?? [:]
+            modes[projectID] = mode.storedValue
             object["session_sort_modes"] = modes
         }
         guard wrote else { return }
-        if dateSorted {
-            dateSortedProjectIDs.insert(projectID)
-        } else {
-            dateSortedProjectIDs.remove(projectID)
-        }
+        sessionSortModes[projectID] = mode == .manual ? nil : mode
         invalidateSidebarLists()
         withAnimation(.easeInOut(duration: 0.18)) { rebuildTreeFromLastScan() }
     }
@@ -8022,19 +8005,9 @@ final class UnpeelStore: ObservableObject {
     private func applySessionOrderOverlay(
         _ base: [SessionEntry], projectID: String
     ) -> [SessionEntry] {
-        // Date sort ignores the manual order entirely (the stored order
-        // survives for a switch back) and uses the same shape as Recent:
-        // working rows first, then every other lifecycle event newest-first.
-        // EXCEPT while a drag's live reorder preview is in flight: the
-        // preview renders even in a date-sorted list (smooth sort), and the
-        // drop either flips the list to custom order (commit) or drops the
-        // preview and falls straight back to date order (cancel).
-        if dateSortedProjectIDs.contains(projectID),
-           sessionOrderPreviews[projectID] == nil {
-            return Self.sessionsSortedByRecentActivity(
-                base,
-                restartingSessionIDs: restartingSessionIDs
-            )
+        let mode = sessionSortModes[projectID] ?? .manual
+        if mode != .manual {
+            return mode.sortedByDate(base, restartingSessionIDs: restartingSessionIDs)
         }
         // Same precedence as `sidebarSessionBlocks`: the cross-frontend file
         // wins, the local overlay is the fallback.
@@ -8071,23 +8044,9 @@ final class UnpeelStore: ObservableObject {
         _ sessions: [SessionEntry],
         restartingSessionIDs: Set<String> = []
     ) -> [SessionEntry] {
-        func isWorking(_ session: SessionEntry) -> Bool {
-            session.status == .starting
-                || session.status == .busy
-                || restartingSessionIDs.contains(session.id)
-        }
-        func stamp(_ session: SessionEntry) -> Int64 {
-            max(session.createdAt, session.lifecycleAtMs ?? 0)
-        }
-        return sessions.sorted { lhs, rhs in
-            let lhsWorking = isWorking(lhs)
-            let rhsWorking = isWorking(rhs)
-            if lhsWorking != rhsWorking { return lhsWorking }
-            let lhsStamp = stamp(lhs)
-            let rhsStamp = stamp(rhs)
-            if lhsStamp != rhsStamp { return lhsStamp > rhsStamp }
-            return lhs.id < rhs.id
-        }
+        SessionSortMode.updated.sortedByDate(
+            sessions, restartingSessionIDs: restartingSessionIDs
+        )
     }
 
     /// Durable project/worktree sibling move used by tests and non-drag
@@ -8578,12 +8537,15 @@ final class UnpeelStore: ObservableObject {
     /// file always receives the combined pin + regular order.
     func commitSessionReorder(projectID: String, pinned: Bool) {
         guard sessionOrderPreviews[projectID] != nil else { return }
+        guard sessionSortMode(projectID: projectID) == .manual else {
+            cancelSessionReorder(projectID: projectID)
+            return
+        }
         // Remote nodes commit the combined pinned + regular visible order
         // through the Host's `session.order.set`, exactly as a desktop drag
         // commits it locally. The optimistic order keeps the rows in place
         // until the next bootstrap confirms it.
         if routesProjectVerbThroughHost(projectID) {
-            let wasDateSorted = isDateSorted(projectID: projectID)
             guard let node = findDisplayNode(projectID) else {
                 sessionOrderPreviews.removeValue(forKey: projectID)
                 return
@@ -8624,12 +8586,6 @@ final class UnpeelStore: ObservableObject {
                 }
                 self.projectRemoteScope(snapshot: self.remoteHostRuntime.snapshot)
             }) { runtime in
-                if wasDateSorted {
-                    try await runtime.setProjectDateSorted(
-                        projectID: projectID,
-                        dateSorted: false
-                    )
-                }
                 try await runtime.setSessionOrder(
                     projectID: projectID,
                     orderedSessionIDs: orderedIDs
@@ -8651,13 +8607,6 @@ final class UnpeelStore: ObservableObject {
         if pinned {
             setPinnedOrder(projectID: projectID, ids: pinnedIDs)
         } else {
-            // Hand-ordering a date-sorted list IS choosing custom order:
-            // without the flip the committed order would snap back to date
-            // order on the next rescan. Pinned-section commits never flip —
-            // the pinned order is manual regardless of the list's sort mode.
-            if dateSortedProjectIDs.contains(projectID) {
-                setSessionDateSorted(false, for: projectID)
-            }
             setSessionOrder(projectID: projectID, ids: regularIDs)
         }
     }
@@ -12457,11 +12406,8 @@ final class UnpeelStore: ObservableObject {
         return memberIDs.count
     }
 
-    /// Whether a session row in a DATE-SORTED list still participates in the
-    /// detached drag. The lift is how a Session leaves a group, and a
-    /// committed within-list reorder flips the list to custom order through
-    /// local state or `project.organization.set`, as appropriate. A scoped
-    /// Session may also lift solely to reach the Controller-owned pane edges.
+    /// Date-sorted rows can still be lifted to file a session in another
+    /// folder or place it in a pane.
     func canLiftSessionFromDateSortedList(_ sessionID: String) -> Bool {
         remoteSummariesByID[sessionID] == nil
             || selectedHostScope.supportsSessionPanes
@@ -15359,7 +15305,7 @@ final class UnpeelStore: ObservableObject {
             (findNode(projectID).map { visibleChildFolders(in: $0) } ?? []).map(\.id)
         )
         guard !folderIDs.isEmpty else { return nil }
-        if isDateSorted(projectID: projectID), sessionOrderPreviews[projectID] == nil {
+        if sessionSortMode(projectID: projectID) != .manual {
             return nil
         }
         let order = sessionOrderPreviews[projectID]
@@ -15422,11 +15368,9 @@ final class UnpeelStore: ObservableObject {
         guard !folders.isEmpty else {
             return sessions.map { .session($0) }
         }
-        let dateSorted = isRemoteNode
-            ? remoteProjectSummariesByID[node.id]?.dateSorted == true
-            : dateSortedProjectIDs.contains(node.id)
+        let dateSorted = sessionSortMode(projectID: node.id) != .manual
         let order = dateSorted
-            ? (sessionOrderPreviews[node.id] ?? [])
+            ? []
             : isRemoteNode
                 ? sessionOrderPreviews[node.id]
                     ?? remoteSessionOrderByProject[node.id]
@@ -15437,7 +15381,7 @@ final class UnpeelStore: ObservableObject {
                     ?? []
         let folderIDs = Set(folders.map(\.id))
         let mixed = order.contains { folderIDs.contains($0) }
-        if (dateSorted && sessionOrderPreviews[node.id] == nil) || !mixed {
+        if !mixed {
             return pinnedGroupsFirst(
                 folders.map { .folder($0) } + sessions.map { .session($0) }
             )
@@ -15469,76 +15413,26 @@ final class UnpeelStore: ObservableObject {
         in node: ProjectNode,
         candidates: [SessionEntry]
     ) -> (ordered: [[SessionEntry]], stopped: [[SessionEntry]]) {
-        // The drag-reorder overlay must survive the recency sort, or a hand-
-        // dragged row snaps straight back. Rows absent from the overlay stay
-        // newest-first above the hand-ordered block, mirroring
-        // `applySessionOrderOverlay`.
-        // An in-flight desktop drag previews in memory. Otherwise the shared
-        // file wins so a TUI (or any other frontend) drag shows up here; the
-        // local overlay remains the fallback for installs that predate it.
-        // Date sort ignores every manual-order source (drags are disabled
-        // for the group, so no preview can exist either).
         let isRemoteNode = remoteProjectSummariesByID[node.id] != nil
-        let dateSorted = isRemoteNode
-            ? remoteProjectSummariesByID[node.id]?.dateSorted == true
-            : dateSortedProjectIDs.contains(node.id)
-        // Remote nodes never consult local shared order files: the Host's
-        // bootstrap row order IS the committed order, and an in-flight drag
-        // previews on top of it exactly like local.
-        let manualOrder = dateSorted
-            ? []
-            : isRemoteNode
-                ? sessionOrderPreviews[node.id]
-                    ?? remoteSessionOrderByProject[node.id]
-                    ?? []
-                : sessionOrderPreviews[node.id]
-                    ?? Self.sharedSessionOrder(projectID: node.id)
-                    ?? AppDefaults.shared.stringArray(forKey: Self.sessionOrderKey(node.id))
-                    ?? []
-        var ordered = orderedSessions(candidates, manualOrder: manualOrder)
-        if dateSorted {
-            ordered = Self.sessionsSortedByRecentActivity(
-                ordered,
-                restartingSessionIDs: restartingSessionIDs
-            )
+        let mode = sessionSortMode(projectID: node.id)
+        let manualOrder = mode == .manual
+            ? sessionOrderPreviews[node.id]
+                ?? (isRemoteNode
+                    ? remoteSessionOrderByProject[node.id]
+                    : Self.sharedSessionOrder(projectID: node.id)
+                        ?? AppDefaults.shared.stringArray(forKey: Self.sessionOrderKey(node.id)))
+                ?? []
+            : []
+        let sections = mode.sidebarSections(
+            candidates, manualOrder: manualOrder, restartingSessionIDs: restartingSessionIDs
+        )
+        // Window membership follows lifecycle even when display order differs.
+        let inactiveByLifecycle = sections.stopped.sorted { lhs, rhs in
+            let a = max(lhs.lifecycleSortTimestampMs, sidebarUnpinRecencyBump[lhs.id] ?? 0)
+            let b = max(rhs.lifecycleSortTimestampMs, sidebarUnpinRecencyBump[rhs.id] ?? 0)
+            return a == b ? lhs.id < rhs.id : a > b
         }
-        let blocks = ordered.map { [$0] }
-        var active: [[SessionEntry]] = []
-        var stopped: [[SessionEntry]] = []
-        for block in blocks {
-            // A restarting (Resume clicked) block is active-in-waiting: it
-            // moves to its active-group position immediately instead of
-            // sitting in the stopped group until the replacement spawns —
-            // restart stabilizes created_at, so this IS its final spot.
-            let isActive = block.contains {
-                $0.isLive || restartingSessionIDs.contains($0.id)
-            }
-            if isActive {
-                active.append(block)
-            } else {
-                stopped.append(block)
-            }
-        }
-        let lifecycleRecency: ([SessionEntry]) -> Int64 = { block in
-            block.map {
-                max(
-                    max($0.createdAt, $0.lifecycleAtMs ?? 0),
-                    self.sidebarUnpinRecencyBump[$0.id] ?? 0
-                )
-            }.max() ?? 0
-        }
-        func newestFirst(
-            _ blocks: [[SessionEntry]], recency: ([SessionEntry]) -> Int64
-        ) -> [[SessionEntry]] {
-            blocks.enumerated().sorted { a, b in
-                let ra = recency(a.element)
-                let rb = recency(b.element)
-                if ra != rb { return ra > rb }
-                return a.offset < b.offset
-            }.map(\.element)
-        }
-        let sortedStopped = newestFirst(stopped, recency: lifecycleRecency)
-        return (active + sortedStopped, sortedStopped)
+        return ((sections.live + sections.stopped).map { [$0] }, inactiveByLifecycle.map { [$0] })
     }
 
     /// Whether an inactive row must stay in the sidebar past the preview.
@@ -15626,25 +15520,6 @@ final class UnpeelStore: ObservableObject {
 
     func invalidateSidebarLists() {
         sidebarListsCache.removeAll(keepingCapacity: true)
-    }
-
-    private func orderedSessions(
-        _ sessions: [SessionEntry],
-        manualOrder: [String]
-    ) -> [SessionEntry] {
-        guard !manualOrder.isEmpty else {
-            return sessions.sorted { $0.createdAt > $1.createdAt }
-        }
-        var rank: [String: Int] = [:]
-        for (index, id) in manualOrder.enumerated() { rank[id] = index }
-        return sessions.sorted { a, b in
-            switch (rank[a.id], rank[b.id]) {
-            case let (ra?, rb?): return ra < rb
-            case (nil, .some): return true
-            case (.some, nil): return false
-            case (nil, nil): return a.createdAt > b.createdAt
-            }
-        }
     }
 
     // MARK: - Pane pre-warming (native-only; no Svelte counterpart)
@@ -16610,11 +16485,10 @@ extension UnpeelStore {
         }
 
         remoteProjectSummariesByID = projectSummaries
-        // Summaries aren't @Published, and a change that touches only their
-        // row badges (unread dot, activity, pin, notify) leaves every
-        // published value equal — so the sidebar kept the old dot until an
-        // unrelated publish (clicking another session). Announce those.
-        if Self.summaryBadgesDiffer(previousSummaries, summaries) {
+        // Summary-only changes can leave the project tree identical, such
+        // as changing the sort mode of a folder with one session.
+        if Self.summaryBadgesDiffer(previousSummaries, summaries)
+            || previousProjectSummaries != projectSummaries {
             objectWillChange.send()
         }
         settleUnreadOverrides(summaries)

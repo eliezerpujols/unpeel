@@ -147,6 +147,8 @@ pub mod session_host;
 pub mod session_input;
 #[cfg(feature = "native-host")]
 pub mod session_ops;
+#[cfg(feature = "controller-core")]
+pub mod session_sort;
 #[cfg(feature = "native-host")]
 pub mod setup;
 #[cfg(feature = "native-host")]

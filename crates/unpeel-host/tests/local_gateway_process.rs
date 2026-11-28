@@ -22,6 +22,7 @@ use unpeel_core::remote_session_backend::{
     RemoteOutputPollOptions, RemoteProjectOrganizationPatch, RemoteSessionBackend,
     RemoteSessionBackendError,
 };
+use unpeel_core::session_sort::SessionSortMode;
 use unpeel_core::ssh_connection::LocalProcessConnection;
 
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
@@ -1088,6 +1089,52 @@ fn app_state_project_addition_surfaces_on_re_bootstrap() {
     assert_eq!(added.path, "/tmp/added");
     // No second gateway process was spawned for the re-bootstrap.
     assert_eq!(fixture.gateway_start_count(), 1);
+
+    backend.disconnect();
+    fixture.cleanup();
+}
+
+#[test]
+fn disk_gateway_round_trips_session_sort_modes_and_the_legacy_boolean() {
+    let fixture = Fixture::new("sortmode");
+    let backend = RemoteSessionBackend::new(Arc::new(fixture.connection()));
+    backend.bootstrap().unwrap();
+    backend.set_session_order("p1", &["s1".into()]).unwrap();
+    let order_path = fixture.host_home.join("session-order.json");
+    let saved_order = std::fs::read(&order_path).unwrap();
+
+    for (mode, legacy_patch, stored, wire, legacy_response) in [
+        (
+            Some(SessionSortMode::Created),
+            Some(false),
+            Some("created"),
+            "created",
+            Some(true),
+        ),
+        (None, Some(true), Some("date"), "updated", Some(true)),
+        (None, Some(false), None, "manual", None),
+    ] {
+        backend
+            .set_project_organization(
+                "p1",
+                &RemoteProjectOrganizationPatch {
+                    session_sort_mode: mode,
+                    date_sorted: legacy_patch,
+                    ..RemoteProjectOrganizationPatch::default()
+                },
+            )
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.host_home.join("app-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["session_sort_modes"]["p1"].as_str(), stored);
+        let result = backend.bootstrap().unwrap();
+        let project = &result.snapshot.projects[0];
+        assert_eq!(project.session_sort_mode.as_deref(), Some(wire));
+        assert_eq!(project.date_sorted, legacy_response);
+        assert_eq!(std::fs::read(&order_path).unwrap(), saved_order);
+    }
 
     backend.disconnect();
     fixture.cleanup();

@@ -1132,14 +1132,13 @@ pub struct AppState {
     /// applies this workspace setting when it projects activity.
     #[serde(default = "default_true")]
     pub menu_attention_detection: bool,
-    /// Per-group session sort override: project/group/worktree id → "date"
-    /// (recently updated first). An absent id means custom — the manual
-    /// drag order.
+    /// Per-folder sort override: "date" (Recently updated) or "created"
+    /// (Recently created). An absent or unknown value uses Manual.
     /// A top-level map (not a `Project` field) so desktop-owned
     /// (UserDefaults-only) projects and cwd buckets can carry the mode even
     /// though they never appear in `projects`.
     #[serde(default)]
-    pub session_sort_modes: HashMap<String, String>,
+    pub session_sort_modes: HashMap<String, serde_json::Value>,
     /// Project folder colors: project id → color id (`sky`, `blue`, …).
     /// The on-disk carrier for every workspace the desktop app's
     /// UserDefaults overlay does not reach — isolated `UNPEEL_HOME`

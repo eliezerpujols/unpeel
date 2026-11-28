@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const HOST_PROTOCOL_MAJOR: u16 = 1;
-pub const HOST_PROTOCOL_MINOR: u16 = 27;
+pub const HOST_PROTOCOL_MINOR: u16 = 28;
 
 pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "approval.answer",
@@ -30,6 +30,7 @@ pub const NATIVE_HOST_CAPABILITIES: &[&str] = &[
     "project.name.set",
     "project.organization.set",
     "project.pin.set",
+    PROJECT_SESSION_SORT_MODE_CAPABILITY,
     "push.register",
     "relay.credentials.recover",
     "session.attention.clear",
@@ -87,6 +88,7 @@ pub const HEADLESS_HOST_CAPABILITIES: &[&str] = &[
     "project.name.set",
     "project.organization.set",
     "project.pin.set",
+    PROJECT_SESSION_SORT_MODE_CAPABILITY,
     "session.attention.clear",
     "session.create",
     "session.input.write",
@@ -132,6 +134,9 @@ pub struct HostProtocolDescriptor {
     pub minor_version: u16,
     pub capabilities: Vec<String>,
 }
+
+/// Set a folder's session sort mode through project organization.
+pub const PROJECT_SESSION_SORT_MODE_CAPABILITY: &str = "project.session_sort_mode.set";
 
 /// The capability a Host advertises only when it can actually install Apps:
 /// there has to be a published App release target for its platform

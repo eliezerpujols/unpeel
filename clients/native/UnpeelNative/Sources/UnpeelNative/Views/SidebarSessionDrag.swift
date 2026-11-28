@@ -1115,7 +1115,8 @@ final class SidebarSessionDragController: ObservableObject {
                 }
                 return false
             }()
-            if !expandedFolderSource, let node = store.findDisplayNode(projectID) {
+            if !expandedFolderSource, store.sessionSortMode(projectID: projectID) == .manual,
+               let node = store.findDisplayNode(projectID) {
                 let pinnedIDs = store.renderedPinnedItems(in: node).map(\.id)
                 // The pinned partition freezes as ONE mixed list (pinned
                 // Sessions and pinned child groups), so either row kind
@@ -1895,7 +1896,9 @@ final class SidebarSessionDragController: ObservableObject {
             case let .reorder(anchorID):
                 pinnedDropDenied = false
         worktreeDropDenied = false
-                if paneDragContext != nil,
+                if store.sessionSortMode(projectID: drag.projectID) != .manual {
+                    clearReorderTarget()
+                } else if paneDragContext != nil,
                    case let .session(projectID, pinned, _) = record.kind,
                    projectID == drag.projectID,
                    pinned == drag.pinned,
@@ -1968,7 +1971,8 @@ final class SidebarSessionDragController: ObservableObject {
                     // explicit gaps;
                     // on drop the pane detaches first, then lands exactly at
                     // this position.
-                    if pinned == drag.pinned, id != drag.sessionID {
+                    if pinned == drag.pinned, id != drag.sessionID,
+                       store.sessionSortMode(projectID: projectID) == .manual {
                         newInsertion = SidebarDragState.SessionInsertion(
                             projectID: projectID,
                             anchorID: id,
@@ -1976,16 +1980,10 @@ final class SidebarSessionDragController: ObservableObject {
                         )
                     }
                 } else if store.canMoveSession(drag.sessionID, toProjectID: projectID) {
-                    // A session row inside ANOTHER group that can accept the
-                    // drag: the group is the move target, and — for the
-                    // matching section — the gap above/below the hovered row
-                    // is a positional insertion point. A date-sorted target
-                    // offers it too: committing there flips the list to
-                    // custom order (same rule as reordering within one), so
-                    // the dropped position sticks. Lists whose group can't
-                    // accept never get here, so they never preview.
+                    // A session can be filed in any accepting group. Only
+                    // Manual offers a positional gap in the destination.
                     newTarget = projectID
-                    if pinned == drag.pinned {
+                    if pinned == drag.pinned, store.sessionSortMode(projectID: projectID) == .manual {
                         newInsertion = SidebarDragState.SessionInsertion(
                             projectID: projectID,
                             anchorID: id,
@@ -2004,7 +2002,8 @@ final class SidebarSessionDragController: ObservableObject {
                         // (a worktree): purely positional — the gap opens
                         // at its slot, exactly like a session row.
                         newReorderAnchor = id
-                    } else if Self.folderHoverIsPositional(
+                    } else if store.sessionSortMode(projectID: drag.projectID) == .manual,
+                              Self.folderHoverIsPositional(
                         y: content.y,
                         rowMinY: record.frame.minY,
                         rowHeight: record.frame.height
@@ -2094,7 +2093,9 @@ final class SidebarSessionDragController: ObservableObject {
         // Anchors must resolve in the frozen map: a drag with no map (an
         // expanded folder as the source) or a row that appeared mid-drag
         // must not commit a reorder that no gap ever showed.
-        if let anchor = newReorderAnchor, anchor != reorderAnchorID,
+        if store.sessionSortMode(projectID: drag.projectID) != .manual {
+            clearReorderTarget()
+        } else if let anchor = newReorderAnchor, anchor != reorderAnchorID,
            let index = dragState.sessionReorderIndexByID[anchor] {
             reorderAnchorID = anchor
             dragState.setSessionReorderTarget(index)
@@ -2499,7 +2500,8 @@ final class SidebarSessionDragController: ObservableObject {
         clearReorderTarget()
         store.cancelSessionReorder(projectID: drag.projectID)
         store.moveSession(drag.sessionID, toProjectID: insertion.projectID)
-        if let node = store.findDisplayNode(insertion.projectID) {
+        if store.sessionSortMode(projectID: insertion.projectID) == .manual,
+           let node = store.findDisplayNode(insertion.projectID) {
             // The mixed pinned partition (pinned Sessions AND pinned child
             // groups): a pinned insert must keep the groups' ranks in the
             // rewritten pinned order.
@@ -2532,12 +2534,6 @@ final class SidebarSessionDragController: ObservableObject {
                     anchorID: insertion.anchorID,
                     below: insertion.below
                 ) {
-                    // A positional drop into a date-sorted list IS choosing
-                    // custom order there — without the flip the dropped
-                    // position would snap back to date order on rescan.
-                    if store.isDateSorted(projectID: insertion.projectID) {
-                        store.setSessionDateSorted(false, for: insertion.projectID)
-                    }
                     store.setSessionOrder(projectID: insertion.projectID, ids: ids)
                 }
             }

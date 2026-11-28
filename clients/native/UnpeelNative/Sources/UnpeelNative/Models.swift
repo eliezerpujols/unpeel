@@ -539,9 +539,15 @@ struct AppStateFile: Decodable {
     /// array (its order included) is the single preset truth for every UI
     /// and the legacy overlay keys are never read again. Absent ⇒ false.
     let nativePresetOverlayMigrated: Bool
-    /// `session_sort_modes` (state.rs) — per-group session sort override,
-    /// project/group/worktree id → "date" (recently updated first). Absent
-    /// id ⇒ custom (the manual drag order). Absent ⇒ empty.
+    private struct StoredSortValue: Decodable {
+        let value: String?
+
+        init(from decoder: Decoder) throws {
+            value = try? decoder.singleValueContainer().decode(String.self)
+        }
+    }
+
+    /// Per-folder sort overrides from `session_sort_modes` in app-state.json.
     let sessionSortModes: [String: String]
     /// `auto_stop_archive_minutes` (state.rs; the key keeps its legacy name)
     /// — auto-stop terminals continuously inactive this long. Shared with
@@ -663,9 +669,9 @@ struct AppStateFile: Decodable {
         nativePresetOverlayMigrated = ((try? container.decodeIfPresent(
             Bool.self, forKey: .nativePresetOverlayMigrated
         )) ?? nil) ?? false
-        sessionSortModes = ((try? container.decodeIfPresent(
-            [String: String].self, forKey: .sessionSortModes
-        )) ?? nil) ?? [:]
+        sessionSortModes = (try? container.decode(
+            [String: StoredSortValue].self, forKey: .sessionSortModes
+        ).compactMapValues(\.value)) ?? [:]
         autoStopMinutes = (try? container.decodeIfPresent(
             Int.self, forKey: .autoStopMinutes
         )) ?? nil

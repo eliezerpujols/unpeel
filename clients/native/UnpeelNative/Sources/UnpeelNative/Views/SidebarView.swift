@@ -17,6 +17,7 @@
 
 import AppKit
 import SwiftUI
+import UnpeelShared
 import UniformTypeIdentifiers
 
 // MARK: - Drag-to-reorder state
@@ -1157,7 +1158,8 @@ extension ProjectRowView: @MainActor Equatable {
             && lhs.localSiteURLs == rhs.localSiteURLs
             && lhs.isPinned == rhs.isPinned
             && lhs.canPin == rhs.canPin
-            && lhs.isDateSorted == rhs.isDateSorted
+            && lhs.sessionSortMode == rhs.sessionSortMode
+            && lhs.canSortSessionsByCreation == rhs.canSortSessionsByCreation
             && lhs.workspaceMoveTargets == rhs.workspaceMoveTargets
             && lhs.projectFolders == rhs.projectFolders
             && lhs.canEditFolders == rhs.canEditFolders
@@ -1438,9 +1440,10 @@ struct ProjectNodeView: View {
             onSetPinned: { pinned in
                 store.setGroupPinned(node.id, pinned: pinned)
             },
-            isDateSorted: store.isDateSorted(projectID: node.id),
-            onSetSessionDateSorted: { dateSorted in
-                store.setSessionDateSorted(dateSorted, for: node.id)
+            sessionSortMode: store.sessionSortMode(projectID: node.id),
+            canSortSessionsByCreation: store.canSortSessionsByCreation(projectID: node.id),
+            onSetSessionSortMode: { mode in
+                store.setSessionSortMode(mode, for: node.id)
             },
             onManagePresets: { store.openSettings(tab: .agents) },
             onManagePlugins: { store.openSettings(tab: .plugins) },
@@ -1699,15 +1702,8 @@ struct ProjectNodeView: View {
         pinnedRow: Bool,
         shortcutHint: Int? = nil
     ) -> some View {
-        // A date-sorted group has no manual order to write, so re-ordering
-        // is off entirely.
-        let isReorderable = !store.isDateSorted(projectID: node.id)
-        // Detached-drag participation is broader than reordering: a LOCAL
-        // session in a date-sorted group must still lift, so it can be
-        // dragged OUT of the group (a committed within-list reorder flips
-        // the group to custom order — see commitSessionReorder). Host-backed
-        // lists commit that flip through `project.organization.set`.
-        //
+        let sortMode = store.sessionSortMode(projectID: node.id)
+        // Rows in date modes can still lift for filing or pane placement.
         // Rename and inline remove-confirm must NOT drop this row from the
         // drag-frame registry. Swapping the wrapper off (and back) remounts
         // the row: the title editor blinks, focus-loss can immediately
@@ -1716,7 +1712,7 @@ struct ProjectNodeView: View {
         // until the project list rebuilds. The controller refuses to arm a
         // press while those modes own the pointer (text selection / confirm
         // buttons).
-        let isDraggable = isReorderable
+        let isDraggable = sortMode == .manual
             || store.canLiftSessionFromDateSortedList(session.id)
         // Native-only within-project drag reorder (the Svelte app has no
         // within-project reorder). Session rows use the manual detached drag
@@ -1754,9 +1750,7 @@ struct ProjectNodeView: View {
             paneItems: store.paneSidebarItems(
                 forRepresentative: session.id
             ),
-            ageTimestampMs: store.isDateSorted(projectID: node.id)
-                ? max(session.createdAt, session.lifecycleAtMs ?? 0)
-                : nil,
+            ageTimestampMs: sortMode.ageTimestampMs(for: session),
             onSelect: {
                 store.selectedSessionID = session.id
             },
@@ -2096,8 +2090,9 @@ struct ProjectRowView: View {
     /// Whether this group's sessions sort by date (recently updated first)
     /// instead of the manual drag order — drives the Sort sessions menu
     /// checkmark.
-    var isDateSorted = false
-    var onSetSessionDateSorted: (Bool) -> Void = { _ in }
+    var sessionSortMode: SessionSortMode = .manual
+    var canSortSessionsByCreation = true
+    var onSetSessionSortMode: (SessionSortMode) -> Void = { _ in }
 
     /// Opens settings on the Presets tab, from the bottom of the
     /// new-session preset menus.
@@ -2426,11 +2421,14 @@ struct ProjectRowView: View {
             if canSortSessions {
                 Menu("Sort sessions") {
                     Picker("Sort sessions", selection: Binding(
-                        get: { isDateSorted },
-                        set: { onSetSessionDateSorted($0) }
+                        get: { sessionSortMode },
+                        set: { onSetSessionSortMode($0) }
                     )) {
-                        Text("Custom order").tag(false)
-                        Text("Recently updated").tag(true)
+                        ForEach(SessionSortMode.allCases, id: \.self) { mode in
+                            Text(mode.title)
+                                .tag(mode)
+                                .disabled(mode == .created && !canSortSessionsByCreation)
+                        }
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()

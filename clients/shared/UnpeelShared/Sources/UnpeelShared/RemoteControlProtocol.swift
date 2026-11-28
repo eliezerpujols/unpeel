@@ -444,6 +444,31 @@ public struct RemoteProjectFolder: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public enum SessionSortMode: String, Codable, CaseIterable, Sendable {
+    case updated
+    case created
+    case manual
+
+    public static let hostCapability = "project.session_sort_mode.set"
+
+    public var title: String {
+        switch self {
+        case .updated: return "Recently updated"
+        case .created: return "Recently created"
+        case .manual: return "Manual"
+        }
+    }
+
+    /// Older Hosts distinguish only Manual and Recently updated.
+    public var legacyDateSorted: Bool? {
+        switch self {
+        case .updated: return true
+        case .manual: return false
+        case .created: return nil
+        }
+    }
+}
+
 public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -466,10 +491,16 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
     public let gitBranch: String?
     public let mcpBlocked: Bool
     public let sortOrder: Int?
-    /// Whether this project's sessions are date-sorted (newest first) instead
-    /// of the manual drag order. Optional for wire compatibility: older Hosts
-    /// omit it, which reads as the default custom order.
+    /// Compatibility flag for both date-based modes.
     public let dateSorted: Bool?
+    public let sessionSortMode: String?
+
+    public var resolvedSessionSortMode: SessionSortMode {
+        if let sessionSortMode {
+            return SessionSortMode(rawValue: sessionSortMode) ?? .manual
+        }
+        return dateSorted == true ? .updated : .manual
+    }
     /// Mixed regular-section ranks from the Host's `session-order.json` —
     /// session ids interleaved with child group/worktree ids. Present only
     /// when that list actually contains a child folder; older Hosts omit it
@@ -496,6 +527,7 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         mcpBlocked: Bool = false,
         sortOrder: Int? = nil,
         dateSorted: Bool? = nil,
+        sessionSortMode: String? = nil,
         sessionOrder: [String]? = nil,
         folders: [RemoteProjectFolder]? = nil,
         agentFolderAccess: Bool? = nil
@@ -514,6 +546,7 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
         self.mcpBlocked = mcpBlocked
         self.sortOrder = sortOrder
         self.dateSorted = dateSorted
+        self.sessionSortMode = sessionSortMode
         self.sessionOrder = sessionOrder
         self.folders = folders
     }
@@ -533,6 +566,7 @@ public struct RemoteProjectSummary: Codable, Equatable, Identifiable, Sendable {
             mcpBlocked: mcpBlocked,
             sortOrder: sortOrder,
             dateSorted: dateSorted,
+            sessionSortMode: sessionSortMode,
             sessionOrder: sessionOrder,
             folders: folders,
             agentFolderAccess: agentFolderAccess
@@ -2156,9 +2190,9 @@ public struct RemoteStreamEvent: Codable, Equatable, Sendable {
 /// Controller → Host: organize one sidebar project/group (capability
 /// `project.organization.set`). Nil fields are left unchanged. `displayName`
 /// renames (groups only today). `colorID` sets the folder tint (`sky`,
-/// `blue`, …); the empty string clears back to the default. `dateSorted`
-/// switches the group's session sort between the manual order (false) and
-/// date-newest-first (true). `sortOrder` moves the project to that index
+/// `blue`, …); the empty string clears back to the default. `sessionSortMode`
+/// selects the folder's sort. The legacy `dateSorted` selects Updated or Manual
+/// when no explicit mode is supplied. `sortOrder` moves the project to that index
 /// among its same-parent siblings in the Host's CURRENT display order (the
 /// order the last bootstrap advertised) and persists through the Host's own
 /// reorder path — the same one a local drag commits. `folderID` (moving a
@@ -2171,6 +2205,7 @@ public struct RemoteProjectOrganizationPatch: Codable, Equatable, Sendable {
     public let displayName: String?
     public let colorID: String?
     public let dateSorted: Bool?
+    public let sessionSortMode: SessionSortMode?
     /// Pin/unpin a plain group above the parent's ordinary mixed rows.
     public let pinned: Bool?
     /// Replace the project's folder list wholesale (`project.folders`);
@@ -2186,6 +2221,7 @@ public struct RemoteProjectOrganizationPatch: Codable, Equatable, Sendable {
         displayName: String? = nil,
         colorID: String? = nil,
         dateSorted: Bool? = nil,
+        sessionSortMode: SessionSortMode? = nil,
         pinned: Bool? = nil,
         folders: [RemoteProjectFolder]? = nil,
         agentFolderAccess: Bool? = nil
@@ -2198,6 +2234,7 @@ public struct RemoteProjectOrganizationPatch: Codable, Equatable, Sendable {
         self.displayName = displayName
         self.colorID = colorID
         self.dateSorted = dateSorted
+        self.sessionSortMode = sessionSortMode
         self.pinned = pinned
     }
 }

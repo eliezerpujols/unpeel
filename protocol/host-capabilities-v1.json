@@ -2,13 +2,20 @@
   "schemaVersion": 1,
   "protocol": {
     "major": 1,
-    "minor": 27,
+    "minor": 28,
     "compatibility": {
       "major": "must-match",
       "minor": "additive",
       "unknownCapabilities": "ignore"
     },
     "history": [
+      {
+        "minor": 28,
+        "summary": "Per-folder session sorting. Project rows and project.organization.set accept sessionSortMode (manual, updated, created). The dateSorted flag remains compatible with older Controllers.",
+        "capabilities": [
+          "project.session_sort_mode.set"
+        ]
+      },
       {
         "minor": 27,
         "summary": "Clear a Session's current attention through the Host, with pending MCP approvals requiring an explicit answer.",
@@ -242,6 +249,13 @@
       "id": "project.pin.set",
       "method": "POST",
       "path": "/mobile/project-organization#pinned",
+      "native": true,
+      "tui": true
+    },
+    {
+      "id": "project.session_sort_mode.set",
+      "method": "POST",
+      "path": "/mobile/project-organization#sessionSortMode",
       "native": true,
       "tui": true
     },

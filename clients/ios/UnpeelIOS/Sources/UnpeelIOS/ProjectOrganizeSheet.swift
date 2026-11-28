@@ -13,7 +13,7 @@ struct ProjectOrganizeSheet: View {
 
     @State private var name: String
     @State private var colorID: String?
-    @State private var dateSorted: Bool
+    @State private var sortMode: SessionSortMode
     @State private var saving = false
     @State private var saveFailed = false
 
@@ -28,7 +28,7 @@ struct ProjectOrganizeSheet: View {
         self.project = project
         _name = State(initialValue: project.name)
         _colorID = State(initialValue: project.colorID)
-        _dateSorted = State(initialValue: project.dateSorted ?? false)
+        _sortMode = State(initialValue: project.resolvedSessionSortMode)
     }
 
     private var canEdit: Bool {
@@ -62,8 +62,8 @@ struct ProjectOrganizeSheet: View {
         return colorID == project.colorID ? nil : (colorID ?? "")
     }
 
-    private var dateSortedPatch: Bool? {
-        dateSorted == (project.dateSorted ?? false) ? nil : dateSorted
+    private var sortModePatch: SessionSortMode? {
+        sortMode == project.resolvedSessionSortMode ? nil : sortMode
     }
 
     var body: some View {
@@ -84,9 +84,12 @@ struct ProjectOrganizeSheet: View {
 
                 if canEdit {
                     Section("Sort sessions") {
-                        Picker("Sort sessions", selection: $dateSorted) {
-                            Text("Custom order").tag(false)
-                            Text("Date (newest first)").tag(true)
+                        Picker("Sort sessions", selection: $sortMode) {
+                            ForEach(SessionSortMode.allCases, id: \.self) { mode in
+                                Text(mode.title)
+                                    .tag(mode)
+                                    .disabled(mode == .created && !store.supportsSessionSortModes)
+                            }
                         }
                         .pickerStyle(.inline)
                         .labelsHidden()
@@ -169,7 +172,10 @@ struct ProjectOrganizeSheet: View {
 
     private func save() {
         guard !saving else { return }
-        guard namePatch != nil || colorPatch != nil || dateSortedPatch != nil else {
+        let supportsModes = store.supportsSessionSortModes
+        let mode = supportsModes ? sortModePatch : nil
+        let dateSorted = supportsModes ? nil : sortModePatch?.legacyDateSorted
+        guard namePatch != nil || colorPatch != nil || mode != nil || dateSorted != nil else {
             dismiss()
             return
         }
@@ -181,7 +187,8 @@ struct ProjectOrganizeSheet: View {
                     projectID: project.id,
                     displayName: namePatch,
                     colorID: colorPatch,
-                    dateSorted: dateSortedPatch
+                    dateSorted: dateSorted,
+                    sessionSortMode: mode
                 )
             )
             saving = false

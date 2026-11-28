@@ -14,10 +14,14 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::controller_protocol::{HostProtocolDescriptor, HOST_PROTOCOL_MAJOR};
+use crate::controller_protocol::{
+    HostProtocolDescriptor, HOST_PROTOCOL_MAJOR, PROJECT_SESSION_SORT_MODE_CAPABILITY,
+};
 use crate::host_connection::{
     ConnectionGeneration, HostCall, HostConnection, HostConnectionError, RequestSemantics,
 };
+
+use crate::session_sort::SessionSortMode;
 
 pub const MOBILE_PROTOCOL_VERSION: u16 = 1;
 pub const REMOTE_OUTPUT_DEFAULT_LIMIT: usize = 200 * 1024;
@@ -212,10 +216,11 @@ pub struct RemoteProjectSummary {
     pub mcp_blocked: bool,
     #[serde(default)]
     pub sort_order: Option<i64>,
-    /// Host-owned sidebar sort mode. Optional for protocol-minor/backward
-    /// compatibility; absent means the manual/custom order.
+    /// Compatibility flag for both date-based modes.
     #[serde(default)]
     pub date_sorted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_sort_mode: Option<String>,
     /// `project.folders` (minor 25): this record's own folder list, present
     /// only when it has at least one entry. A group resolves its folders
     /// through its parent.
@@ -1067,6 +1072,7 @@ pub struct RemoteProjectOrganizationPatch {
     pub display_name: Option<String>,
     pub color_id: Option<String>,
     pub date_sorted: Option<bool>,
+    pub session_sort_mode: Option<SessionSortMode>,
     pub pinned: Option<bool>,
     /// `project.folders`: replace the folder list wholesale (first = primary,
     /// which becomes the project's path). `Some(vec![])` clears it.
@@ -1088,6 +1094,7 @@ impl RemoteProjectOrganizationPatch {
             && self.display_name.is_none()
             && self.color_id.is_none()
             && self.date_sorted.is_none()
+            && self.session_sort_mode.is_none()
             && self.pinned.is_none()
             && self.folders.is_none()
             && self.agent_folder_access.is_none()
@@ -1455,6 +1462,8 @@ struct ProjectOrganizationWire<'a> {
     color_id: Option<&'a str>,
     #[serde(rename = "dateSorted", skip_serializing_if = "Option::is_none")]
     date_sorted: Option<bool>,
+    #[serde(rename = "sessionSortMode", skip_serializing_if = "Option::is_none")]
+    session_sort_mode: Option<SessionSortMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pinned: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2396,12 +2405,15 @@ impl RemoteSessionBackend {
                 display_name: patch.display_name.as_deref(),
                 color_id: patch.color_id.as_deref(),
                 date_sorted: patch.date_sorted,
+                session_sort_mode: patch.session_sort_mode,
                 pinned: patch.pinned,
                 folders: patch.folders.as_deref(),
                 agent_folder_access: patch.agent_folder_access,
             },
         )?;
-        let capability = if patch.folders.is_some() || patch.agent_folder_access.is_some() {
+        let capability = if patch.session_sort_mode.is_some() {
+            PROJECT_SESSION_SORT_MODE_CAPABILITY
+        } else if patch.folders.is_some() || patch.agent_folder_access.is_some() {
             PROJECT_FOLDERS_CAPABILITY
         } else {
             PROJECT_ORGANIZATION_CAPABILITY
@@ -7147,6 +7159,7 @@ mod tests {
                         display_name: Some("Backlog".to_owned()),
                         color_id: Some("sky".to_owned()),
                         date_sorted: Some(true),
+                        session_sort_mode: None,
                         pinned: Some(true),
                         sort_order: None,
                         folders: None,

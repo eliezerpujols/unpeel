@@ -1933,28 +1933,11 @@ fn rename_project_in(
     Ok(())
 }
 
-/// Whether this group's sidebar sessions use the shared Recent order
-/// (working first, then latest lifecycle timestamp; no read receipt)
-/// instead of the manual drag order. The mode lives in app-state.json
-/// (`session_sort_modes`, group id → "date"; absent = custom) so every
-/// frontend reads one truth.
-pub fn session_date_sorted(project_id: &str) -> bool {
-    crate::app_state::load()
-        .ok()
-        .and_then(|state| {
-            state
-                .get("session_sort_modes")?
-                .get(project_id)?
-                .as_str()
-                .map(|mode| mode == "date")
-        })
-        .unwrap_or(false)
-}
-
-/// Flip a group between date sort and custom order. Keeps the manual order
-/// in session-order.json untouched, so switching back restores the old
-/// arrangement. Announces via the app-state choke point.
-pub fn set_session_date_sorted(project_id: &str, date_sorted: bool) -> Result<(), String> {
+/// Persist a folder's mode without touching its saved manual session order.
+pub fn set_session_sort_mode(
+    project_id: &str,
+    mode: crate::session_sort::SessionSortMode,
+) -> Result<(), String> {
     crate::app_state::edit(|object| {
         let modes = object
             .entry("session_sort_modes")
@@ -1962,8 +1945,8 @@ pub fn set_session_date_sorted(project_id: &str, date_sorted: bool) -> Result<()
         let map = modes
             .as_object_mut()
             .ok_or("session_sort_modes is not an object")?;
-        if date_sorted {
-            map.insert(project_id.to_string(), serde_json::json!("date"));
+        if let Some(value) = mode.stored_value() {
+            map.insert(project_id.to_string(), serde_json::json!(value));
         } else {
             map.remove(project_id);
         }

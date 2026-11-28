@@ -703,6 +703,11 @@ public final class RemotePreviewStore {
             && hostProtocol.supports("project.organization.set")
     }
 
+    var supportsSessionSortModes: Bool {
+        supportsProjectOrganization
+            && snapshot.hostProtocol?.supports(SessionSortMode.hostCapability) == true
+    }
+
     /// Open the folder organize sheet for a sidebar project/group row.
     public func presentProjectOrganize(for project: RemoteProjectSummary) {
         organizeTargetProjectID = project.id
@@ -1106,7 +1111,9 @@ public final class RemotePreviewStore {
     /// snapshot is reordered immediately so the dropped arrangement holds
     /// while the Host write and next bootstrap are in flight.
     public func reorderSessions(projectID: String, orderedIDs: [String]) {
-        guard !orderedIDs.isEmpty else { return }
+        guard !orderedIDs.isEmpty,
+              (projectsByID[projectID]?.resolvedSessionSortMode ?? .manual) == .manual
+        else { return }
         applyLocalSessionOrder(projectID: projectID, orderedIDs: orderedIDs)
         Task {
             do {

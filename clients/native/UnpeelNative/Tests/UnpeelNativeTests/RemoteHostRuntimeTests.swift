@@ -85,6 +85,44 @@ final class RemoteHostRuntimeTests: XCTestCase {
         ))
     }
 
+    func testSessionSortModeRoutesToScopedLocalPairedAndSSHHosts() async throws {
+        for scope in [
+            SelectedHostScope.localWorkspace(home: "/tmp/sort-mode-test", name: "Host"),
+            .remote(hostID: "paired"),
+            .remote(hostID: "ssh"),
+        ] {
+            let backend = ControlledRemoteBackend()
+            let runtime = makeRuntime(backend: backend)
+            switch scope {
+            case let .localWorkspace(home, name):
+                runtime.connectLocalWorkspace(home: home, name: name, expectedHostID: "host")
+            case .remote(hostID: "paired"):
+                runtime.connectDirect(
+                    endpoint: URL(string: "https://127.0.0.1:1234")!,
+                    authToken: "test-token",
+                    expectedHostID: "host"
+                )
+            default:
+                runtime.connectSSH(target: "ssh://host", expectedHostID: "host")
+            }
+
+            await waitUntil { await backend.bootstrapCount == 1 }
+            await backend.resolveBootstrap(.success(makeSnapshot(capabilities: [
+                "host.bootstrap", "session.output.read", "project.organization.set",
+                SessionSortMode.hostCapability,
+            ])))
+            await waitUntil { runtime.connectionState == .connected(name: "Host") }
+            for mode in SessionSortMode.allCases {
+                try await runtime.setProjectSessionSortMode(projectID: "group", mode: mode)
+            }
+            let patches = await backend.projectOrganizationPatches
+            XCTAssertEqual(patches, SessionSortMode.allCases.map {
+                RemoteProjectOrganizationPatch(projectID: "group", sessionSortMode: $0)
+            })
+            runtime.disconnect()
+        }
+    }
+
     /// The Link/Tailscale hint for a paired Mac that Direct cannot reach:
     /// silent while Link carries the connection, otherwise it names Link and
     /// Tailscale, and a Direct-only scope says how to allow Link.
@@ -725,7 +763,7 @@ final class RemoteHostRuntimeTests: XCTestCase {
         try await runtime.setProjectSortOrder(projectID: "project", sortOrder: 3)
         try await runtime.renameProjectGroup(projectID: "group", displayName: "Ideas")
         try await runtime.setProjectFolderColor(projectID: "project", colorID: "amber")
-        try await runtime.setProjectDateSorted(projectID: "group", dateSorted: true)
+        try await runtime.setProjectSessionSortMode(projectID: "group", mode: .updated)
         try await runtime.setProjectPinned(projectID: "group", pinned: true)
         try await runtime.restartSession("session")
         try? await Task.sleep(nanoseconds: 20_000_000)

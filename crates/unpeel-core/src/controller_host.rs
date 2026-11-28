@@ -21,6 +21,7 @@ use crate::controller_api::{
 use crate::controller_protocol::HostProtocolDescriptor;
 use crate::relay_wire::TunnelRequest;
 use crate::session_host::{self, HostedSessionManifest, HostedSessionState, SessionHostCommand};
+use crate::session_sort::SessionSortMode;
 
 const OUTPUT_WAIT_MAX_MS: u64 = 25_000;
 const OUTPUT_WAIT_POLL_MS: u64 = 20;
@@ -247,13 +248,7 @@ impl DiskCatalog {
             .and_then(Value::as_bool)
             .unwrap_or(true);
         let inactive_preview_limit = wire_sidebar_inactive_window(&state);
-        let date_sorted_projects: HashSet<String> = state
-            .get("session_sort_modes")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|modes| modes.iter())
-            .filter_map(|(id, mode)| (mode.as_str() == Some("date")).then_some(id.clone()))
-            .collect();
+        let session_sort_modes = state.get("session_sort_modes");
         // Folder colors ride the same disk carrier as the sort mode. Without
         // them a Controller scoped to a workspace it does not run renders
         // every project neutral: its own defaults are the wrong home's, and
@@ -328,9 +323,12 @@ impl DiskCatalog {
                 if project.is_folder && project.parent_id.is_some() {
                     object.insert("isGroup".into(), true.into());
                 }
-                if date_sorted_projects.contains(&project.id) {
-                    object.insert("dateSorted".into(), true.into());
-                }
+                SessionSortMode::from_stored(
+                    session_sort_modes
+                        .and_then(|modes| modes.get(&project.id))
+                        .and_then(Value::as_str),
+                )
+                .write_summary(object);
                 if !project.folders.is_empty() {
                     object.insert("folders".into(), json!(project.folders));
                 }
@@ -795,6 +793,18 @@ pub fn project_organization_response(
         Some(Value::Bool(value)) => Some(*value),
         Some(_) => return (400, error("dateSorted must be a boolean")),
     };
+    let sort_mode = match body.get("sessionSortMode") {
+        None | Some(Value::Null) => date_sorted.map(SessionSortMode::from_legacy),
+        Some(value) => match serde_json::from_value::<SessionSortMode>(value.clone()) {
+            Ok(mode) => Some(mode),
+            Err(_) => {
+                return (
+                    400,
+                    error("sessionSortMode must be manual, updated, or created"),
+                )
+            }
+        },
+    };
     let pinned = match body.get("pinned") {
         None | Some(Value::Null) => None,
         Some(Value::Bool(value)) => Some(*value),
@@ -885,7 +895,7 @@ pub fn project_organization_response(
     }
     if display_name.is_none()
         && color_id.is_none()
-        && date_sorted.is_none()
+        && sort_mode.is_none()
         && sort_order.is_none()
         && pinned.is_none()
         && folders.is_none()
@@ -937,8 +947,8 @@ pub fn project_organization_response(
             );
         }
     }
-    if let Some(date_sorted) = date_sorted {
-        if let Err(e) = crate::session_ops::set_session_date_sorted(project_id, date_sorted) {
+    if let Some(sort_mode) = sort_mode {
+        if let Err(e) = crate::session_ops::set_session_sort_mode(project_id, sort_mode) {
             return (
                 500,
                 error(&format!(
@@ -2284,8 +2294,8 @@ fn session_summary_with_menu_attention(
 
 /// Put each Host project's wire sessions in the order its sidebar advertises.
 /// Pins remain their explicit first section. Live rows come next (Recent
-/// lifecycle order in date mode, manual order in custom mode), then stopped
-/// rows, newest first; the inactive preview later caps those. Grouping
+/// order based on the folder mode), then stopped rows. The inactive window
+/// limits which stopped rows appear based on lifecycle recency. Grouping
 /// the flat wire array by project is harmless to clients and makes its
 /// filtered order unambiguous.
 fn sort_wire_sessions(
@@ -2298,15 +2308,21 @@ fn sort_wire_sessions(
         .enumerate()
         .filter_map(|(rank, project)| Some((project.get("id")?.as_str()?, rank)))
         .collect();
-    let date_sorted: HashSet<&str> = projects
+    let sort_modes: HashMap<&str, SessionSortMode> = projects
         .iter()
-        .filter(|project| {
-            project
-                .get("dateSorted")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
+        .filter_map(|project| {
+            let id = project.get("id")?.as_str()?;
+            let mode = match project.get("sessionSortMode") {
+                Some(value) => serde_json::from_value(value.clone()).unwrap_or_default(),
+                None => SessionSortMode::from_legacy(
+                    project
+                        .get("dateSorted")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
+            };
+            Some((id, mode))
         })
-        .filter_map(|project| project.get("id")?.as_str())
         .collect();
     fn string<'a>(value: &'a Value, field: &str) -> &'a str {
         value.get(field).and_then(Value::as_str).unwrap_or_default()
@@ -2357,24 +2373,22 @@ fn sort_wire_sessions(
                 if left_running != right_running {
                     return right_running.cmp(&left_running);
                 }
-                if !left_running {
-                    return number(right, "updatedAtUnixMs")
-                        .cmp(&number(left, "updatedAtUnixMs"))
-                        .then_with(|| string(left, "id").cmp(string(right, "id")));
-                }
-                if !date_sorted.contains(left_project) {
-                    return manual_key(left)
-                        .cmp(&manual_key(right))
-                        .then_with(|| string(left, "id").cmp(string(right, "id")));
-                }
-                let working =
-                    |value: &Value| matches!(string(value, "activity"), "starting" | "working");
-                working(right)
-                    .cmp(&working(left))
-                    .then_with(|| {
-                        number(right, "updatedAtUnixMs").cmp(&number(left, "updatedAtUnixMs"))
-                    })
-                    .then_with(|| string(left, "id").cmp(string(right, "id")))
+                let mode = sort_modes.get(left_project).copied().unwrap_or_default();
+                let date_key = |value: &Value| {
+                    mode.date_key(
+                        number(value, "createdAtUnixMs"),
+                        number(value, "updatedAtUnixMs"),
+                        left_running && matches!(string(value, "activity"), "starting" | "working"),
+                    )
+                };
+                let order = if mode == SessionSortMode::Manual
+                    && (left_running || order.is_some_and(|ids| !ids.is_empty()))
+                {
+                    manual_key(left).cmp(&manual_key(right))
+                } else {
+                    date_key(left).cmp(&date_key(right))
+                };
+                order.then_with(|| string(left, "id").cmp(string(right, "id")))
             })
     });
 }
@@ -2393,28 +2407,36 @@ fn wire_sidebar_inactive_window(state: &Value) -> usize {
 /// Keep every live row and pin, then at most the configured number of
 /// stopped previews per project. Unread rows stay visible past that window.
 fn retain_wire_sidebar_inactive_window(sessions: &mut Vec<Value>, inactive_window: usize) {
-    let mut inactive_by_project: HashMap<String, usize> = HashMap::new();
-    sessions.retain(|session| {
-        let pinned = session
-            .get("pinned")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let running = session.get("status").and_then(Value::as_str) == Some("running");
-        let unread = session
-            .get("unread")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if running || pinned {
-            return true;
+    // Window membership follows lifecycle recency in every sort mode.
+    let stamp = |row: &Value| {
+        let number = |key| row.get(key).and_then(Value::as_u64).unwrap_or(0);
+        number("createdAtUnixMs").max(number("updatedAtUnixMs"))
+    };
+    let mut stopped: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| session["status"] != "running" && session["pinned"] != true)
+        .collect();
+    stopped.sort_by(|(_, left), (_, right)| {
+        stamp(right)
+            .cmp(&stamp(left))
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
+    let mut inactive_by_project = HashMap::new();
+    let mut hidden = HashSet::new();
+    for (index, session) in stopped {
+        let count = inactive_by_project
+            .entry(session["projectID"].as_str())
+            .or_insert(0);
+        if *count >= inactive_window && session["unread"] != true {
+            hidden.insert(index);
         }
-        let project = session
-            .get("projectID")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let count = inactive_by_project.entry(project).or_default();
-        let keep = *count < inactive_window || unread;
         *count += 1;
+    }
+    let mut index = 0;
+    sessions.retain(|_| {
+        let keep = !hidden.contains(&index);
+        index += 1;
         keep
     });
 }
@@ -3133,6 +3155,30 @@ mod tests {
                 "custom-working-old",
                 "custom-new",
             ]
+        );
+    }
+
+    #[test]
+    fn wire_created_sort_uses_creation_for_both_sections_and_keeps_recent_stops() {
+        let mut sessions = vec![
+            json!({"id":"busy-old","projectID":"p","status":"running","activity":"working","createdAtUnixMs":1,"updatedAtUnixMs":90}),
+            json!({"id":"idle-new","projectID":"p","status":"running","createdAtUnixMs":10,"updatedAtUnixMs":11}),
+            json!({"id":"dropped","projectID":"p","status":"exited","createdAtUnixMs":40,"updatedAtUnixMs":40}),
+            json!({"id":"old-stopped","projectID":"p","status":"exited","createdAtUnixMs":2,"updatedAtUnixMs":85}),
+            json!({"id":"new-stopped","projectID":"p","status":"exited","createdAtUnixMs":35,"updatedAtUnixMs":50}),
+        ];
+        sort_wire_sessions(
+            &mut sessions,
+            &[json!({"id":"p","sessionSortMode":"created","dateSorted":true})],
+            &HashMap::from([("p".into(), vec!["busy-old".into(), "idle-new".into()])]),
+        );
+        retain_wire_sidebar_inactive_window(&mut sessions, 2);
+        assert_eq!(
+            sessions
+                .iter()
+                .filter_map(|row| row["id"].as_str())
+                .collect::<Vec<_>>(),
+            ["idle-new", "busy-old", "new-stopped", "old-stopped"]
         );
     }
 

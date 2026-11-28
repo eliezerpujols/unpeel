@@ -1201,7 +1201,7 @@ struct SessionSidebarView: View {
             sessions: displayedRegularSessions(for: project),
             folders: regularChildFolders(for: project),
             order: project.sessionOrder,
-            dateSorted: project.dateSorted == true
+            dateSorted: project.resolvedSessionSortMode != .manual
         )
     }
 

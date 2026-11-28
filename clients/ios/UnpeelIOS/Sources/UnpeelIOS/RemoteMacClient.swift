@@ -376,7 +376,7 @@ public struct RemoteMacClient: Sendable {
 
     /// Organize a sidebar project/group on the Host (capability
     /// `project.organization.set`): rename (groups only), folder color
-    /// ("" clears), and the custom/date session sort.
+    /// ("" clears), and the session sort mode.
     public func updateProjectOrganization(_ patch: RemoteProjectOrganizationPatch) async throws {
         _ = try await perform(
             path: "project-organization",

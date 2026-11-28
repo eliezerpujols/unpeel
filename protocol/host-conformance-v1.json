@@ -279,6 +279,45 @@
       }
     },
     {
+      "id": "project-organization.session-sort-mode-created",
+      "method": "POST",
+      "path": "/mobile/project-organization",
+      "body": {
+        "projectID": "conformance-group",
+        "sessionSortMode": "created"
+      },
+      "expected": {
+        "native": 200,
+        "tui": 200
+      }
+    },
+    {
+      "id": "project-organization.session-sort-mode-invalid",
+      "method": "POST",
+      "path": "/mobile/project-organization",
+      "body": {
+        "projectID": "conformance-group",
+        "sessionSortMode": "date"
+      },
+      "expected": {
+        "native": 400,
+        "tui": 400
+      }
+    },
+    {
+      "id": "project-organization.legacy-date-sorted",
+      "method": "POST",
+      "path": "/mobile/project-organization",
+      "body": {
+        "projectID": "conformance-group",
+        "dateSorted": true
+      },
+      "expected": {
+        "native": 200,
+        "tui": 200
+      }
+    },
+    {
       "id": "project-organization.folders-relative-path",
       "method": "POST",
       "path": "/mobile/project-organization",

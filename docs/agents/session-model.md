@@ -115,21 +115,22 @@ termination output is drained first. Never signal an unverified process group.
   row movement in memory while dragging, then take the shared lock and persist/broadcast the
   final order once on drop. Cancelling a drag restores the last durable order
   without writing.
-- Each group (project, plain group, worktree, cwd bucket) can instead sort its
-  sessions by shared lifecycle recency ("Recently updated" — pinned Sessions
-  remain in their separate top section; live rows use the Recent rank, then
-  the capped stopped preview forms a bottom section; no read-receipt
-  priority).
-  The lifecycle timestamp is `created_at` as the floor, command-aware real
-  activity (hook seed, otherwise parsed-screen change / legacy output), and
-  final manifest `updated_at` only after exit; a running heartbeat never
-  counts. The row renders that same timestamp, so the age shown beside it
-  always explains its position. The `"date"` mode value is kept for
-  compatibility: `session_sort_modes` in `app-state.json`
-  maps group id → `"date"` (absent = custom, the manual order). Both frontends
-  offer it from the folder context menu ("Sort sessions"); while date sort is
-  active drag re-ordering is disabled, and the stored manual order is kept so
-  switching back restores the old arrangement.
+- The **Sort sessions** folder menu offers three modes for projects, groups,
+  and worktrees that support session sorting.
+
+  - **Recently updated** uses the Recent rank for live rows (working first,
+    then latest lifecycle activity). Creation initializes the lifecycle
+    timestamp. Command-aware activity and the final update on exit advance it.
+    The age label shows that lifecycle timestamp.
+  - **Recently created** uses newest creation time first within the live
+    and stopped sections. The age label shows the creation time.
+  - **Manual** restores the saved drag order from `session-order.json`.
+
+  Pins retain their own section, and live rows stay above stopped rows.
+  Both date modes disable drag reordering. The stopped-session keep limit
+  still follows lifecycle recency in all modes.
+  In `app-state.json`, `session_sort_modes` maps folder IDs to `"date"`
+  (Recently updated) or `"created"`. Missing and unknown values use Manual.
 - Lifecycle operations are serialized across processes by a per-session file
   lock. **Resume Agent** is offered only after a managed runtime has exited or
   crashed back to its still-live interactive shell. The Host freshly verifies
